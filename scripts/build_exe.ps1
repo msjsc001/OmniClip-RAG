@@ -8,6 +8,8 @@ $python = Join-Path $root ".venv\Scripts\python.exe"
 $packages = Join-Path $root ".packages"
 $vendor = Join-Path $root ".vendor"
 $target = Join-Path $root "launcher.py"
+$resources = Join-Path $root "resources"
+$icon = Join-Path $resources "app_icon.ico"
 
 if (-not (Test-Path $python)) {
     throw "找不到虚拟环境 Python：$python"
@@ -26,6 +28,8 @@ $env:OMNICLIP_ROOT = $root
 $env:OMNICLIP_PACKAGES = $packages
 $env:OMNICLIP_VENDOR = $vendor
 $env:OMNICLIP_TARGET = $target
+$env:OMNICLIP_RESOURCES = $resources
+$env:OMNICLIP_ICON = $icon
 $env:OMNICLIP_BUILD_MODE = $Mode
 $code = @"
 import os
@@ -56,6 +60,8 @@ root = os.environ['OMNICLIP_ROOT']
 packages = os.environ.get('OMNICLIP_PACKAGES', '')
 vendor = os.environ.get('OMNICLIP_VENDOR', '')
 target = os.environ['OMNICLIP_TARGET']
+resources = os.environ.get('OMNICLIP_RESOURCES', '')
+icon = os.environ.get('OMNICLIP_ICON', '')
 mode = os.environ.get('OMNICLIP_BUILD_MODE', 'onedir')
 
 for path in [packages, vendor, root]:
@@ -80,6 +86,10 @@ args = [
 ]
 args.append('--onefile' if mode == 'onefile' else '--onedir')
 args.append('--windowed')
+if resources and Path(resources).exists():
+    args.extend(['--add-data', f'{resources};resources'])
+if icon and Path(icon).exists():
+    args.extend(['--icon', icon])
 for path in [root, packages, vendor]:
     if path and Path(path).exists():
         args.extend(['--paths', path])
@@ -91,4 +101,3 @@ if spec_path.exists():
 "@
 
 $code | & $python -
-

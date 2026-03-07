@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
+
+from .ui_i18n import detect_system_language, normalize_language
 
 
 APP_NAME = "OmniClip RAG"
@@ -43,10 +45,12 @@ class AppConfig:
     vector_runtime: str = "torch"
     vector_batch_size: int = 16
     vector_local_files_only: bool = False
+    ui_language: str = field(default_factory=detect_system_language)
 
     @property
     def vault_dir(self) -> Path:
         return Path(self.vault_path).expanduser().resolve()
+
 
 
 def default_data_root() -> Path:
@@ -54,6 +58,7 @@ def default_data_root() -> Path:
     if appdata:
         return Path(appdata) / APP_NAME
     return Path.home() / "AppData" / "Roaming" / APP_NAME
+
 
 
 def ensure_data_paths(custom_root: str | None = None) -> DataPaths:
@@ -83,6 +88,7 @@ def ensure_data_paths(custom_root: str | None = None) -> DataPaths:
     raise RuntimeError("无法创建 OmniClip 数据目录。")
 
 
+
 def _create_data_paths(root: Path) -> DataPaths:
     state_dir = root / "state"
     logs_dir = root / "logs"
@@ -101,15 +107,22 @@ def _create_data_paths(root: Path) -> DataPaths:
     )
 
 
+
 def save_config(config: AppConfig, paths: DataPaths) -> None:
+    payload = asdict(config)
+    payload["ui_language"] = normalize_language(payload.get("ui_language"))
     paths.config_file.write_text(
-        json.dumps(asdict(config), ensure_ascii=False, indent=2),
+        json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
 
 
 def load_config(paths: DataPaths) -> AppConfig | None:
     if not paths.config_file.exists():
         return None
     payload = json.loads(paths.config_file.read_text(encoding="utf-8"))
-    return AppConfig(**payload)
+    allowed = {item.name for item in fields(AppConfig)}
+    cleaned = {key: value for key, value in payload.items() if key in allowed}
+    cleaned["ui_language"] = normalize_language(cleaned.get("ui_language"))
+    return AppConfig(**cleaned)

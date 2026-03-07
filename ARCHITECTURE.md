@@ -159,3 +159,40 @@ It does **not** yet try to ship everything at once.
 2. add tray mode and global hotkeys,
 3. add richer settings panels,
 4. reduce model and package footprint further.
+
+### 8. Desktop UX must be newcomer-first
+
+The desktop UI is no longer allowed to assume the user already understands RAG terminology or the product workflow.
+
+Current UX rules:
+
+- the first screen must explain the first three actions in plain language,
+- recommended defaults must already be filled in,
+- advanced options must stay hidden until explicitly expanded,
+- missing prerequisites such as local models must surface as clear prompts instead of silent stalls,
+- hover tooltips must explain settings and buttons without forcing the user to open external docs.
+
+Why: a local-first desktop tool fails its job if the user has to reverse-engineer the interface before they can trust it.
+
+### 9. UI text and behavior hints live outside the window layout
+
+Current split:
+
+- `ui_i18n.py`: bilingual UI strings and tooltip text,
+- `ui_tooltip.py`: hover help behavior,
+- `gui.py`: layout, state, background-task orchestration.
+
+Why: language switching, wording upgrades, and future docs-quality polishing should not require invasive changes across the GUI layout code.
+
+### 10. Brand assets are generated locally and packaged explicitly
+
+Current asset policy:
+
+- app icons are generated from a deterministic local script,
+- source runs load icon resources from `resources/`,
+- EXE builds bundle the same resources and embed the `.ico` into the executable.
+
+Why: the desktop app, taskbar icon, and packaged EXE must present a consistent identity without adding heavy image-tool dependencies.
+
+
+
