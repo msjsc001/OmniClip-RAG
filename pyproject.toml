@@ -1,0 +1,14 @@
+[project]
+name = "omniclip-rag"
+version = "0.1.0"
+description = "Local-first desktop RAG for Markdown and Logseq vaults."
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+  { name = "msjsc001" }
+]
+keywords = ["rag", "markdown", "logseq", "sqlite", "lancedb", "desktop"]
+
+[project.urls]
+Repository = "https://github.com/msjsc001/OmniClip-RAG"
+Documentation = "https://github.com/msjsc001/OmniClip-RAG"

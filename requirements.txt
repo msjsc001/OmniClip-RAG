@@ -1,0 +1,7 @@
+watchdog==6.0.0
+lancedb>=0.23.0,<0.30.0
+onnxruntime>=1.22.0,<1.25.0
+sentence-transformers>=5.1.0,<6.0.0
+transformers>=4.41.0,<5.0.0
+huggingface-hub>=0.20.0,<1.0.0
+pyinstaller>=6.16.0,<7.0.0

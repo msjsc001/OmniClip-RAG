@@ -1,0 +1,37 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local package mirrors / caches
+.packages/
+.vendor/
+.tmp/
+
+# Build outputs
+build/
+dist/
+*.spec
+
+# Local app data / databases / logs
+local_appdata/
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.lance/
+
+# Local samples and personal notes
+logseq笔记样本/
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
