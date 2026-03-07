@@ -5,6 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#why)
 [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md)
+[![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 **OmniClip RAG** is a local-first desktop RAG for Markdown and Logseq vaults.
 
@@ -195,6 +196,11 @@ The current tree has already been validated with:
 - [Architecture Notes](ARCHITECTURE.md)
 - [Changelog](CHANGELOG.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
+- [Release Notes v0.1.0](RELEASE_NOTES_v0.1.0.md)
+
+## License
+
+This project is released under the [MIT License](LICENSE).
 
 ## Project Positioning
 

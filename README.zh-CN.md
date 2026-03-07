@@ -85,3 +85,8 @@ CLI 仍然保留，用于调试和自动化：
 - [架构说明](ARCHITECTURE.md)
 - [更新日志](CHANGELOG.md)
 - [空间预检说明](STORAGE_PRECHECK.md)
+- [首发文案](RELEASE_NOTES_v0.1.0.md)
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。
