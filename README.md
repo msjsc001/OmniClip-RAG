@@ -212,3 +212,22 @@ It aims to be a **clean local knowledge interface layer**:
 - controllable exposure,
 - fast retrieval,
 - and compatibility with whatever AI tools you choose next.
+
+## Disclaimer
+
+OmniClip RAG is provided on an "as is" and "as available" basis, without warranties of any kind, whether express or implied, including but not limited to merchantability, fitness for a particular purpose, non-infringement, uninterrupted operation, or error-free behavior.
+
+You are solely responsible for:
+
+- verifying all retrieval results, exported context packs, and AI-generated outputs before relying on them;
+- maintaining backups of your notes, databases, models, and exported materials;
+- reviewing the legality, sensitivity, and sharing scope of any data you index or paste into third-party AI tools;
+- complying with the licenses, terms, and usage restrictions of third-party models, libraries, datasets, and services used with this project.
+
+OmniClip RAG may return incomplete, outdated, misleading, or incorrect results. Any downstream AI may also hallucinate, misinterpret, overgeneralize, or fabricate conclusions even when the retrieved context is accurate. This project is not a substitute for professional judgment, internal review, or independent verification.
+
+Do not use OmniClip RAG or any exported context pack as the sole basis for medical, legal, financial, compliance, safety-critical, security-critical, employment, academic misconduct, or other high-stakes decisions.
+
+The maintainers and contributors are not liable for any direct, indirect, incidental, consequential, special, exemplary, or punitive damages, or for any data loss, downtime, model misuse, privacy incident, operational interruption, or decision made based on the use or misuse of this project, to the maximum extent permitted by applicable law.
+
+All third-party product names, model names, platforms, and trademarks mentioned in this repository remain the property of their respective owners. Their appearance here does not imply affiliation, endorsement, certification, or partnership.
