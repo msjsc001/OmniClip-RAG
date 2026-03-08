@@ -1,6 +1,17 @@
 
 # Changelog
 
+## V0.1.3 - 2026-03-08
+
+### Added
+
+- Added [RELEASE_NOTES_v0.1.3](releases/RELEASE_NOTES_v0.1.3.md) for the Windows packaging hotfix.
+
+### Fixed
+
+- Fixed the packaged Windows EXE by copying `pyarrow.libs` into the final onedir build, so `pyarrow` no longer fails during desktop startup.
+- Fixed the published Windows release asset so the lightweight package stays small without shipping a broken `lancedb` / `pyarrow` startup path.
+
 ## V0.1.2 - 2026-03-08
 
 ### Added

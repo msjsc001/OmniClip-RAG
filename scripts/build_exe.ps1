@@ -130,6 +130,8 @@ if ($Mode -eq 'onedir') {
     $runtimeGuide = Join-Path $root 'RUNTIME_SETUP.md'
     $runtimeScript = Join-Path $root 'scripts\install_runtime.ps1'
     $distAppDir = Join-Path $distRoot 'OmniClipRAG'
+    $pyarrowLibs = Join-Path $packages 'pyarrow.libs'
     if (Test-Path $runtimeGuide) { Copy-Item $runtimeGuide (Join-Path $distAppDir 'RUNTIME_SETUP.md') -Force }
     if (Test-Path $runtimeScript) { Copy-Item $runtimeScript (Join-Path $distAppDir 'InstallRuntime.ps1') -Force }
+    if (Test-Path $pyarrowLibs) { Copy-Item $pyarrowLibs (Join-Path $distAppDir '_internal\pyarrow.libs') -Recurse -Force }
 }

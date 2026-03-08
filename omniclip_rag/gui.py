@@ -23,7 +23,7 @@ from .ui_tooltip import ToolTip
 from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.1.2"
+APP_VERSION = "V0.1.3"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 RELEASES_URL = f"{REPO_URL}/releases"
 

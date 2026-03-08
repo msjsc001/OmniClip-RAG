@@ -1,6 +1,6 @@
 # OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.2-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.3-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#quick-start)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#why)
@@ -33,17 +33,13 @@ OmniClip RAG takes the opposite approach:
 - and the vault remains under your control.
 
 
-## What's New In v0.1.2
+## What's New In v0.1.3
 
-This update packages the runtime, retrieval-review, and product-naming refinements after `v0.1.1`.
+This patch release closes the Windows packaging gap found right after `v0.1.2`.
 
-- Renamed the Chinese product name from `无界 RAG` to **方寸引** and synced the desktop title plus bilingual documentation.
-- Switched the default device policy to `auto`, which now resolves to CUDA automatically when the active PyTorch runtime really supports your NVIDIA GPU.
-- Added workspace-level build-history timing so both **Precheck space/time** and the rebuild task panel can learn from recent local runs instead of relying only on a static guess.
-- Tightened full-rebuild control with more credible elapsed-time / ETA behavior, explicit cancel handling, and interruptible vector batches that pause faster.
-- Improved query review with visible relevance filtering, per-hit include toggles, clearer matched excerpts, and safer context-pack curation before copying.
-- Hardened clipboard export on Chinese Windows so formatted context packs no longer fail on `gbk` console encoding.
-- Refreshed the public docs to match the current desktop workflow, shared-vs-workspace data layout, and runtime acceleration behavior.
+- Fixed the packaged EXE so `pyarrow` now ships with the missing `pyarrow.libs` dependency folder.
+- Kept the main release lean: no model files, and no very large optional AI runtimes bundled into the app package.
+- Preserved the separate runtime-install flow through `RUNTIME_SETUP.md` and `InstallRuntime.ps1`.
 
 ## What It Does
 
@@ -204,7 +200,7 @@ tests/
 
 ## Current Status
 
-`V0.1.2` is the current public desktop update of the core product shape.
+`V0.1.3` is the current public desktop update of the core product shape.
 
 What is already solid:
 
@@ -243,6 +239,7 @@ The current tree has already been validated with:
 - [Changelog](CHANGELOG.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
 - [Runtime Setup](RUNTIME_SETUP.md)
+- [Release Notes v0.1.3](releases/RELEASE_NOTES_v0.1.3.md)
 - [Release Notes v0.1.2](releases/RELEASE_NOTES_v0.1.2.md)
 - [Release Notes v0.1.1](releases/RELEASE_NOTES_v0.1.1.md)
 - [Release Notes v0.1.0](releases/RELEASE_NOTES_v0.1.0.md)

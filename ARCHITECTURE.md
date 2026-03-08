@@ -1,8 +1,8 @@
 # Architecture Notes
 
-## Release Boundary For V0.1.2
+## Release Boundary For V0.1.3
 
-`V0.1.2` is not trying to ship a giant all-in-one AI platform.
+`V0.1.3` is not trying to ship a giant all-in-one AI platform.
 
 Its delivery goal is narrower and much more deliberate:
 
@@ -140,7 +140,7 @@ Current validation includes:
 - successful GUI startup and shutdown,
 - successful Windows EXE packaging.
 
-## Intentional Tradeoffs In V0.1.2
+## Intentional Tradeoffs In V0.1.3
 
 ### 1. `torch` is the stable default runtime
 
@@ -370,4 +370,14 @@ Current acceleration rule:
 - the GUI may still show detected NVIDIA hardware separately from actual runtime readiness.
 
 Why: users should not have to hand-tune the common case, but the app also must not pretend GPU acceleration exists when the active runtime cannot use it.
+
+### 26. Lean Windows builds must still carry `pyarrow.libs`
+
+Current packaging rule:
+
+- the main release stays lean and does not bundle heavy optional AI runtimes,
+- but the packaged desktop app must still include the non-optional `pyarrow.libs` directory required by `lancedb` / `pyarrow`,
+- startup validation should treat a missing `pyarrow.libs` folder as a broken build, not as a user-runtime problem.
+
+Why: `lancedb` and `pyarrow` are part of the core desktop retrieval stack. They are not optional runtime add-ons like `torch`.
 
