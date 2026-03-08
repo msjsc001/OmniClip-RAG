@@ -15,10 +15,17 @@ htmlcov/
 
 # Build outputs
 build/
+build_smoke/
 dist/
+dist_smoke/
 *.spec
 
 # Local app data / databases / logs
+/cache/
+/state/
+/logs/
+/exports/
+/config.json
 local_appdata/
 *.sqlite3
 *.db

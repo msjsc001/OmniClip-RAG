@@ -67,6 +67,8 @@ class SpaceEstimate:
     vector_model: str
     can_proceed: bool
     risk_level: str
+    estimated_build_seconds: int = 0
+    estimated_download_seconds: int = 0
     notes: list[str] = field(default_factory=list)
 
     @property

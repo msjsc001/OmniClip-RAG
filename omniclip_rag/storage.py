@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -182,8 +183,9 @@ class MetadataStore:
             """
         ).fetchone()
 
-    def replace_file(self, parsed_file: ParsedFile) -> None:
+    def replace_file(self, parsed_file: ParsedFile) -> list[str]:
         self.delete_files([parsed_file.relative_path])
+        duplicate_block_ids = self._demote_duplicate_block_ids(parsed_file)
         self.connection.execute(
             """
             INSERT INTO files (
@@ -235,6 +237,7 @@ class MetadataStore:
                     (chunk.chunk_id, target, ref_type),
                 )
         self.connection.commit()
+        return duplicate_block_ids
 
     def delete_files(self, relative_paths: Iterable[str]) -> None:
         paths = [item for item in relative_paths if item]
@@ -416,6 +419,45 @@ class MetadataStore:
         chunk_count = self.connection.execute("SELECT COUNT(*) AS count FROM chunks").fetchone()["count"]
         ref_count = self.connection.execute("SELECT COUNT(*) AS count FROM refs").fetchone()["count"]
         return {"files": file_count, "chunks": chunk_count, "refs": ref_count}
+
+    # Why: 真实 Logseq 库里偶尔会出现被复制或冲突合并过的重复 id:: UUID。
+    # 如果直接硬插入，整轮建库会因为唯一键崩掉。这里保住首个块的 block_id，
+    # 把后续重复块降级为普通 chunk，确保索引继续可用，同时让引用解析仍有唯一目标。
+    def _demote_duplicate_block_ids(self, parsed_file: ParsedFile) -> list[str]:
+        candidate_ids = [chunk.block_id for chunk in parsed_file.chunks if chunk.block_id]
+        if not candidate_ids:
+            return []
+        existing_ids = self._find_existing_block_ids(candidate_ids)
+        seen_ids: set[str] = set()
+        duplicates: list[str] = []
+        for chunk in parsed_file.chunks:
+            block_id = chunk.block_id
+            if not block_id:
+                continue
+            if block_id in seen_ids or block_id in existing_ids:
+                duplicates.append(block_id)
+                chunk.properties.setdefault('_duplicate_block_id', block_id)
+                chunk.properties.setdefault('_duplicate_block_resolution', 'demoted_to_plain_chunk')
+                chunk.chunk_id = self._fallback_chunk_id(parsed_file.relative_path, chunk.kind, chunk.position, block_id)
+                chunk.block_id = None
+                continue
+            seen_ids.add(block_id)
+        return duplicates
+
+    def _find_existing_block_ids(self, block_ids: list[str]) -> set[str]:
+        unique_ids = sorted({item for item in block_ids if item})
+        if not unique_ids:
+            return set()
+        placeholders = ','.join('?' for _ in unique_ids)
+        rows = self.connection.execute(
+            f'SELECT block_id FROM chunks WHERE block_id IN ({placeholders})',
+            unique_ids,
+        ).fetchall()
+        return {row['block_id'] for row in rows if row['block_id']}
+
+    def _fallback_chunk_id(self, source_path: str, kind: str, position: int, block_id: str) -> str:
+        digest = hashlib.sha1(f'{source_path}|{kind}|{position}|{block_id}'.encode('utf-8')).hexdigest()[:20]
+        return f'dedup:{digest}'
 
     def _search_fts(self, query_text: str, limit: int) -> list[sqlite3.Row]:
         fts_query = _build_fts_query(query_text)

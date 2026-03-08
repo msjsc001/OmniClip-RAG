@@ -1,8 +1,8 @@
 # Architecture Notes
 
-## Release Boundary For V0.1.0
+## Release Boundary For V0.1.1
 
-`V0.1.0` is not trying to ship a giant all-in-one AI platform.
+`V0.1.1` is not trying to ship a giant all-in-one AI platform.
 
 Its delivery goal is narrower and much more deliberate:
 
@@ -109,6 +109,16 @@ Current model/cache policy:
 
 Why: the default Windows cache path is too easy to corrupt with permission issues, symlink edge cases, and partial downloads.
 
+### 8. Unreadable Markdown files must be skippable, not fatal
+
+Current fault-tolerance rule:
+
+- preflight skips unreadable `.md` files and records that fact in the estimate notes,
+- rebuild/reindex skips unreadable `.md` files instead of aborting the whole run,
+- if every discovered Markdown file is unreadable, preflight blocks the workflow and tells the user the chosen folder is not a real vault root.
+
+Why: users can accidentally point the app at a home directory, browser profile, or synced workspace that contains Markdown files they do not actually own or cannot read. One bad file must not collapse the whole product.
+
 ## Module Boundary
 
 - `omniclip_rag.config`: configuration and data paths
@@ -130,7 +140,7 @@ Current validation includes:
 - successful GUI startup and shutdown,
 - successful Windows EXE packaging.
 
-## Intentional Tradeoffs In V0.1.0
+## Intentional Tradeoffs In V0.1.1
 
 ### 1. `torch` is the stable default runtime
 
@@ -160,7 +170,7 @@ It does **not** yet try to ship everything at once.
 3. add richer settings panels,
 4. reduce model and package footprint further.
 
-### 8. Desktop UX must be newcomer-first
+### 9. Desktop UX must be newcomer-first
 
 The desktop UI is no longer allowed to assume the user already understands RAG terminology or the product workflow.
 
@@ -170,11 +180,14 @@ Current UX rules:
 - recommended defaults must already be filled in,
 - advanced options must stay hidden until explicitly expanded,
 - missing prerequisites such as local models must surface as clear prompts instead of silent stalls,
-- hover tooltips must explain settings and buttons without forcing the user to open external docs.
+- model-download prompts must also provide a manual mirror fallback and the exact local directory for users who need to download files themselves,
+- hover tooltips must explain settings and buttons without forcing the user to open external docs,
+- the left-side workspace area must stay usable on common horizontal displays by using tabbed sections and per-tab scrolling instead of one long stacked form,
+- switching the UI language must also relocalize live status summaries, preflight text, and other runtime labels instead of only translating static widgets.
 
 Why: a local-first desktop tool fails its job if the user has to reverse-engineer the interface before they can trust it.
 
-### 9. UI text and behavior hints live outside the window layout
+### 10. UI text and behavior hints live outside the window layout
 
 Current split:
 
@@ -184,7 +197,7 @@ Current split:
 
 Why: language switching, wording upgrades, and future docs-quality polishing should not require invasive changes across the GUI layout code.
 
-### 10. Brand assets are generated locally and packaged explicitly
+### 11. Brand assets are generated locally and packaged explicitly
 
 Current asset policy:
 
@@ -194,5 +207,94 @@ Current asset policy:
 
 Why: the desktop app, taskbar icon, and packaged EXE must present a consistent identity without adding heavy image-tool dependencies.
 
+### 12. Global shared data and per-vault workspace data must be separated explicitly
 
+Current storage policy:
 
+- the user still chooses one global data root,
+- the saved config stays at that global root,
+- common data now lives under `shared/`,
+- each vault gets a deterministic workspace under `workspaces/<workspace-id>/`,
+- the vault workspace owns only vault-specific state such as SQLite, LanceDB state, and exported context packs,
+- the shared area owns only cross-vault data such as model cache and general logs,
+- legacy per-workspace cache/log folders are migrated forward into the shared area automatically.
+
+Why: one shared data directory is convenient, but shared data and vault-local data should not be mixed. The product stays easier to manage when common assets are centralized and vault-specific assets remain isolated.
+
+### 13. Long-running desktop actions must expose visible progress, not silent waiting
+
+Current desktop behavior:
+
+- `Check disk space` and `Download model` now publish a running state in the Start tab,
+- the UI shows elapsed time,
+- the UI shows a plain-language estimated duration,
+- model bootstrap short-circuits when the model is already present and passes a local integrity check.
+
+Why: for local-first desktop tools, silent waiting looks like a freeze. Even when the task is indeterminate, the user must still see that work is in progress and what kind of time budget to expect.
+
+### 14. Duplicate Logseq block ids must not crash indexing
+
+Current fault-tolerance rule:
+
+- the first occurrence of a duplicated `id:: UUID` keeps the canonical `block_id`,
+- later duplicates are demoted to plain chunks instead of aborting the whole run,
+- demoted chunks keep duplicate metadata for later diagnosis,
+- rebuild and watch both surface duplicate-id events in the desktop activity log.
+
+Why: real vaults occasionally contain copied or merge-conflicted Logseq ids. A single dirty block must not take down the whole index.
+
+### 15. Desktop layout must be adjustable and stateful
+
+Current desktop layout policy:
+
+- the main window uses draggable split panes instead of one rigid stacked page,
+- the left workspace area and the right search/detail area can be resized independently,
+- the result list and detail tabs are also resizable,
+- window geometry and pane positions are persisted in config and restored on the next launch,
+- zero or corrupt old pane values are ignored and replaced with safe defaults.
+
+Why: the app is a desktop workstation, not a fixed dialog. Users need to adapt it to their monitor shape and keep that layout across sessions.
+
+### 16. A ready local model must never trigger fresh network access
+
+Current vector-loading rule:
+
+- if the selected model already passes the local integrity check, search and rebuild load it strictly from the local cache,
+- `snapshot_download()` is used only when the local model is genuinely missing or incomplete,
+- loaded embedders are cached in-process so a bootstrap followed by rebuild does not pay the model-load cost twice.
+
+Why: once a local-first desktop app says the model is ready, later tasks must not fail because of SSL, proxy, or Hugging Face availability noise.
+
+### 17. Full rebuild must survive interruption and support explicit resume
+
+Current rebuild-resilience rule:
+
+- each vault workspace stores a `rebuild_state.json` marker under its own state directory,
+- the state records the manifest, completed files, readable files, current phase, and duplicate-id count,
+- a normal new rebuild resets state first,
+- an interrupted rebuild can resume only when the vault path and relevant vector settings still match and the file manifest is unchanged,
+- startup prompts the user to continue or discard unfinished rebuild state,
+- discarding also clears partial index state so the workspace does not keep ambiguous leftovers.
+
+Why: local indexing jobs can be interrupted by app close, crashes, or power loss. The product must recover deterministically instead of forcing the user to guess whether the index is trustworthy.
+
+### 18. Preflight must estimate time as well as disk space
+
+Current preflight rule:
+
+- preflight now estimates both free-space requirements and a conservative first-build time budget,
+- if the model is missing, preflight also estimates extra first-download time,
+- the GUI surfaces these numbers directly in the context tab and task panel wording.
+
+Why: for a local desktop workflow, “can it fit?” and “how long will it take?” are both first-run gating questions.
+
+### 19. Full rebuild must support real pause/resume, not just restart-after-abort
+
+Current rebuild-control rule:
+
+- the desktop task panel exposes a pause/resume control only while a full rebuild is running,
+- pause points exist in file parsing, rendered-text expansion, and vector batching,
+- paused rebuilds keep their persisted rebuild state,
+- closing the app while paused still falls back to the existing rebuild-resume flow on the next launch.
+
+Why: long local indexing runs compete with normal desktop work. Users need a safe way to yield CPU temporarily without throwing away an in-flight full rebuild.

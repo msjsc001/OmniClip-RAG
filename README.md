@@ -1,6 +1,6 @@
 # OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.0-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.1-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#quick-start)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#why)
@@ -9,7 +9,7 @@
 
 **OmniClip RAG** is a local-first desktop RAG for Markdown and Logseq vaults.
 
-It is designed for one specific job: **bridge your notes to any AI without coupling your knowledge base to any single AI product**.
+It focuses on one job: **bridge your notes to any AI without coupling your knowledge base to any single AI product**.
 
 You search locally, inspect the results, and only copy the context you want to expose. The AI never needs blanket access to your vault.
 
@@ -28,13 +28,27 @@ OmniClip RAG takes the opposite approach:
 - any AI can consume the final context pack,
 - and the vault remains under your control.
 
+## What's New In v0.1.1
+
+This update consolidates the desktop hardening work after the first public release candidate.
+
+- Added newcomer-first desktop guidance, bilingual UI switching, and hover tooltips across the main workflow.
+- Added multi-vault switching with isolated per-vault workspaces and shared cross-vault model cache.
+- Added manual model-download guidance with `hf-mirror.com` / Hugging Face fallback and exact target folders.
+- Added space-and-time prechecks, live task progress, elapsed time, ETA feedback, and clearer first-run prompts.
+- Added unfinished-build recovery after restart or power loss, plus real **pause / resume** for full rebuilds.
+- Tightened local-model behavior so a complete local cache no longer triggers unnecessary remote Hugging Face calls during search or indexing.
+- Hardened indexing against unreadable Markdown files, duplicate Logseq block ids, and stale layout-state edge cases.
+
 ## What It Does
 
 - Parses both standard Markdown and Logseq-style Markdown
 - Understands page properties, block properties, block refs, and block embeds
 - Builds a hybrid retrieval stack with `SQLite + FTS5 + LanceDB`
 - Supports local `BAAI/bge-m3` embeddings
-- Performs preflight disk estimation before model bootstrap or indexing
+- Supports multiple vaults with isolated per-vault workspaces
+- Performs preflight space and time estimation before model bootstrap or indexing
+- Can resume or pause a full rebuild instead of forcing a restart
 - Hot-reloads vault changes with incremental reindexing
 - Exports ready-to-paste context packs for any AI tool
 - Provides a desktop GUI as the primary workflow
@@ -55,8 +69,8 @@ flowchart LR
 ## Core Experience
 
 1. Point OmniClip RAG to your vault.
-2. Run a preflight check.
-3. Bootstrap the local model.
+2. Run a precheck for disk space and time.
+3. Download or validate the local model.
 4. Build the index.
 5. Search from the desktop app.
 6. Review pages, semantic anchors, and snippets.
@@ -94,9 +108,9 @@ CLI is still available for debugging and automation:
 1. Launch the GUI.
 2. Choose your vault directory.
 3. Confirm the data directory.
-4. Run **Preflight Check**.
-5. Run **Bootstrap Model**.
-6. Run **Rebuild Index**.
+4. Run **Precheck space/time**.
+5. Run **Download model** once, or point the app at a manually downloaded local model.
+6. Run **Build index**.
 7. Search and copy your context pack.
 
 ## Model And Storage Notes
@@ -106,6 +120,7 @@ Current stable default:
 - Vector backend: `LanceDB`
 - Embedding model: `BAAI/bge-m3`
 - Runtime: `torch`
+- Device: `cpu` by default, `cuda` when the user's CUDA environment is already working
 
 For a first local run on Windows, plan for at least **8 GB to 10 GB** of free space.
 
@@ -117,6 +132,8 @@ OmniClip RAG estimates:
 - model cache size
 - temporary peak usage
 - safety margin
+- first full-build time
+- first model-download time
 
 before starting model bootstrap or indexing.
 
@@ -127,19 +144,30 @@ See [STORAGE_PRECHECK.md](STORAGE_PRECHECK.md) for details.
 By default, user data goes to `%APPDATA%\OmniClip RAG`.
 If that location is not writable in the current environment, the app falls back to a writable local directory automatically.
 
-Directory layout:
+Current layout:
 
 ```text
 OmniClip RAG/
   config.json
-  state/
-    omniclip.sqlite3
-    lancedb/
-  cache/
-    models/
-  logs/
-  exports/
+  shared/
+    cache/
+      models/
+    logs/
+  workspaces/
+    <workspace-id>/
+      state/
+        omniclip.sqlite3
+        lancedb/
+        rebuild_state.json
+      exports/
 ```
+
+Design rule:
+
+- `shared/` stores cross-vault assets such as model cache and general logs
+- `workspaces/<workspace-id>/` stores only vault-specific data such as SQLite state, LanceDB state, exports, and unfinished-build state
+
+This means reinstalling the app does **not** force a model re-download as long as you keep the same data directory.
 
 ## Project Structure
 
@@ -162,7 +190,7 @@ tests/
 
 ## Current Status
 
-`V0.1.0` is the first public release candidate of the core product shape.
+`V0.1.1` is the current public desktop update of the core product shape.
 
 What is already solid:
 
@@ -171,7 +199,10 @@ What is already solid:
 - hybrid retrieval,
 - desktop interaction,
 - hot reload,
-- context export.
+- context export,
+- resumable rebuilds,
+- pausable full rebuilds,
+- multi-vault workspace isolation.
 
 What is intentionally deferred:
 
@@ -188,6 +219,7 @@ The current tree has already been validated with:
 - real sample indexing,
 - GUI startup verification,
 - EXE build verification,
+- EXE startup smoke verification,
 - CLI query verification.
 
 ## Documentation
@@ -196,6 +228,7 @@ The current tree has already been validated with:
 - [Architecture Notes](ARCHITECTURE.md)
 - [Changelog](CHANGELOG.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
+- [Release Notes v0.1.1](RELEASE_NOTES_v0.1.1.md)
 - [Release Notes v0.1.0](RELEASE_NOTES_v0.1.0.md)
 
 ## License

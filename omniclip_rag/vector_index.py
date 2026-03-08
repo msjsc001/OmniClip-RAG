@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
@@ -21,7 +23,13 @@ class Embedder(Protocol):
 
 
 class VectorIndex(Protocol):
-    def rebuild(self, documents: list[dict[str, str]]) -> None: ...
+    def rebuild(
+        self,
+        documents: list[dict[str, str]],
+        *,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+    ) -> None: ...
 
     def upsert(self, documents: list[dict[str, str]]) -> None: ...
 
@@ -34,8 +42,17 @@ class VectorIndex(Protocol):
     def reset(self) -> None: ...
 
 
+_EMBEDDER_CACHE: dict[tuple[str, str, str], Embedder] = {}
+
+
 class NullVectorIndex:
-    def rebuild(self, documents: list[dict[str, str]]) -> None:
+    def rebuild(
+        self,
+        documents: list[dict[str, str]],
+        *,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+    ) -> None:
         return None
 
     def upsert(self, documents: list[dict[str, str]]) -> None:
@@ -74,21 +91,40 @@ class LanceDbVectorIndex:
         self._table_name = "chunks"
         self._vector_dimension: int | None = None
 
-    def rebuild(self, documents: list[dict[str, str]]) -> None:
+    def rebuild(
+        self,
+        documents: list[dict[str, str]],
+        *,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+    ) -> None:
         self.reset()
         if not documents:
             return
-        rows = self._embed_documents(documents)
-        self._ensure_table(len(rows[0]["vector"]))
-        self._table().add(rows)
+        total = len(documents)
+        processed = 0
+        batch_size = max(int(self.config.vector_batch_size or 16) * 4, 32)
+        table = None
+
+        for start in range(0, total, batch_size):
+            _wait_if_paused(pause_event)
+            batch = documents[start : start + batch_size]
+            rows = self._embed_documents(batch)
+            if not rows:
+                continue
+            if table is None:
+                self._ensure_table(len(rows[0]["vector"]))
+                table = self._table()
+            table.add(rows)
+            processed += len(rows)
+            _emit_progress(on_progress, {"stage": "vectorizing", "current": processed, "total": total})
 
     def upsert(self, documents: list[dict[str, str]]) -> None:
         if not documents:
             return
         rows = self._embed_documents(documents)
         self._ensure_table(len(rows[0]["vector"]))
-        chunk_ids = [row["chunk_id"] for row in rows]
-        self.delete(chunk_ids)
+        self.delete([row["chunk_id"] for row in rows])
         self._table().add(rows)
 
     def delete(self, chunk_ids: list[str]) -> None:
@@ -101,13 +137,10 @@ class LanceDbVectorIndex:
         if not query_text.strip() or not self._table_exists():
             return []
         vector = self._encode([query_text])[0]
-        results = self._table().search(vector).limit(limit).to_list()
+        rows = self._table().search(vector).limit(limit).to_list()
         return [
-            VectorCandidate(
-                chunk_id=row["chunk_id"],
-                score=_distance_to_score(row.get("_distance", 1.0)),
-            )
-            for row in results
+            VectorCandidate(chunk_id=row["chunk_id"], score=_distance_to_score(row.get("_distance", 1.0)))
+            for row in rows
         ]
 
     def warmup(self) -> dict[str, object]:
@@ -132,8 +165,7 @@ class LanceDbVectorIndex:
         if self._table_exists():
             if self._vector_dimension is None:
                 schema = self._table().schema
-                vector_field = schema.field("vector")
-                self._vector_dimension = vector_field.type.list_size
+                self._vector_dimension = schema.field("vector").type.list_size
             return
 
         import pyarrow as pa
@@ -163,10 +195,7 @@ class LanceDbVectorIndex:
     def _embed_documents(self, documents: list[dict[str, str]]) -> list[dict[str, object]]:
         texts = [item["rendered_text"] for item in documents]
         vectors = self._encode(texts)
-        rows: list[dict[str, object]] = []
-        for document, vector in zip(documents, vectors, strict=True):
-            rows.append({**document, "vector": [float(value) for value in vector]})
-        return rows
+        return [{**document, "vector": [float(value) for value in vector]} for document, vector in zip(documents, vectors, strict=True)]
 
     def _encode(self, texts: list[str]):
         embedder = self._load_embedder()
@@ -195,7 +224,7 @@ class LanceDbVectorIndex:
         from huggingface_hub import snapshot_download
         from sentence_transformers import SentenceTransformer
 
-        if not is_local_model_ready(self.config, self.paths) or not self.config.vector_local_files_only:
+        if not is_local_model_ready(self.config, self.paths):
             snapshot_download(
                 repo_id=self.config.vector_model,
                 local_dir=str(local_model_dir),
@@ -208,20 +237,27 @@ class LanceDbVectorIndex:
                 "或清理 cache/models 后重新预热。"
             )
 
-        return SentenceTransformer(
+        cache_key = (str(local_model_dir), (self.config.vector_runtime or "torch").lower(), (self.config.vector_device or "cpu").lower())
+        cached = _EMBEDDER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        embedder = SentenceTransformer(
             str(local_model_dir),
             device=self.config.vector_device,
             cache_folder=str(runtime_cache_dir),
             backend=self.config.vector_runtime,
             local_files_only=True,
         )
+        _EMBEDDER_CACHE[cache_key] = embedder
+        return embedder
 
     @staticmethod
     def _escape(value: str) -> str:
         return value.replace("'", "''")
 
 
-# Why: 先固化接口边界，后面调模型或 reranker 只动这层，不污染 parser / storage / service。
+# Why: 模型目录一旦完整，就必须彻底走本地，避免首轮建库因为 SSL / 代理波动反复访问远端。
 def create_vector_index(
     config: AppConfig,
     paths: DataPaths,
@@ -276,7 +312,6 @@ def _configure_huggingface_environment(hf_home_dir: Path) -> None:
     hf_constants.HF_HUB_DISABLE_XET = True
 
 
-
 def _distance_to_score(distance: float) -> float:
     return 1.0 / (1.0 + max(float(distance), 0.0))
 
@@ -301,3 +336,14 @@ def _is_model_dir_ready(path: Path, runtime: str) -> bool:
         path / "model.safetensors.index.json",
     )
     return any(candidate.exists() for candidate in weight_files)
+
+
+def _emit_progress(on_progress: Callable[[dict[str, object]], None] | None, payload: dict[str, object]) -> None:
+    if on_progress is None:
+        return
+    on_progress(payload)
+
+
+def _wait_if_paused(pause_event: threading.Event | None) -> None:
+    while pause_event is not None and pause_event.is_set():
+        time.sleep(0.12)

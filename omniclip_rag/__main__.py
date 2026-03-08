@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import warnings
 from pathlib import Path
 
 warnings.filterwarnings("ignore", message="Unable to find acceptable character detection dependency.*")
 
-from .config import AppConfig, ensure_data_paths, load_config, save_config
+from .config import AppConfig, ensure_data_paths, load_config, normalize_vault_path, save_config
 from .formatting import format_bytes, format_space_report
 from .service import OmniClipService, WATCHDOG_AVAILABLE
 
@@ -17,28 +16,42 @@ def main() -> int:
     _configure_stdio()
     parser = _build_parser()
     args = parser.parse_args()
-    data_paths = ensure_data_paths(getattr(args, "data_dir", None))
+    global_paths = ensure_data_paths(getattr(args, "data_dir", None))
 
     if args.command == "init":
-        config = AppConfig(vault_path=str(Path(args.vault).expanduser().resolve()), data_root=str(data_paths.root))
+        data_paths = ensure_data_paths(getattr(args, "data_dir", None), args.vault)
+        config = AppConfig(
+            vault_path=normalize_vault_path(args.vault),
+            vault_paths=[normalize_vault_path(args.vault)],
+            data_root=str(data_paths.global_root),
+        )
         _apply_runtime_overrides(config, args)
         save_config(config, data_paths)
-        print(f"已初始化配置，数据目录：{data_paths.root}")
+        print(f"已初始化配置，全局数据目录：{data_paths.global_root}")
+        print(f"当前笔记库工作区：{data_paths.root}")
         return 0
 
-    config = load_config(data_paths)
+    config = load_config(global_paths)
     if config is None:
         if getattr(args, "vault", None):
-            config = AppConfig(vault_path=str(Path(args.vault).expanduser().resolve()), data_root=str(data_paths.root))
+            data_paths = ensure_data_paths(getattr(args, "data_dir", None), args.vault)
+            config = AppConfig(
+                vault_path=normalize_vault_path(args.vault),
+                vault_paths=[normalize_vault_path(args.vault)],
+                data_root=str(data_paths.global_root),
+            )
             _apply_runtime_overrides(config, args)
             save_config(config, data_paths)
         else:
             parser.error("请先运行 init，或为当前命令显式传入 --vault。")
 
     if getattr(args, "vault", None):
-        config.vault_path = str(Path(args.vault).expanduser().resolve())
+        config.vault_path = normalize_vault_path(args.vault)
+    if config.vault_path and config.vault_path not in config.vault_paths:
+        config.vault_paths.insert(0, config.vault_path)
     changed = _apply_runtime_overrides(config, args)
-    if changed:
+    data_paths = ensure_data_paths(getattr(args, "data_dir", None), config.vault_path)
+    if changed or getattr(args, "vault", None):
         save_config(config, data_paths)
 
     service = OmniClipService(config, data_paths)
@@ -86,7 +99,8 @@ def main() -> int:
         if args.command == "status":
             stats = service.store.stats()
             print(f"Vault: {config.vault_dir}")
-            print(f"Data: {data_paths.root}")
+            print(f"Global data: {data_paths.global_root}")
+            print(f"Workspace data: {data_paths.root}")
             print(f"Files: {stats['files']}")
             print(f"Chunks: {stats['chunks']}")
             print(f"Refs: {stats['refs']}")
@@ -169,6 +183,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     open_parser = subparsers.add_parser("open-data-dir", help="打开数据目录")
     open_parser.add_argument("--data-dir", help="自定义数据目录")
+    open_parser.add_argument("--vault", help="指定要打开哪个笔记库对应的数据目录")
 
     clear_parser = subparsers.add_parser("clear-data", help="分类清理数据")
     clear_parser.add_argument("--all", action="store_true", help="清理全部可清理数据")
@@ -177,6 +192,7 @@ def _build_parser() -> argparse.ArgumentParser:
     clear_parser.add_argument("--cache", action="store_true", help="清理缓存")
     clear_parser.add_argument("--exports", action="store_true", help="清理导出的上下文包")
     clear_parser.add_argument("--data-dir", help="自定义数据目录")
+    clear_parser.add_argument("--vault", help="指定要清理哪个笔记库对应的数据目录")
 
     return parser
 
@@ -203,7 +219,6 @@ def _apply_runtime_overrides(config: AppConfig, args: argparse.Namespace) -> boo
 
 
 
-
 def _configure_stdio() -> None:
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
@@ -217,4 +232,3 @@ def _configure_stdio() -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

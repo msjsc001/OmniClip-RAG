@@ -4,6 +4,7 @@ import ctypes
 import queue
 import sys
 import threading
+import time
 import traceback
 import webbrowser
 import tkinter as tk
@@ -12,15 +13,16 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .clipboard import copy_text
-from .config import AppConfig, default_data_root, ensure_data_paths, load_config, save_config
-from .formatting import format_bytes, format_space_report, summarize_preflight
+from .config import AppConfig, default_data_root, ensure_data_paths, load_config, normalize_vault_path, save_config
+from .formatting import format_bytes, format_duration, format_space_report, summarize_preflight
+from .preflight import estimate_model_cache_bytes
 from .service import WATCHDOG_AVAILABLE, OmniClipService
 from .ui_i18n import language_code_from_label, language_label, normalize_language, text, tooltip
 from .ui_tooltip import ToolTip
-from .vector_index import is_local_model_ready
+from .vector_index import get_local_model_dir, is_local_model_ready
 
 APP_TITLE = "OmniClip RAG · 无界 RAG"
-APP_VERSION = "V0.1.0"
+APP_VERSION = "V0.1.1"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 RELEASES_URL = f"{REPO_URL}/releases"
 
@@ -54,8 +56,8 @@ class OmniClipDesktopApp:
         _enable_high_dpi_awareness()
         self.root = tk.Tk()
         self.root.title(APP_TITLE)
-        self.root.geometry("1460x900")
-        self.root.minsize(1220, 760)
+        self.root.geometry("1520x980")
+        self.root.minsize(1280, 820)
 
         self.queue: queue.Queue[tuple] = queue.Queue()
         self.busy = False
@@ -64,6 +66,8 @@ class OmniClipDesktopApp:
         self.current_hits = []
         self.current_context = ""
         self.current_report = None
+        self.latest_preflight_snapshot: dict | None = None
+        self.context_view_text = ""
         self.log_lines: list[str] = []
         self.tooltips: list[ToolTip] = []
         self.icon_image: tk.PhotoImage | None = None
@@ -74,7 +78,7 @@ class OmniClipDesktopApp:
         self._load_window_icons()
         self._render_ui()
         self._load_initial_config()
-        self.root.after(120, self._drain_queue)
+        self.queue_after_id = self.root.after(120, self._drain_queue)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def run(self) -> int:
@@ -147,6 +151,8 @@ class OmniClipDesktopApp:
         self.language_code = normalize_language(None)
         self.language_var = tk.StringVar(value=language_label(self.language_code))
         self.vault_var = tk.StringVar()
+        self.saved_vault_var = tk.StringVar()
+        self.saved_vaults: list[str] = []
         self.data_dir_var = tk.StringVar(value=str(default_data_root()))
         self.backend_var = tk.StringVar(value="lancedb")
         self.model_var = tk.StringVar(value="BAAI/bge-m3")
@@ -173,6 +179,24 @@ class OmniClipDesktopApp:
         self.vault_state_var = tk.StringVar(value=self._tr("vault_missing"))
         self.model_state_var = tk.StringVar(value=self._tr("model_missing"))
         self.index_state_var = tk.StringVar(value=self._tr("index_missing"))
+        self.current_workspace_var = tk.StringVar(value=self._tr("workspace_empty"))
+        self.task_state_var = tk.StringVar(value=self._tr("task_idle"))
+        self.task_detail_var = tk.StringVar(value=self._tr("task_idle_detail"))
+        self.task_elapsed_var = tk.StringVar(value=self._tr("task_elapsed", value="00:00"))
+        self.task_eta_var = tk.StringVar(value=self._tr("task_eta_idle"))
+        self.rebuild_pause_var = tk.StringVar(value=self._tr("pause_rebuild"))
+        self.task_started_at = 0.0
+        self.latest_task_progress: dict[str, object] | None = None
+        self.rebuild_pause_event = threading.Event()
+        self.task_after_id: str | None = None
+        self.queue_after_id: str | None = None
+        self.layout_after_id: str | None = None
+        self.active_task_key: str | None = None
+        self.resume_prompt_workspace_id: str | None = None
+        self.ui_window_geometry = "1520x980"
+        self.ui_main_sash = 520
+        self.ui_right_sash = 156
+        self.ui_results_sash = 260
 
     def _tr(self, key: str, **kwargs) -> str:
         return text(self.language_code, key, **kwargs)
@@ -183,6 +207,14 @@ class OmniClipDesktopApp:
     def _default_watch_summary(self) -> str:
         watch_text = self._tr("watch_ready") if WATCHDOG_AVAILABLE else self._tr("watch_fallback")
         return self._tr("vector_watch_summary", backend=self.backend_var.get().strip() or "disabled", watch_text=watch_text)
+
+    def _watch_mode_label(self, mode: str | bool) -> str:
+        if isinstance(mode, str):
+            current_mode = mode.strip().lower()
+            use_polling = current_mode == "polling"
+        else:
+            use_polling = bool(mode)
+        return self._tr("watch_mode_polling") if use_polling else self._tr("watch_mode_watchdog")
 
     def _load_window_icons(self) -> None:
         png_path = _resource_path("app_icon.png")
@@ -201,6 +233,22 @@ class OmniClipDesktopApp:
                 pass
 
     def _render_ui(self) -> None:
+        left_index = 0
+        right_index = 0
+        if self.root.winfo_children():
+            self._capture_layout_state()
+
+        if hasattr(self, "left_tabs"):
+            try:
+                left_index = self.left_tabs.index(self.left_tabs.select())
+            except Exception:
+                left_index = 0
+        if hasattr(self, "tabs"):
+            try:
+                right_index = self.tabs.index(self.tabs.select())
+            except Exception:
+                right_index = 0
+
         for child in self.root.winfo_children():
             child.destroy()
         self.tooltips.clear()
@@ -211,6 +259,19 @@ class OmniClipDesktopApp:
         self._build_header()
         self._build_body()
         self._build_footer()
+        self._apply_layout_state()
+
+        if hasattr(self, "left_tabs"):
+            try:
+                self.left_tabs.select(min(left_index, max(self.left_tabs.index("end") - 1, 0)))
+            except Exception:
+                pass
+        if hasattr(self, "tabs"):
+            try:
+                self.tabs.select(min(right_index, max(self.tabs.index("end") - 1, 0)))
+            except Exception:
+                pass
+
         self._refresh_dynamic_views()
 
     def _build_header(self) -> None:
@@ -248,16 +309,36 @@ class OmniClipDesktopApp:
     def _build_body(self) -> None:
         body = tk.Frame(self.root, bg=self.colors["bg"])
         body.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 10))
-        body.grid_columnconfigure(0, minsize=430)
-        body.grid_columnconfigure(1, weight=1)
+        body.grid_columnconfigure(0, weight=1)
         body.grid_rowconfigure(0, weight=1)
 
-        self.left = tk.Frame(body, bg=self.colors["bg"])
-        self.left.grid(row=0, column=0, sticky="nsw")
-        self.right = tk.Frame(body, bg=self.colors["bg"])
-        self.right.grid(row=0, column=1, sticky="nsew", padx=(14, 0))
+        self.main_pane = ttk.Panedwindow(body, orient="horizontal")
+        self.main_pane.grid(row=0, column=0, sticky="nsew")
+
+        self.left = tk.Frame(self.main_pane, bg=self.colors["bg"])
+        self.left.grid_columnconfigure(0, weight=1)
+        self.left.grid_rowconfigure(0, weight=1)
+
+        self.right = tk.Frame(self.main_pane, bg=self.colors["bg"])
         self.right.grid_columnconfigure(0, weight=1)
-        self.right.grid_rowconfigure(1, weight=1)
+        self.right.grid_rowconfigure(0, weight=1)
+
+        self.main_pane.add(self.left, weight=0)
+        self.main_pane.add(self.right, weight=1)
+
+        self.right_pane = ttk.Panedwindow(self.right, orient="vertical")
+        self.right_pane.grid(row=0, column=0, sticky="nsew")
+
+        self.search_host = tk.Frame(self.right_pane, bg=self.colors["bg"])
+        self.search_host.grid_columnconfigure(0, weight=1)
+        self.search_host.grid_rowconfigure(0, weight=1)
+
+        self.results_host = tk.Frame(self.right_pane, bg=self.colors["bg"])
+        self.results_host.grid_columnconfigure(0, weight=1)
+        self.results_host.grid_rowconfigure(0, weight=1)
+
+        self.right_pane.add(self.search_host, weight=0)
+        self.right_pane.add(self.results_host, weight=1)
 
         self._build_left_cards()
         self._build_right_cards()
@@ -270,6 +351,89 @@ class OmniClipDesktopApp:
         tk.Label(footer, textvariable=self.status_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=0, column=0, sticky="w", padx=12, pady=7)
         tk.Label(footer, textvariable=self.result_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="e").grid(row=0, column=1, sticky="e", padx=12, pady=7)
 
+    def _capture_layout_state(self) -> None:
+        try:
+            self.ui_window_geometry = self.root.geometry()
+        except Exception:
+            pass
+        for attr_name, state_name in (("main_pane", "ui_main_sash"), ("right_pane", "ui_right_sash"), ("results_pane", "ui_results_sash")):
+            pane = getattr(self, attr_name, None)
+            if pane is None:
+                continue
+            try:
+                position = int(pane.sashpos(0))
+            except Exception:
+                continue
+            if position > 0:
+                setattr(self, state_name, position)
+
+    def _apply_layout_state(self) -> None:
+        geometry = (self.ui_window_geometry or '').strip()
+        if geometry:
+            try:
+                self.root.geometry(geometry)
+            except Exception:
+                pass
+
+        pane_specs = (
+            ("main_pane", "ui_main_sash", 460, 820),
+            ("right_pane", "ui_right_sash", 140, 420),
+            ("results_pane", "ui_results_sash", 180, 300),
+        )
+
+        def restore(attempt: int = 0) -> None:
+            self.layout_after_id = None
+            pending = False
+            for attr_name, state_name, min_first, min_second in pane_specs:
+                pane = getattr(self, attr_name, None)
+                position = getattr(self, state_name, 0)
+                if pane is None or not position:
+                    continue
+                if pane.winfo_width() <= 1 and pane.winfo_height() <= 1:
+                    pending = True
+                    continue
+                try:
+                    pane.sashpos(0, self._clamp_sash_position(pane, int(position), min_first=min_first, min_second=min_second))
+                except Exception:
+                    pending = True
+            if pending and attempt < 8 and self.root.winfo_exists():
+                self.layout_after_id = self.root.after(80, lambda: restore(attempt + 1))
+
+        if self.layout_after_id is not None:
+            try:
+                self.root.after_cancel(self.layout_after_id)
+            except Exception:
+                pass
+            self.layout_after_id = None
+        self.layout_after_id = self.root.after(0, restore)
+
+    def _sync_runtime_layout_to_config(self, config: AppConfig) -> None:
+        self._capture_layout_state()
+        config.ui_window_geometry = self.ui_window_geometry
+        config.ui_main_sash = int(self.ui_main_sash)
+        config.ui_right_sash = int(self.ui_right_sash)
+        config.ui_results_sash = int(self.ui_results_sash)
+
+    def _coerce_layout_value(self, value, fallback: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return fallback
+        return parsed if parsed > 0 else fallback
+
+    def _clamp_sash_position(self, pane, requested: int, *, min_first: int, min_second: int) -> int:
+        try:
+            orient = str(pane.cget("orient"))
+        except Exception:
+            orient = "vertical"
+        total = pane.winfo_width() if orient == "horizontal" else pane.winfo_height()
+        if total <= 1:
+            return max(1, requested)
+        safe_first = max(80, min(min_first, max(total - 140, 80)))
+        safe_second = max(140, min(min_second, max(total - 80, 140)))
+        upper = max(safe_first, total - safe_second)
+        return max(safe_first, min(int(requested), upper))
+
     def _card(self, parent: tk.Widget, title: str, subtitle: str, row: int, *, pady: tuple[int, int] = (0, 0)) -> tk.Frame:
         card = tk.Frame(parent, bg=self.colors["card"], highlightbackground=self.colors["border"], highlightthickness=1)
         card.grid(row=row, column=0, sticky="ew", pady=pady)
@@ -278,37 +442,126 @@ class OmniClipDesktopApp:
         tk.Label(card, text=subtitle, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
         return card
 
+    def _panel(self, parent: tk.Widget, row: int, *, column: int = 0, columnspan: int = 1, pady: tuple[int, int] = (0, 0)) -> tk.Frame:
+        panel = tk.Frame(parent, bg=self.colors["soft_2"], highlightbackground=self.colors["border"], highlightthickness=1)
+        panel.grid(row=row, column=column, columnspan=columnspan, sticky="nsew", pady=pady)
+        panel.grid_columnconfigure(0, weight=1)
+        return panel
+
+    def _bind_mousewheel(self, canvas: tk.Canvas, target: tk.Widget) -> None:
+        def _on_mousewheel(event):
+            delta = event.delta
+            if sys.platform == "darwin":
+                delta = -1 * delta
+            step = -1 if delta > 0 else 1
+            canvas.yview_scroll(step, "units")
+
+        def _bind(_event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind(_event):
+            canvas.unbind_all("<MouseWheel>")
+
+        target.bind("<Enter>", _bind)
+        target.bind("<Leave>", _unbind)
+
+    def _make_scrollable_tab(self, notebook: ttk.Notebook) -> tuple[tk.Frame, tk.Frame]:
+        outer = tk.Frame(notebook, bg=self.colors["card"])
+        outer.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(outer, bg=self.colors["card"], highlightthickness=0, borderwidth=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        inner = tk.Frame(canvas, bg=self.colors["card"])
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        inner.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+        self._bind_mousewheel(canvas, outer)
+        return outer, inner
+
     def _build_left_cards(self) -> None:
-        self.left.grid_columnconfigure(0, weight=1)
-        self._build_quick_start_card()
-        self._build_settings_card()
-        self._build_data_card()
+        shell = tk.Frame(self.left, bg=self.colors["card"], highlightbackground=self.colors["border"], highlightthickness=1)
+        shell.grid(row=0, column=0, sticky="nsew")
+        shell.grid_columnconfigure(0, weight=1)
+        shell.grid_rowconfigure(1, weight=1)
 
-    def _build_quick_start_card(self) -> None:
-        card = self._card(self.left, self._tr("quick_start_title"), self._tr("quick_start_subtitle"), 0)
+        tk.Label(shell, text=self._tr("workspace_title"), bg=self.colors["card"], fg=self.colors["ink"], font=self.fonts["card_title"], anchor="w").grid(row=0, column=0, sticky="w", padx=16, pady=(14, 2))
+        tk.Label(shell, text=self._tr("workspace_subtitle"), bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=420).grid(row=0, column=0, sticky="ew", padx=16, pady=(38, 10))
 
-        steps = tk.Frame(card, bg=self.colors["card"])
-        steps.grid(row=2, column=0, sticky="ew", padx=16)
+        self.left_tabs = ttk.Notebook(shell, style="App.TNotebook")
+        self.left_tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+
+        start_tab, start_body = self._make_scrollable_tab(self.left_tabs)
+        settings_tab, settings_body = self._make_scrollable_tab(self.left_tabs)
+        data_tab, data_body = self._make_scrollable_tab(self.left_tabs)
+        self.left_tabs.add(start_tab, text=self._tr("left_tab_start"))
+        self.left_tabs.add(settings_tab, text=self._tr("left_tab_settings"))
+        self.left_tabs.add(data_tab, text=self._tr("left_tab_data"))
+
+        self._build_quick_start_card(start_body)
+        self._build_settings_card(settings_body)
+        self._build_data_card(data_body)
+
+    def _build_quick_start_card(self, parent: tk.Widget) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_columnconfigure(1, weight=1)
+
+        guide_panel = self._panel(parent, 0, columnspan=2)
+        tk.Label(guide_panel, text=self._tr("quick_start_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
+
+        steps = tk.Frame(guide_panel, bg=self.colors["soft_2"])
+        steps.grid(row=1, column=0, sticky="ew", padx=16)
         for index, key in enumerate(("step_1", "step_2", "step_3")):
             badge = tk.Label(steps, text=str(index + 1), bg=self.colors["accent_soft"], fg=self.colors["accent_dark"], font=self.fonts["chip"], width=2, pady=3)
-            badge.grid(row=index, column=0, sticky="w")
-            tk.Label(steps, text=self._tr(key), bg=self.colors["card"], fg=self.colors["ink"], font=self.fonts["body"], anchor="w").grid(row=index, column=1, sticky="w", padx=(8, 0), pady=(0 if index == 0 else 6, 0))
+            badge.grid(row=index, column=0, sticky="nw")
+            tk.Label(
+                steps,
+                text=self._tr(key),
+                bg=self.colors["soft_2"],
+                fg=self.colors["ink"],
+                font=self.fonts["body"],
+                anchor="w",
+                justify="left",
+                wraplength=330,
+            ).grid(row=index, column=1, sticky="w", padx=(8, 0), pady=(0 if index == 0 else 6, 0))
 
-        chips = tk.Frame(card, bg=self.colors["card"])
-        chips.grid(row=3, column=0, sticky="ew", padx=16, pady=(14, 8))
+        chips = tk.Frame(guide_panel, bg=self.colors["soft_2"])
+        chips.grid(row=2, column=0, sticky="ew", padx=16, pady=(14, 14))
         chips.grid_columnconfigure((0, 1, 2), weight=1)
         self.vault_chip = self._chip(chips, self.vault_state_var, 0)
         self.model_chip = self._chip(chips, self.model_state_var, 1)
         self.index_chip = self._chip(chips, self.index_state_var, 2)
 
-        form = tk.Frame(card, bg=self.colors["card"])
-        form.grid(row=4, column=0, sticky="ew", padx=16)
+        paths_panel = self._panel(parent, 1, columnspan=2, pady=(12, 0))
+        form = tk.Frame(paths_panel, bg=self.colors["soft_2"])
+        form.grid(row=0, column=0, sticky="ew", padx=16, pady=14)
         form.grid_columnconfigure(1, weight=1)
-        self._path_row(form, 0, self._tr("vault_label"), self.vault_var, self._choose_vault, tooltip_key="vault", browse_tooltip_key="browse_vault")
-        self._path_row(form, 1, self._tr("data_dir_label"), self.data_dir_var, self._choose_data_dir, tooltip_key="data_dir", browse_tooltip_key="browse_data")
 
-        actions = tk.Frame(card, bg=self.colors["card"])
-        actions.grid(row=5, column=0, sticky="ew", padx=16, pady=(14, 0))
+        saved_caption = tk.Label(form, text=self._tr("saved_vaults_label"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        saved_caption.grid(row=0, column=0, sticky="w", pady=(0, 0))
+        self._attach_tooltip(saved_caption, "saved_vaults")
+        saved_row = tk.Frame(form, bg=self.colors["soft_2"])
+        saved_row.grid(row=0, column=1, sticky="ew")
+        saved_row.grid_columnconfigure(0, weight=1)
+        self.vault_switch = ttk.Combobox(saved_row, textvariable=self.saved_vault_var, values=self.saved_vaults, state="readonly", style="Field.TCombobox")
+        self.vault_switch.grid(row=0, column=0, sticky="ew")
+        self.vault_switch.bind("<<ComboboxSelected>>", self._on_saved_vault_selected)
+        self._attach_tooltip(self.vault_switch, "saved_vaults")
+        remove_button = ttk.Button(saved_row, text=self._tr("remove_saved_vault"), style="Secondary.TButton", command=self._remove_selected_vault)
+        remove_button.grid(row=0, column=1, padx=(8, 0))
+        self._attach_tooltip(remove_button, "remove_saved_vault")
+
+        self._path_row(form, 1, self._tr("vault_label"), self.vault_var, self._choose_vault, tooltip_key="vault", browse_tooltip_key="browse_vault")
+        self._path_row(form, 2, self._tr("data_dir_label"), self.data_dir_var, self._choose_data_dir, tooltip_key="data_dir", browse_tooltip_key="browse_data")
+
+        action_panel = self._panel(parent, 2, column=0, pady=(12, 0))
+        actions = tk.Frame(action_panel, bg=self.colors["soft_2"])
+        actions.grid(row=0, column=0, sticky="ew", padx=16, pady=14)
         for column in range(2):
             actions.grid_columnconfigure(column, weight=1)
         preflight_button = ttk.Button(actions, text=self._tr("preflight_button"), style="Secondary.TButton", command=self._estimate)
@@ -324,27 +577,47 @@ class OmniClipDesktopApp:
         self.watch_button.grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(10, 0))
         self._attach_tooltip(self.watch_button, "watch")
 
-        stats = tk.Frame(card, bg=self.colors["card"])
-        stats.grid(row=6, column=0, sticky="ew", padx=16, pady=(14, 0))
-        for index, (label, variable) in enumerate((("Files", self.files_var), ("Chunks", self.chunks_var), ("Refs", self.refs_var))):
+        status_panel = self._panel(parent, 2, column=1, pady=(12, 0))
+        stats = tk.Frame(status_panel, bg=self.colors["soft_2"])
+        stats.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 0))
+        for index, (label, variable) in enumerate(((self._tr("stat_files"), self.files_var), (self._tr("stat_chunks"), self.chunks_var), (self._tr("stat_refs"), self.refs_var))):
             stats.grid_columnconfigure(index, weight=1)
             self._stat_box(stats, label, variable, index)
-        tk.Label(card, textvariable=self.preflight_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", wraplength=390, anchor="w").grid(row=7, column=0, sticky="ew", padx=16, pady=(14, 4))
-        tk.Label(card, textvariable=self.watch_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", wraplength=390, anchor="w").grid(row=8, column=0, sticky="ew", padx=16, pady=(0, 14))
-    def _build_settings_card(self) -> None:
-        card = self._card(self.left, self._tr("settings_title"), self._tr("settings_subtitle"), 1, pady=(14, 0))
-        form = tk.Frame(card, bg=self.colors["card"])
-        form.grid(row=2, column=0, sticky="ew", padx=16)
+        tk.Label(status_panel, textvariable=self.preflight_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", wraplength=180, anchor="w").grid(row=1, column=0, sticky="ew", padx=16, pady=(14, 4))
+        tk.Label(status_panel, textvariable=self.watch_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", wraplength=180, anchor="w").grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
+
+        task_panel = tk.Frame(status_panel, bg=self.colors["soft_2"], highlightbackground=self.colors["border"], highlightthickness=1)
+        task_panel.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
+        task_panel.grid_columnconfigure(0, weight=1)
+        tk.Label(task_panel, text=self._tr("task_panel_title"), bg=self.colors["soft_2"], fg=self.colors["ink"], font=self.fonts["small"], anchor="w").grid(row=0, column=0, sticky="w", padx=12, pady=(10, 6))
+        self.task_progress = ttk.Progressbar(task_panel, mode="indeterminate")
+        self.task_progress.grid(row=1, column=0, sticky="ew", padx=12)
+        self.rebuild_pause_button = ttk.Button(task_panel, textvariable=self.rebuild_pause_var, style="Secondary.TButton", command=self._toggle_rebuild_pause)
+        self.rebuild_pause_button.grid(row=2, column=0, sticky="e", padx=12, pady=(8, 0))
+        self.rebuild_pause_button.grid_remove()
+        self._attach_tooltip(self.rebuild_pause_button, "pause_rebuild")
+        tk.Label(task_panel, textvariable=self.task_state_var, bg=self.colors["soft_2"], fg=self.colors["ink"], font=self.fonts["small"], anchor="w").grid(row=3, column=0, sticky="w", padx=12, pady=(8, 0))
+        tk.Label(task_panel, textvariable=self.task_elapsed_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=4, column=0, sticky="w", padx=12, pady=(4, 0))
+        tk.Label(task_panel, textvariable=self.task_eta_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=180).grid(row=5, column=0, sticky="w", padx=12, pady=(4, 0))
+        tk.Label(task_panel, textvariable=self.task_detail_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=180).grid(row=6, column=0, sticky="w", padx=12, pady=(4, 10))
+
+    def _build_settings_card(self, parent: tk.Widget) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+
+        form_panel = self._panel(parent, 0)
+        tk.Label(form_panel, text=self._tr("settings_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
+        form = tk.Frame(form_panel, bg=self.colors["soft_2"])
+        form.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 14))
         form.grid_columnconfigure(1, weight=1)
         form.grid_columnconfigure(3, weight=1)
-
         self._combo_row(form, 0, self._tr("backend_label"), self.backend_var, ["lancedb", "disabled"], tooltip_key="backend")
         self._entry_row(form, 1, self._tr("model_label"), self.model_var, tooltip_key="model")
         self._combo_pair_row(form, 2, self._tr("runtime_label"), self.runtime_var, ["torch", "onnx"], self._tr("device_label"), self.device_var, ["cpu", "cuda"], left_tip="runtime", right_tip="device")
         self._entry_pair_row(form, 3, self._tr("limit_label"), self.limit_var, self._tr("interval_label"), self.interval_var, left_tip="limit", right_tip="interval")
 
-        action_row = tk.Frame(card, bg=self.colors["card"])
-        action_row.grid(row=3, column=0, sticky="ew", padx=16, pady=(14, 0))
+        action_panel = self._panel(parent, 1, pady=(12, 0))
+        action_row = tk.Frame(action_panel, bg=self.colors["soft_2"])
+        action_row.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 0))
         for index in range(3):
             action_row.grid_columnconfigure(index, weight=1)
         recommended_button = ttk.Button(action_row, text=self._tr("apply_recommended"), style="Secondary.TButton", command=self._apply_recommended)
@@ -357,12 +630,12 @@ class OmniClipDesktopApp:
         save_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
         self._attach_tooltip(save_button, "save_config")
 
-        toggle_button = ttk.Button(card, text=self._tr("advanced_hide") if self.show_advanced_var.get() else self._tr("advanced_show"), style="Secondary.TButton", command=self._toggle_advanced)
-        toggle_button.grid(row=4, column=0, sticky="ew", padx=16, pady=(12, 0))
+        toggle_button = ttk.Button(action_panel, text=self._tr("advanced_hide") if self.show_advanced_var.get() else self._tr("advanced_show"), style="Secondary.TButton", command=self._toggle_advanced)
+        toggle_button.grid(row=1, column=0, sticky="ew", padx=16, pady=(12, 0))
 
         if self.show_advanced_var.get():
-            advanced = tk.Frame(card, bg=self.colors["card"])
-            advanced.grid(row=5, column=0, sticky="ew", padx=16, pady=(10, 0))
+            advanced = tk.Frame(action_panel, bg=self.colors["soft_2"])
+            advanced.grid(row=2, column=0, sticky="ew", padx=16, pady=(10, 0))
             local_only = ttk.Checkbutton(advanced, text=self._tr("local_only_label"), variable=self.local_only_var, style="Plain.TCheckbutton")
             local_only.grid(row=0, column=0, sticky="w")
             self._attach_tooltip(local_only, "local_only")
@@ -373,13 +646,17 @@ class OmniClipDesktopApp:
             polling.grid(row=2, column=0, sticky="w", pady=(6, 0))
             self._attach_tooltip(polling, "polling")
 
-        refresh_button = ttk.Button(card, text=self._tr("refresh_button"), style="Secondary.TButton", command=self._refresh)
-        refresh_button.grid(row=6, column=0, sticky="ew", padx=16, pady=(14, 14))
+        refresh_button = ttk.Button(action_panel, text=self._tr("refresh_button"), style="Secondary.TButton", command=self._refresh)
+        refresh_button.grid(row=3, column=0, sticky="ew", padx=16, pady=(14, 14))
 
-    def _build_data_card(self) -> None:
-        card = self._card(self.left, self._tr("data_title"), self._tr("data_subtitle"), 2, pady=(14, 0))
-        buttons = tk.Frame(card, bg=self.colors["card"])
-        buttons.grid(row=2, column=0, sticky="ew", padx=16)
+    def _build_data_card(self, parent: tk.Widget) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+
+        button_panel = self._panel(parent, 0)
+        tk.Label(button_panel, text=self._tr("data_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 6))
+        tk.Label(button_panel, textvariable=self.current_workspace_var, bg=self.colors["soft_2"], fg=self.colors["accent_dark"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+        buttons = tk.Frame(button_panel, bg=self.colors["soft_2"])
+        buttons.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 14))
         buttons.grid_columnconfigure((0, 1), weight=1)
         open_vault = ttk.Button(buttons, text=self._tr("open_vault"), style="Secondary.TButton", command=self._open_vault)
         open_vault.grid(row=0, column=0, sticky="ew", padx=(0, 6))
@@ -391,18 +668,23 @@ class OmniClipDesktopApp:
         open_exports.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         self._attach_tooltip(open_exports, "open_exports")
 
-        checks = tk.Frame(card, bg=self.colors["card"])
-        checks.grid(row=3, column=0, sticky="ew", padx=16, pady=(14, 0))
+        cleanup_panel = self._panel(parent, 1, pady=(12, 0))
+        checks = tk.Frame(cleanup_panel, bg=self.colors["soft_2"])
+        checks.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 0))
         ttk.Checkbutton(checks, text=self._tr("clear_index_label"), variable=self.clear_index_var, style="Plain.TCheckbutton").grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(checks, text=self._tr("clear_logs_label"), variable=self.clear_logs_var, style="Plain.TCheckbutton").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Checkbutton(checks, text=self._tr("clear_cache_label"), variable=self.clear_cache_var, style="Plain.TCheckbutton").grid(row=2, column=0, sticky="w", pady=(6, 0))
         ttk.Checkbutton(checks, text=self._tr("clear_exports_label"), variable=self.clear_exports_var, style="Plain.TCheckbutton").grid(row=3, column=0, sticky="w", pady=(6, 0))
-        clear_button = ttk.Button(card, text=self._tr("clear_button"), style="Danger.TButton", command=self._clear)
-        clear_button.grid(row=4, column=0, sticky="ew", padx=16, pady=(14, 14))
+        clear_button = ttk.Button(cleanup_panel, text=self._tr("clear_button"), style="Danger.TButton", command=self._clear)
+        clear_button.grid(row=1, column=0, sticky="ew", padx=16, pady=(14, 14))
         self._attach_tooltip(clear_button, "clear")
 
     def _build_right_cards(self) -> None:
-        search_card = self._card(self.right, self._tr("search_title"), self._tr("search_subtitle"), 0)
+        self.search_host.grid_columnconfigure(0, weight=1)
+        self.results_host.grid_columnconfigure(0, weight=1)
+        self.results_host.grid_rowconfigure(0, weight=1)
+
+        search_card = self._card(self.search_host, self._tr("search_title"), self._tr("search_subtitle"), 0)
         tk.Label(search_card, text=self._tr("query_hint"), bg=self.colors["card"], fg=self.colors["accent_dark"], font=self.fonts["small"], anchor="w").grid(row=2, column=0, sticky="w", padx=16)
         query_row = tk.Frame(search_card, bg=self.colors["card"])
         query_row.grid(row=3, column=0, sticky="ew", padx=16, pady=(10, 14))
@@ -421,19 +703,20 @@ class OmniClipDesktopApp:
         copy_context_button.grid(row=0, column=3, padx=(10, 0))
         self._attach_tooltip(copy_context_button, "copy_context")
 
-        result_card = self._card(self.right, self._tr("results_title"), self._tr("results_subtitle"), 1, pady=(14, 0))
-        result_card.grid_rowconfigure(2, weight=3)
-        result_card.grid_rowconfigure(3, weight=2)
+        result_card = self._card(self.results_host, self._tr("results_title"), self._tr("results_subtitle"), 0)
+        result_card.grid_rowconfigure(2, weight=1)
         result_card.grid_columnconfigure(0, weight=1)
 
-        table_frame = tk.Frame(result_card, bg=self.colors["card"])
-        table_frame.grid(row=2, column=0, sticky="nsew", padx=16)
+        self.results_pane = ttk.Panedwindow(result_card, orient="vertical")
+        self.results_pane.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 14))
+
+        table_frame = tk.Frame(self.results_pane, bg=self.colors["card"])
         table_frame.grid_columnconfigure(0, weight=1)
         table_frame.grid_rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(table_frame, columns=("title", "anchor", "source", "score"), show="headings", style="App.Treeview")
         for key, title, width in (
             ("title", self._tr("col_page"), 220),
-            ("anchor", self._tr("col_anchor"), 370),
+            ("anchor", self._tr("col_anchor"), 360),
             ("source", self._tr("col_source"), 240),
             ("score", self._tr("col_score"), 90),
         ):
@@ -445,8 +728,7 @@ class OmniClipDesktopApp:
         scroll.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=scroll.set)
 
-        tabs_host = tk.Frame(result_card, bg=self.colors["card"])
-        tabs_host.grid(row=3, column=0, sticky="nsew", padx=16, pady=(14, 14))
+        tabs_host = tk.Frame(self.results_pane, bg=self.colors["card"])
         tabs_host.grid_columnconfigure(0, weight=1)
         tabs_host.grid_rowconfigure(0, weight=1)
         self.tabs = ttk.Notebook(tabs_host, style="App.TNotebook")
@@ -462,6 +744,9 @@ class OmniClipDesktopApp:
         self.context_text = self._text(context_tab)
         self.log_text = self._text(log_tab)
 
+        self.results_pane.add(table_frame, weight=1)
+        self.results_pane.add(tabs_host, weight=1)
+
     def _chip(self, parent: tk.Widget, variable: tk.StringVar, column: int) -> tk.Label:
         label = tk.Label(parent, textvariable=variable, bg=self.colors["chip_neutral_bg"], fg=self.colors["chip_neutral_fg"], font=self.fonts["chip"], padx=10, pady=6)
         label.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0))
@@ -474,10 +759,11 @@ class OmniClipDesktopApp:
         tk.Label(box, textvariable=variable, bg=self.colors["soft_2"], fg=self.colors["ink"], font=self.fonts["value"]).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 10))
 
     def _path_row(self, parent: tk.Widget, row: int, label: str, variable: tk.StringVar, browse_cmd, *, tooltip_key: str, browse_tooltip_key: str) -> None:
-        caption = tk.Label(parent, text=label, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        background = str(parent.cget("bg"))
+        caption = tk.Label(parent, text=label, bg=background, fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
         caption.grid(row=row, column=0, sticky="w", pady=(8, 0))
         self._attach_tooltip(caption, tooltip_key)
-        frame = tk.Frame(parent, bg=self.colors["card"])
+        frame = tk.Frame(parent, bg=background)
         frame.grid(row=row, column=1, sticky="ew", pady=(8, 0))
         frame.grid_columnconfigure(0, weight=1)
         entry = ttk.Entry(frame, textvariable=variable, style="Field.TEntry")
@@ -488,7 +774,8 @@ class OmniClipDesktopApp:
         self._attach_tooltip(button, browse_tooltip_key)
 
     def _entry_row(self, parent: tk.Widget, row: int, label: str, variable: tk.StringVar, *, tooltip_key: str) -> None:
-        caption = tk.Label(parent, text=label, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        background = str(parent.cget("bg"))
+        caption = tk.Label(parent, text=label, bg=background, fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
         caption.grid(row=row, column=0, sticky="w", pady=(8, 0))
         self._attach_tooltip(caption, tooltip_key)
         entry = ttk.Entry(parent, textvariable=variable, style="Field.TEntry")
@@ -496,7 +783,8 @@ class OmniClipDesktopApp:
         self._attach_tooltip(entry, tooltip_key)
 
     def _combo_row(self, parent: tk.Widget, row: int, label: str, variable: tk.StringVar, values: list[str], *, tooltip_key: str) -> None:
-        caption = tk.Label(parent, text=label, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        background = str(parent.cget("bg"))
+        caption = tk.Label(parent, text=label, bg=background, fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
         caption.grid(row=row, column=0, sticky="w", pady=(8, 0))
         self._attach_tooltip(caption, tooltip_key)
         combo = ttk.Combobox(parent, textvariable=variable, values=values, state="readonly", style="Field.TCombobox")
@@ -504,14 +792,15 @@ class OmniClipDesktopApp:
         self._attach_tooltip(combo, tooltip_key)
 
     def _combo_pair_row(self, parent: tk.Widget, row: int, left_label: str, left_var: tk.StringVar, left_values: list[str], right_label: str, right_var: tk.StringVar, right_values: list[str], *, left_tip: str, right_tip: str) -> None:
-        left_caption = tk.Label(parent, text=left_label, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        background = str(parent.cget("bg"))
+        left_caption = tk.Label(parent, text=left_label, bg=background, fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
         left_caption.grid(row=row, column=0, sticky="w", pady=(8, 0))
         self._attach_tooltip(left_caption, left_tip)
         left_combo = ttk.Combobox(parent, textvariable=left_var, values=left_values, state="readonly", style="Field.TCombobox")
         left_combo.grid(row=row, column=1, sticky="ew", pady=(8, 0))
         self._attach_tooltip(left_combo, left_tip)
 
-        right_caption = tk.Label(parent, text=right_label, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        right_caption = tk.Label(parent, text=right_label, bg=background, fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
         right_caption.grid(row=row, column=2, sticky="w", padx=(14, 0), pady=(8, 0))
         self._attach_tooltip(right_caption, right_tip)
         right_combo = ttk.Combobox(parent, textvariable=right_var, values=right_values, state="readonly", style="Field.TCombobox")
@@ -519,14 +808,15 @@ class OmniClipDesktopApp:
         self._attach_tooltip(right_combo, right_tip)
 
     def _entry_pair_row(self, parent: tk.Widget, row: int, left_label: str, left_var: tk.StringVar, right_label: str, right_var: tk.StringVar, *, left_tip: str, right_tip: str) -> None:
-        left_caption = tk.Label(parent, text=left_label, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        background = str(parent.cget("bg"))
+        left_caption = tk.Label(parent, text=left_label, bg=background, fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
         left_caption.grid(row=row, column=0, sticky="w", pady=(8, 0))
         self._attach_tooltip(left_caption, left_tip)
         left_entry = ttk.Entry(parent, textvariable=left_var, style="Field.TEntry")
         left_entry.grid(row=row, column=1, sticky="ew", pady=(8, 0))
         self._attach_tooltip(left_entry, left_tip)
 
-        right_caption = tk.Label(parent, text=right_label, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        right_caption = tk.Label(parent, text=right_label, bg=background, fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
         right_caption.grid(row=row, column=2, sticky="w", padx=(14, 0), pady=(8, 0))
         self._attach_tooltip(right_caption, right_tip)
         right_entry = ttk.Entry(parent, textvariable=right_var, style="Field.TEntry")
@@ -550,11 +840,258 @@ class OmniClipDesktopApp:
         if tip_text:
             self.tooltips.append(ToolTip(widget, tip_text))
 
+    def _collect_vault_paths(self, active_vault: str = "") -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for raw_value in [active_vault, *self.saved_vaults]:
+            normalized = normalize_vault_path(raw_value)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        return ordered
+
+    def _set_saved_vaults(self, vaults: list[str], active_vault: str = "") -> None:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for raw_value in ([active_vault] if active_vault else []) + list(vaults):
+            normalized = normalize_vault_path(raw_value)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        self.saved_vaults = ordered
+        if hasattr(self, "vault_switch"):
+            self.vault_switch.configure(values=self.saved_vaults)
+        if active_vault:
+            self.saved_vault_var.set(normalize_vault_path(active_vault))
+        elif self.saved_vaults:
+            if self.saved_vault_var.get().strip() not in self.saved_vaults:
+                self.saved_vault_var.set(self.saved_vaults[0])
+        else:
+            self.saved_vault_var.set("")
+        self._refresh_workspace_summary()
+
+    def _reset_workspace_views(self) -> None:
+        self.current_hits = []
+        self.current_context = ""
+        self.current_report = None
+        self.latest_preflight_snapshot = None
+        self.context_view_text = ""
+        self.resume_prompt_workspace_id = None
+        self.files_var.set("0")
+        self.chunks_var.set("0")
+        self.refs_var.set("0")
+        self.preflight_var.set(self._tr("preflight_empty"))
+        self.result_var.set(self._tr("result_empty"))
+
+    def _refresh_workspace_summary(self) -> None:
+        vault = normalize_vault_path(self.vault_var.get().strip())
+        data_root = self.data_dir_var.get().strip() or str(default_data_root())
+        if not vault:
+            self.current_workspace_var.set(self._tr("workspace_empty"))
+            return
+        try:
+            paths = ensure_data_paths(data_root, vault)
+            self.current_workspace_var.set(
+                self._tr(
+                    "workspace_current",
+                    vault=Path(vault).name or vault,
+                    workspace=paths.root,
+                    shared=paths.shared_root,
+                )
+            )
+        except OSError:
+            self.current_workspace_var.set(self._tr("workspace_pending", vault=Path(vault).name or vault))
+
+    def _activate_vault(self, vault: str, *, refresh_status: bool = True) -> None:
+        normalized = normalize_vault_path(vault)
+        if not normalized:
+            return
+        self.vault_var.set(normalized)
+        self._set_saved_vaults(self.saved_vaults + [normalized], active_vault=normalized)
+        self._reset_workspace_views()
+        self._refresh_state_chips()
+        if refresh_status and not self.busy and not (self.watch_thread and self.watch_thread.is_alive()):
+            self._load_initial_status()
+            self._refresh_dynamic_views()
+
+    def _on_saved_vault_selected(self, _event=None) -> None:
+        selected = self.saved_vault_var.get().strip()
+        if selected:
+            self._activate_vault(selected)
+
+    def _remove_selected_vault(self) -> None:
+        selected = normalize_vault_path(self.saved_vault_var.get().strip() or self.vault_var.get().strip())
+        if not selected:
+            messagebox.showinfo(self._tr("not_ready_title"), self._tr("saved_vault_missing"), parent=self.root)
+            return
+        remaining = [vault for vault in self.saved_vaults if vault != selected]
+        next_active = remaining[0] if remaining else ""
+        self._set_saved_vaults(remaining, active_vault=next_active)
+        self.vault_var.set(next_active)
+        self._reset_workspace_views()
+        self._refresh_state_chips()
+        if next_active and not self.busy and not (self.watch_thread and self.watch_thread.is_alive()):
+            self._load_initial_status()
+        else:
+            self.status_var.set(self._tr("status_ready"))
+        self._append_log(self._tr("log_vault_removed", vault=Path(selected).name or selected))
+        self._refresh_dynamic_views()
+
+    def _format_elapsed(self, elapsed_seconds: float) -> str:
+        total_seconds = max(0, int(elapsed_seconds))
+        minutes, seconds = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _task_profile(self, label_key: str, config: AppConfig, paths) -> tuple[str, str]:
+        if label_key == "preflight_button":
+            return self._tr("task_eta_preflight"), self._tr("task_detail_preflight")
+        if label_key == "bootstrap_button":
+            if is_local_model_ready(config, paths):
+                return self._tr("task_eta_bootstrap_cached"), self._tr("task_detail_bootstrap_cached")
+            return self._tr("task_eta_bootstrap_download"), self._tr("task_detail_bootstrap_download", model=config.vector_model)
+        if label_key in {"rebuild_button", "resume_rebuild_task"}:
+            return self._tr("task_eta_rebuild"), self._tr("task_detail_rebuild")
+        if label_key == "refresh_button":
+            return self._tr("task_eta_refresh"), self._tr("task_detail_refresh")
+        return self._tr("task_eta_unknown"), self._tr("task_detail_unknown")
+
+    def _is_rebuild_task(self, label_key: str | None) -> bool:
+        return label_key in {"rebuild_button", "resume_rebuild_task"}
+
+    def _update_rebuild_pause_button(self) -> None:
+        if not hasattr(self, "rebuild_pause_button"):
+            return
+        visible = self.busy and self._is_rebuild_task(self.active_task_key)
+        if not visible:
+            self.rebuild_pause_event.clear()
+            self.rebuild_pause_var.set(self._tr("pause_rebuild"))
+            self.rebuild_pause_button.grid_remove()
+            return
+        paused = self.rebuild_pause_event.is_set()
+        self.rebuild_pause_var.set(self._tr("resume_rebuild_button") if paused else self._tr("pause_rebuild"))
+        self.rebuild_pause_button.configure(style="Primary.TButton" if paused else "Secondary.TButton")
+        self.rebuild_pause_button.grid()
+
+    def _toggle_rebuild_pause(self) -> None:
+        if not self.busy or not self._is_rebuild_task(self.active_task_key):
+            return
+        if self.rebuild_pause_event.is_set():
+            self.rebuild_pause_event.clear()
+            self.status_var.set(self._tr("status_rebuild_resumed"))
+            self._append_log(self._tr("log_rebuild_resumed"))
+            self.task_state_var.set(self._tr("task_running", task=self._tr(self.active_task_key or "rebuild_button")))
+            if self.latest_task_progress is not None:
+                self._update_task_progress(dict(self.latest_task_progress))
+        else:
+            self.rebuild_pause_event.set()
+            self.status_var.set(self._tr("status_rebuild_paused"))
+            self._append_log(self._tr("log_rebuild_paused"))
+            self.task_state_var.set(self._tr("task_paused", task=self._tr(self.active_task_key or "rebuild_button")))
+            self.task_detail_var.set(self._tr("task_detail_rebuild_paused"))
+            self.task_eta_var.set(self._tr("task_eta_paused"))
+            if hasattr(self, "task_progress"):
+                self.task_progress.stop()
+        self._update_rebuild_pause_button()
+
+    def _start_task_feedback(self, label_key: str, config: AppConfig, paths) -> None:
+        eta_text, detail_text = self._task_profile(label_key, config, paths)
+        self.active_task_key = label_key
+        self.latest_task_progress = None
+        self.rebuild_pause_event.clear()
+        self.task_started_at = time.time()
+        self.task_state_var.set(self._tr("task_running", task=self._tr(label_key)))
+        self.task_detail_var.set(detail_text)
+        self.task_elapsed_var.set(self._tr("task_elapsed", value="00:00"))
+        self.task_eta_var.set(self._tr("task_eta_label", value=eta_text))
+        self._update_rebuild_pause_button()
+        if hasattr(self, "task_progress"):
+            self.task_progress.stop()
+            self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
+            self.task_progress.start(12)
+        self._tick_task_feedback()
+
+    def _tick_task_feedback(self) -> None:
+        if self.task_after_id is not None:
+            try:
+                self.root.after_cancel(self.task_after_id)
+            except Exception:
+                pass
+            self.task_after_id = None
+        if not self.busy:
+            return
+        elapsed = self._format_elapsed(time.time() - self.task_started_at)
+        self.task_elapsed_var.set(self._tr("task_elapsed", value=elapsed))
+        self.task_after_id = self.root.after(500, self._tick_task_feedback)
+
+    def _stop_task_feedback(self) -> None:
+        if self.task_after_id is not None:
+            try:
+                self.root.after_cancel(self.task_after_id)
+            except Exception:
+                pass
+            self.task_after_id = None
+        if hasattr(self, "task_progress"):
+            self.task_progress.stop()
+            self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
+        self.rebuild_pause_event.clear()
+        self.latest_task_progress = None
+        self.active_task_key = None
+        self.task_started_at = 0.0
+        self.task_state_var.set(self._tr("task_idle"))
+        self.task_detail_var.set(self._tr("task_idle_detail"))
+        self.task_elapsed_var.set(self._tr("task_elapsed", value="00:00"))
+        self.task_eta_var.set(self._tr("task_eta_idle"))
+        self._update_rebuild_pause_button()
+
+    def _update_task_progress(self, payload: dict[str, object]) -> None:
+        if not hasattr(self, "task_progress"):
+            return
+        self.latest_task_progress = dict(payload)
+        stage = str(payload.get("stage") or "")
+        current = max(0, int(payload.get("current", 0) or 0))
+        total = max(0, int(payload.get("total", 0) or 0))
+        if self.rebuild_pause_event.is_set() and self._is_rebuild_task(self.active_task_key):
+            if stage in {"indexing", "vectorizing"} and total > 0:
+                self.task_progress.stop()
+                self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
+            else:
+                self.task_progress.stop()
+                self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
+            return
+        if stage == "indexing" and total > 0:
+            self.task_progress.stop()
+            self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
+            current_path = str(payload.get("current_path") or self._tr("none_value"))
+            self.task_detail_var.set(self._tr("task_detail_rebuild_progress", current=current, total=total, path=current_path))
+            if current > 0 and self.task_started_at > 0:
+                elapsed_seconds = max(time.time() - self.task_started_at, 0.1)
+                remaining_seconds = int((elapsed_seconds / current) * max(total - current, 0))
+                self.task_eta_var.set(self._tr("task_eta_label", value=format_duration(remaining_seconds)))
+        elif stage == "rendering":
+            self.task_progress.stop()
+            self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
+            self.task_progress.start(10)
+            self.task_detail_var.set(self._tr("task_detail_rebuild_rendering"))
+        elif stage == "vectorizing":
+            if total > 0:
+                self.task_progress.stop()
+                self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
+            else:
+                self.task_progress.stop()
+                self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
+                self.task_progress.start(10)
+            self.task_detail_var.set(self._tr("task_detail_rebuild_vectorizing", total=total))
+
     def _refresh_dynamic_views(self) -> None:
         self._refresh_state_chips()
         self._render_hits()
         self._set_text(self.preview_text, self._current_preview_text())
-        self._set_text(self.context_text, self.current_context or self._tr("context_empty"))
+        self._set_text(self.context_text, self.context_view_text or self._tr("context_empty"))
         self._set_text(self.log_text, "\n".join(self.log_lines) if self.log_lines else self._tr("log_empty"))
         self._update_watch_button_state()
 
@@ -590,6 +1127,7 @@ class OmniClipDesktopApp:
             self.tree.selection_set("0")
 
     def _refresh_state_chips(self) -> None:
+        self._refresh_workspace_summary()
         try:
             vault_path = Path(self.vault_var.get().strip()).expanduser()
             vault_ready = bool(self.vault_var.get().strip()) and vault_path.exists() and vault_path.is_dir()
@@ -613,20 +1151,76 @@ class OmniClipDesktopApp:
             widget.configure(bg=self.colors["chip_warn_bg"], fg=self.colors["chip_warn_fg"])
         else:
             widget.configure(bg=self.colors["chip_neutral_bg"], fg=self.colors["chip_neutral_fg"])
+
     def _load_initial_config(self) -> None:
         self._append_log(self._tr("log_started"))
         paths = ensure_data_paths()
-        self.data_dir_var.set(str(paths.root))
+        self.data_dir_var.set(str(paths.global_root))
         self._load_config(paths)
-        self._refresh()
+        self._load_initial_status()
 
     def _on_language_changed(self, _event=None) -> None:
         self.language_code = language_code_from_label(self.language_var.get())
         self.language_var.set(language_label(self.language_code))
-        if not self.log_lines:
-            self.status_var.set(self._tr("status_ready"))
-            self.result_var.set(self._tr("result_empty"))
+        self._refresh_localized_runtime_state()
         self._render_ui()
+
+    def _refresh_localized_runtime_state(self) -> None:
+        self._refresh_workspace_summary()
+        if self.current_report is not None:
+            self.preflight_var.set(summarize_preflight(self.current_report, self.language_code))
+            if not self.current_context:
+                self.context_view_text = format_space_report(self.current_report, self.language_code)
+        elif self.latest_preflight_snapshot is not None:
+            self.preflight_var.set(
+                self._tr(
+                    "recent_preflight",
+                    risk=self.latest_preflight_snapshot.get("risk_level"),
+                    required=format_bytes(int(self.latest_preflight_snapshot.get("required_free_bytes", 0))),
+                    available=format_bytes(int(self.latest_preflight_snapshot.get("available_free_bytes", 0))),
+                )
+            )
+        else:
+            self.preflight_var.set(self._tr("preflight_empty"))
+
+        if self.watch_thread and self.watch_thread.is_alive():
+            mode = self._watch_mode_label(self.polling_var.get() or not WATCHDOG_AVAILABLE)
+            try:
+                seconds = float(self.interval_var.get().strip() or "2.0")
+            except ValueError:
+                seconds = 2.0
+            self.watch_var.set(self._tr("watch_running", mode=mode, seconds=seconds))
+            if not self.busy:
+                self.status_var.set(self._tr("status_watch_running"))
+        else:
+            self.watch_var.set(self._default_watch_summary())
+            if not self.busy:
+                if self.current_hits or self.current_context:
+                    self.status_var.set(self._tr("status_query_done"))
+                elif self.log_lines:
+                    self.status_var.set(self._tr("status_refresh_done"))
+                else:
+                    self.status_var.set(self._tr("status_ready"))
+
+        if self.busy and self.active_task_key:
+            self.task_state_var.set(self._tr("task_running", task=self._tr(self.active_task_key)))
+            try:
+                config, paths = self._config(False)
+                eta_text, detail_text = self._task_profile(self.active_task_key, config, paths)
+            except Exception:
+                eta_text, detail_text = self._tr("task_eta_unknown"), self._tr("task_detail_unknown")
+            self.task_detail_var.set(detail_text)
+            self.task_eta_var.set(self._tr("task_eta_label", value=eta_text))
+        else:
+            self.task_state_var.set(self._tr("task_idle"))
+            self.task_detail_var.set(self._tr("task_idle_detail"))
+            self.task_elapsed_var.set(self._tr("task_elapsed", value="00:00"))
+            self.task_eta_var.set(self._tr("task_eta_idle"))
+
+        if self.current_hits or self.current_context:
+            self.result_var.set(self._tr("query_hits", count=len(self.current_hits)))
+        else:
+            self.result_var.set(self._tr("result_empty"))
 
     def _apply_recommended(self) -> None:
         self.backend_var.set("lancedb")
@@ -658,22 +1252,24 @@ class OmniClipDesktopApp:
     def _choose_vault(self) -> None:
         selected = filedialog.askdirectory(title=self._tr("vault_label"), initialdir=self.vault_var.get().strip() or str(Path.home()))
         if selected:
-            self.vault_var.set(selected)
-            self._refresh_state_chips()
+            self._activate_vault(selected)
+            self._append_log(self._tr("log_vault_selected", vault=Path(selected).name or selected))
 
     def _choose_data_dir(self) -> None:
         selected = filedialog.askdirectory(title=self._tr("data_dir_label"), initialdir=self.data_dir_var.get().strip() or str(default_data_root()))
         if selected:
-            self.data_dir_var.set(selected)
+            self.data_dir_var.set(str(Path(selected).expanduser().resolve()))
             self._load_config_from_current_dir()
             self._refresh_state_chips()
 
     def _load_config_from_current_dir(self) -> None:
-        self._load_config(ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root())))
+        active_vault = self.vault_var.get().strip() or None
+        self._load_config(ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()), active_vault))
 
     def _load_config(self, paths) -> None:
         config = load_config(paths)
         if config is None:
+            self._set_saved_vaults([], active_vault=self.vault_var.get().strip())
             self.preflight_var.set(self._tr("preflight_empty"))
             return
         new_language = normalize_language(config.ui_language)
@@ -681,6 +1277,7 @@ class OmniClipDesktopApp:
         self.language_code = new_language
         self.language_var.set(language_label(self.language_code))
         self.vault_var.set(config.vault_path)
+        self._set_saved_vaults(config.vault_paths, active_vault=config.vault_path)
         self.data_dir_var.set(config.data_root)
         self.backend_var.set(config.vector_backend or "disabled")
         self.model_var.set(config.vector_model)
@@ -689,13 +1286,18 @@ class OmniClipDesktopApp:
         self.limit_var.set(str(config.query_limit))
         self.interval_var.set(str(config.poll_interval_seconds))
         self.local_only_var.set(config.vector_local_files_only)
+        self.ui_window_geometry = config.ui_window_geometry or self.ui_window_geometry
+        self.ui_main_sash = self._coerce_layout_value(config.ui_main_sash, self.ui_main_sash)
+        self.ui_right_sash = self._coerce_layout_value(config.ui_right_sash, self.ui_right_sash)
+        self.ui_results_sash = self._coerce_layout_value(config.ui_results_sash, self.ui_results_sash)
         self._append_log(self._tr("log_loaded_config", path=paths.config_file))
         if language_changed:
             self._render_ui()
         self._refresh_state_chips()
+        self._refresh_localized_runtime_state()
+        self._apply_layout_state()
 
     def _config(self, require_vault: bool):
-        paths = ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()))
         vault = self.vault_var.get().strip()
         if require_vault:
             if not vault:
@@ -705,14 +1307,16 @@ class OmniClipDesktopApp:
                 raise ValueError(self._tr("vault_invalid"))
             vault = str(vault_path)
         else:
-            vault = str(Path(vault).expanduser().resolve()) if vault else str(Path.home())
+            vault = normalize_vault_path(vault)
+        paths = ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()), vault or None)
         limit = int(self.limit_var.get().strip() or "8")
         interval = float(self.interval_var.get().strip() or "2.0")
         if limit <= 0 or interval <= 0:
             raise ValueError(self._tr("number_invalid"))
         config = AppConfig(
             vault_path=vault,
-            data_root=str(paths.root),
+            vault_paths=self._collect_vault_paths(vault),
+            data_root=str(paths.global_root),
             query_limit=limit,
             poll_interval_seconds=interval,
             vector_backend=self.backend_var.get().strip() or "disabled",
@@ -721,13 +1325,19 @@ class OmniClipDesktopApp:
             vector_device=self.device_var.get().strip() or "cpu",
             vector_local_files_only=self.local_only_var.get(),
             ui_language=self.language_code,
+            ui_window_geometry=self.ui_window_geometry,
+            ui_main_sash=int(self.ui_main_sash),
+            ui_right_sash=int(self.ui_right_sash),
+            ui_results_sash=int(self.ui_results_sash),
         )
         return config, paths
 
     def _save_only(self) -> None:
         try:
             config, paths = self._config(False)
+            self._sync_runtime_layout_to_config(config)
             save_config(config, paths)
+            self._set_saved_vaults(config.vault_paths, active_vault=config.vault_path)
             self.status_var.set(self._tr("status_saved", path=paths.config_file))
             self._append_log(self._tr("log_saved_config", path=paths.config_file))
         except Exception as exc:
@@ -741,22 +1351,25 @@ class OmniClipDesktopApp:
             messagebox.showinfo(self._tr("stop_watch_first_title"), self._tr("stop_watch_first_body"), parent=self.root)
             return
         try:
+            self._sync_runtime_layout_to_config(config)
             save_config(config, paths)
+            self._set_saved_vaults(config.vault_paths, active_vault=config.vault_path)
         except Exception as exc:
             messagebox.showerror(self._tr("cannot_start_title"), str(exc), parent=self.root)
             return
         label = self._tr(label_key)
         self.busy = True
         self.status_var.set(f"{label}…")
+        self._start_task_feedback(label_key, config, paths)
 
         def worker() -> None:
             service = OmniClipService(config, paths)
             try:
                 payload = action(service)
             except Exception:
-                self.queue.put(("error", label, traceback.format_exc()))
+                self.queue.put(("error", label_key, label, traceback.format_exc()))
             else:
-                self.queue.put(("success", label, payload, callback))
+                self.queue.put(("success", label_key, label, payload, callback))
             finally:
                 service.close()
 
@@ -768,7 +1381,24 @@ class OmniClipDesktopApp:
         except Exception as exc:
             messagebox.showerror(self._tr("cannot_start_title"), str(exc), parent=self.root)
             return
-        if ensure_model and self._backend_enabled(config) and not self._prepare_model_for_followup(label_key, config, paths, require_vault, lambda: self._start_task(label_key, action, callback, require_vault=require_vault, ensure_model=False)):
+        if (
+            ensure_model
+            and self._backend_enabled(config)
+            and not is_local_model_ready(config, paths)
+            and not self._prepare_model_for_followup(
+                label_key,
+                config,
+                paths,
+                require_vault,
+                lambda: self._start_task(
+                    label_key,
+                    action,
+                    callback,
+                    require_vault=require_vault,
+                    ensure_model=False,
+                ),
+            )
+        ):
             return
         self._run_task(label_key, action, callback, config=config, paths=paths)
 
@@ -784,10 +1414,178 @@ class OmniClipDesktopApp:
             return True
         return is_local_model_ready(config, paths)
 
-    # Why: 先在 UI 层征求是否自动下载模型，避免第一次查询或建库时静默卡住，让新手知道当前缺了什么。
+
+    def _load_initial_status(self) -> None:
+        try:
+            config, paths = self._config(False)
+        except Exception:
+            self.status_var.set(self._tr("status_ready"))
+            return
+        service = OmniClipService(config, paths)
+        try:
+            payload = service.status_snapshot()
+        finally:
+            service.close()
+        self._apply_status(payload)
+        self.status_var.set(self._tr("status_refresh_done"))
+        self._append_log(self._tr("log_status_done"))
+        self._offer_resume_rebuild(config, paths, payload)
+
+    def _manual_model_hint(self, config: AppConfig, paths) -> str:
+        return self._tr(
+            "manual_model_hint",
+            mirror_url="https://hf-mirror.com/",
+            hf_url=f"https://huggingface.co/{config.vector_model}",
+            model=config.vector_model,
+            size=format_bytes(estimate_model_cache_bytes(config.vector_model, config.vector_runtime)),
+            model_dir=get_local_model_dir(config, paths),
+        )
+
+    def _choose_model_download_mode(self, task_label: str, config: AppConfig, paths) -> str | None:
+        model_dir = get_local_model_dir(config, paths)
+        model_dir.mkdir(parents=True, exist_ok=True)
+        size_text = format_bytes(estimate_model_cache_bytes(config.vector_model, config.vector_runtime))
+        choice = messagebox.askyesnocancel(
+            self._tr("model_prompt_title"),
+            self._tr(
+                "model_download_choice_body",
+                task=task_label,
+                model=config.vector_model,
+                size=size_text,
+                model_dir=model_dir,
+            ),
+            parent=self.root,
+        )
+        if choice is True:
+            self._append_log(self._tr("log_model_download_prompt"))
+            return "auto"
+        if choice is False:
+            messagebox.showinfo(
+                self._tr("model_manual_title"),
+                self._tr(
+                    "manual_model_hint",
+                    mirror_url="https://hf-mirror.com/",
+                    hf_url=f"https://huggingface.co/{config.vector_model}",
+                    model=config.vector_model,
+                    size=size_text,
+                    model_dir=model_dir,
+                ),
+                parent=self.root,
+            )
+            self.status_var.set(self._tr("status_manual_download_waiting"))
+            self._append_log(self._tr("log_manual_download_hint", model=config.vector_model))
+            return "manual"
+        self.status_var.set(self._tr("model_prompt_declined"))
+        self._append_log(self._tr("log_model_download_declined"))
+        return None
+
+    def _traceback_summary(self, tb: str) -> str:
+        lines = [line.strip() for line in tb.splitlines() if line.strip()]
+        for line in reversed(lines):
+            if not line.startswith("File "):
+                return line
+        return lines[-1] if lines else "Unknown error"
+
+    def _friendly_task_error(self, label_key: str, label: str, tb: str) -> str:
+        summary = self._traceback_summary(tb)
+        if label_key == "bootstrap_button":
+            try:
+                config, paths = self._config(False)
+                manual_hint = self._manual_model_hint(config, paths)
+            except Exception:
+                manual_hint = ""
+            return self._tr("bootstrap_failed_body", error=summary, manual_hint=manual_hint)
+        return summary
+
+    def _describe_resume_phase(self, phase: str | None) -> str:
+        normalized = (phase or "indexing").strip().lower()
+        return self._tr(f"resume_phase_{normalized}")
+
+    def _discard_pending_rebuild(self, config: AppConfig, paths) -> None:
+        service = OmniClipService(config, paths)
+        try:
+            service.discard_pending_rebuild()
+            payload = service.status_snapshot()
+        finally:
+            service.close()
+        self._apply_status(payload)
+        self.status_var.set(self._tr("status_resume_discarded"))
+        self._append_log(self._tr("log_resume_discarded"))
+
+    def _offer_resume_rebuild(self, config: AppConfig, paths, payload) -> None:
+        pending = payload.get("pending_rebuild") if isinstance(payload, dict) else None
+        if not isinstance(pending, dict):
+            return
+        workspace_id = str(payload.get("workspace_id") or paths.root.name)
+        if self.resume_prompt_workspace_id == workspace_id:
+            return
+        self.resume_prompt_workspace_id = workspace_id
+        phase_label = self._describe_resume_phase(str(pending.get("phase") or "indexing"))
+        self._append_log(
+            self._tr(
+                "log_resume_found",
+                completed=int(pending.get("completed", 0) or 0),
+                total=int(pending.get("total", 0) or 0),
+                phase=phase_label,
+            )
+        )
+        should_resume = messagebox.askyesno(
+            self._tr("resume_rebuild_title"),
+            self._tr(
+                "resume_rebuild_body",
+                phase=phase_label,
+                completed=int(pending.get("completed", 0) or 0),
+                total=int(pending.get("total", 0) or 0),
+            ),
+            parent=self.root,
+        )
+        if should_resume:
+            self._append_log(self._tr("log_resume_continue"))
+            self._start_rebuild(resume=True)
+            return
+        self._discard_pending_rebuild(config, paths)
+
+    def _start_rebuild(self, *, resume: bool) -> None:
+        try:
+            config, paths = self._config(True)
+        except Exception as exc:
+            messagebox.showerror(self._tr("cannot_start_title"), str(exc), parent=self.root)
+            return
+        label_key = "resume_rebuild_task" if resume else "rebuild_button"
+        if self._backend_enabled(config) and not is_local_model_ready(config, paths):
+            if not self._prepare_model_for_followup(label_key, config, paths, True, lambda: self._start_rebuild(resume=resume)):
+                return
+            return
+        force = self.force_var.get()
+
+        def action(service):
+            report = None
+            if not resume:
+                report = service.estimate_space()
+                if not report.can_proceed and not force:
+                    return {"blocked": True, "report": report}
+            stats = service.rebuild_index(
+                resume=resume,
+                on_progress=lambda progress: self.queue.put(("progress", progress)),
+                pause_event=self.rebuild_pause_event,
+            )
+            return {"blocked": False, "report": report, "stats": stats, "status": service.status_snapshot(), "resumed": resume}
+
+        self.status_var.set(self._tr("status_resume_building") if resume else self._tr("status_ready"))
+        self._run_task(label_key, action, self._after_rebuild, config=config, paths=paths)
+
+    # Why: 先在 UI 层把“自动下载 / 手动下载 / 取消”说清楚，避免第一次查询或建库时像卡死。
     def _prepare_model_for_followup(self, label_key: str, config: AppConfig, paths, require_vault: bool, followup) -> bool:
+        choice = self._choose_model_download_mode(self._tr(label_key), config, paths)
+        if choice != "auto":
+            return False
+
         if config.vector_local_files_only and not is_local_model_ready(config, paths):
-            allow_remote = messagebox.askyesno(self._tr("model_prompt_title"), self._tr("model_prompt_local_only"), parent=self.root)
+            allow_remote = messagebox.askyesno(
+                self._tr("model_prompt_title"),
+                self._tr("model_prompt_local_only", manual_hint=self._manual_model_hint(config, paths)),
+                parent=self.root,
+            )
             if not allow_remote:
                 self.status_var.set(self._tr("model_prompt_declined"))
                 self._append_log(self._tr("log_model_download_declined"))
@@ -798,17 +1596,6 @@ class OmniClipDesktopApp:
             except Exception as exc:
                 messagebox.showerror(self._tr("cannot_start_title"), str(exc), parent=self.root)
                 return False
-
-        prompt = messagebox.askyesno(
-            self._tr("model_prompt_title"),
-            self._tr("model_prompt_body", task=self._tr(label_key), model=config.vector_model),
-            parent=self.root,
-        )
-        self._append_log(self._tr("log_model_download_prompt"))
-        if not prompt:
-            self.status_var.set(self._tr("model_prompt_declined"))
-            self._append_log(self._tr("log_model_download_declined"))
-            return False
 
         def action(service):
             report = service.estimate_space()
@@ -829,6 +1616,39 @@ class OmniClipDesktopApp:
         self._start_task("preflight_button", lambda service: {"report": service.estimate_space(), "status": service.status_snapshot()}, self._after_preflight)
 
     def _bootstrap(self) -> None:
+        try:
+            config, paths = self._config(True)
+        except Exception as exc:
+            messagebox.showerror(self._tr("cannot_start_title"), str(exc), parent=self.root)
+            return
+        if self._backend_enabled(config) and is_local_model_ready(config, paths):
+            self.status_var.set(self._tr("status_model_already_ready"))
+            self._append_log(self._tr("log_model_already_ready", model=config.vector_model))
+            self._refresh_state_chips()
+            messagebox.showinfo(self._tr("model_ready_title"), self._tr("model_ready_body", model=config.vector_model), parent=self.root)
+            return
+
+        choice = self._choose_model_download_mode(self._tr("bootstrap_button"), config, paths)
+        if choice != "auto":
+            return
+
+        if config.vector_local_files_only and not is_local_model_ready(config, paths):
+            allow_remote = messagebox.askyesno(
+                self._tr("model_prompt_title"),
+                self._tr("model_prompt_local_only", manual_hint=self._manual_model_hint(config, paths)),
+                parent=self.root,
+            )
+            if not allow_remote:
+                self.status_var.set(self._tr("model_prompt_declined"))
+                self._append_log(self._tr("log_model_download_declined"))
+                return
+            self.local_only_var.set(False)
+            try:
+                config, paths = self._config(True)
+            except Exception as exc:
+                messagebox.showerror(self._tr("cannot_start_title"), str(exc), parent=self.root)
+                return
+
         force = self.force_var.get()
 
         def action(service):
@@ -837,18 +1657,37 @@ class OmniClipDesktopApp:
                 return {"blocked": True, "report": report}
             return {"blocked": False, "report": report, "result": service.bootstrap_model(), "status": service.status_snapshot()}
 
-        self._start_task("bootstrap_button", action, self._after_bootstrap)
+        self._run_task("bootstrap_button", action, self._after_bootstrap, config=config, paths=paths)
 
     def _rebuild(self) -> None:
-        force = self.force_var.get()
-
-        def action(service):
-            report = service.estimate_space()
-            if not report.can_proceed and not force:
-                return {"blocked": True, "report": report}
-            return {"blocked": False, "report": report, "stats": service.rebuild_index(), "status": service.status_snapshot()}
-
-        self._start_task("rebuild_button", action, self._after_rebuild, ensure_model=True)
+        try:
+            config, paths = self._config(True)
+        except Exception as exc:
+            messagebox.showerror(self._tr("cannot_start_title"), str(exc), parent=self.root)
+            return
+        service = OmniClipService(config, paths)
+        try:
+            pending = service.pending_rebuild()
+        finally:
+            service.close()
+        if isinstance(pending, dict):
+            phase_label = self._describe_resume_phase(str(pending.get("phase") or "indexing"))
+            should_resume = messagebox.askyesno(
+                self._tr("resume_rebuild_title"),
+                self._tr(
+                    "resume_rebuild_body",
+                    phase=phase_label,
+                    completed=int(pending.get("completed", 0) or 0),
+                    total=int(pending.get("total", 0) or 0),
+                ),
+                parent=self.root,
+            )
+            if should_resume:
+                self._append_log(self._tr("log_resume_continue"))
+                self._start_rebuild(resume=True)
+                return
+            self._discard_pending_rebuild(config, paths)
+        self._start_rebuild(resume=False)
 
     def _refresh(self) -> None:
         self._start_task("refresh_button", lambda service: service.status_snapshot(), self._after_status, require_vault=False)
@@ -881,7 +1720,7 @@ class OmniClipDesktopApp:
             )
             return service.status_snapshot()
 
-        self._start_task("clear_button", action, self._after_clear, require_vault=False)
+        self._start_task("clear_button", action, self._after_clear, require_vault=True)
 
     def _toggle_watch(self) -> None:
         if self.watch_thread and self.watch_thread.is_alive():
@@ -908,7 +1747,7 @@ class OmniClipDesktopApp:
             return
 
         self.watch_stop = threading.Event()
-        mode = "polling" if self.polling_var.get() or not WATCHDOG_AVAILABLE else "watchdog"
+        mode = self._watch_mode_label(self.polling_var.get() or not WATCHDOG_AVAILABLE)
         self.status_var.set(self._tr("status_watch_running"))
         self.watch_var.set(self._tr("watch_running", mode=mode, seconds=config.poll_interval_seconds))
         self._append_log(self._tr("log_watch_started", mode=mode))
@@ -927,15 +1766,18 @@ class OmniClipDesktopApp:
                 self.queue.put(("watch-error", traceback.format_exc()))
             finally:
                 service.close()
-                self.queue.put(("watch-stopped", mode))
+                raw_mode = "polling" if self.polling_var.get() or not WATCHDOG_AVAILABLE else "watchdog"
+                self.queue.put(("watch-stopped", raw_mode))
 
         self.watch_thread = threading.Thread(target=worker, daemon=True)
         self.watch_thread.start()
+
     def _after_preflight(self, payload) -> None:
         report = payload["report"]
         self.current_report = report
-        self.preflight_var.set(summarize_preflight(report))
-        self._set_text(self.context_text, format_space_report(report))
+        self.context_view_text = format_space_report(report, self.language_code)
+        self.preflight_var.set(summarize_preflight(report, self.language_code))
+        self._set_text(self.context_text, self.context_view_text)
         self.tabs.select(1)
         self._apply_status(payload.get("status"))
         self.status_var.set(self._tr("status_preflight_done"))
@@ -945,8 +1787,9 @@ class OmniClipDesktopApp:
         report = payload.get("report")
         if report is not None:
             self.current_report = report
-            self.preflight_var.set(summarize_preflight(report))
-            self._set_text(self.context_text, format_space_report(report))
+            self.context_view_text = format_space_report(report, self.language_code)
+            self.preflight_var.set(summarize_preflight(report, self.language_code))
+            self._set_text(self.context_text, self.context_view_text)
             self.tabs.select(1)
         if payload.get("blocked"):
             self.status_var.set(self._tr("bootstrap_blocked_title"))
@@ -970,7 +1813,7 @@ class OmniClipDesktopApp:
         report = payload.get("report")
         if report is not None:
             self.current_report = report
-            self.preflight_var.set(summarize_preflight(report))
+            self.preflight_var.set(summarize_preflight(report, self.language_code))
         if payload.get("blocked"):
             self.status_var.set(self._tr("rebuild_blocked_title"))
             self._append_log(self._tr("log_rebuild_blocked"))
@@ -978,7 +1821,12 @@ class OmniClipDesktopApp:
             return
         stats = payload["stats"]
         self._apply_status(payload.get("status"))
-        self.status_var.set(self._tr("status_rebuild_done"))
+        duplicate_count = int(stats.get("duplicate_block_ids", 0))
+        if duplicate_count:
+            self.status_var.set(self._tr("status_rebuild_done_duplicates", count=duplicate_count))
+            self._append_log(self._tr("log_duplicate_block_ids", count=duplicate_count))
+        else:
+            self.status_var.set(self._tr("status_rebuild_done"))
         self._append_log(self._tr("log_rebuild_done", files=stats["files"], chunks=stats["chunks"], refs=stats["refs"]))
         self._refresh_state_chips()
 
@@ -993,6 +1841,7 @@ class OmniClipDesktopApp:
         hits, context = payload["payload"]
         self.current_hits = hits
         self.current_context = context
+        self.context_view_text = context
         self._render_hits()
         if hits:
             self.tree.selection_set("0")
@@ -1024,6 +1873,7 @@ class OmniClipDesktopApp:
         self.refs_var.set(str(stats.get("refs", 0)))
         latest = payload.get("latest_preflight")
         if isinstance(latest, dict):
+            self.latest_preflight_snapshot = latest
             self.preflight_var.set(
                 self._tr(
                     "recent_preflight",
@@ -1033,7 +1883,9 @@ class OmniClipDesktopApp:
                 )
             )
         elif self.current_report is not None:
-            self.preflight_var.set(summarize_preflight(self.current_report))
+            self.preflight_var.set(summarize_preflight(self.current_report, self.language_code))
+        else:
+            self.preflight_var.set(self._tr("preflight_empty"))
         backend = payload.get("vector_backend") or self.backend_var.get().strip() or "disabled"
         watch_text = self._tr("watch_ready") if payload.get("watchdog_available", WATCHDOG_AVAILABLE) else self._tr("watch_fallback")
         if not (self.watch_thread and self.watch_thread.is_alive()):
@@ -1069,28 +1921,36 @@ class OmniClipDesktopApp:
         self._append_log(self._tr("log_context_copied"))
 
     def _open_vault(self) -> None:
-        vault = self.vault_var.get().strip()
-        if not vault:
-            messagebox.showinfo(self._tr("not_ready_title"), self._tr("choose_vault_first"), parent=self.root)
+        try:
+            config, paths = self._config(True)
+        except Exception as exc:
+            messagebox.showinfo(self._tr("not_ready_title"), str(exc), parent=self.root)
             return
-        paths = ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()))
-        service = OmniClipService(AppConfig(vault_path=str(Path(vault).expanduser().resolve()), data_root=str(paths.root), ui_language=self.language_code), paths)
+        service = OmniClipService(config, paths)
         try:
             service.open_vault_dir()
         finally:
             service.close()
 
     def _open_data(self) -> None:
-        paths = ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()))
-        service = OmniClipService(AppConfig(vault_path=self.vault_var.get().strip() or str(Path.home()), data_root=str(paths.root), ui_language=self.language_code), paths)
+        try:
+            config, paths = self._config(True)
+        except Exception as exc:
+            messagebox.showinfo(self._tr("not_ready_title"), str(exc), parent=self.root)
+            return
+        service = OmniClipService(config, paths)
         try:
             service.open_data_dir()
         finally:
             service.close()
 
     def _open_exports(self) -> None:
-        paths = ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()))
-        service = OmniClipService(AppConfig(vault_path=self.vault_var.get().strip() or str(Path.home()), data_root=str(paths.root), ui_language=self.language_code), paths)
+        try:
+            config, paths = self._config(True)
+        except Exception as exc:
+            messagebox.showinfo(self._tr("not_ready_title"), str(exc), parent=self.root)
+            return
+        service = OmniClipService(config, paths)
         try:
             service.open_exports_dir()
         finally:
@@ -1127,17 +1987,22 @@ class OmniClipDesktopApp:
                 break
             kind = item[0]
             if kind == "success":
-                _, _label, payload, callback = item
+                _, label_key, _label, payload, callback = item
                 self.busy = False
+                self._stop_task_feedback()
                 if callback:
                     callback(payload)
             elif kind == "error":
-                _, label, tb = item
+                _, label_key, label, tb = item
                 self.busy = False
-                self.status_var.set(f"{label} failed")
+                self._stop_task_feedback()
+                self.status_var.set(self._tr("status_failed", label=label))
                 self._append_log(tb.strip())
                 self.tabs.select(2)
-                messagebox.showerror(label, "\n".join([line.strip() for line in tb.splitlines() if line.strip()][-6:]), parent=self.root)
+                messagebox.showerror(label, self._friendly_task_error(label_key, label, tb), parent=self.root)
+            elif kind == "progress":
+                _, payload = item
+                self._update_task_progress(payload)
             elif kind == "watch-update":
                 _, payload = item
                 stats = payload.get("stats", {})
@@ -1145,9 +2010,12 @@ class OmniClipDesktopApp:
                 self.chunks_var.set(str(stats.get("chunks", 0)))
                 self.refs_var.set(str(stats.get("refs", 0)))
                 self.status_var.set(self._tr("status_watch_update"))
-                changed = ", ".join(payload.get("changed", [])[:3]) or "none"
-                deleted = ", ".join(payload.get("deleted", [])[:3]) or "none"
+                changed = ", ".join(payload.get("changed", [])[:3]) or self._tr("none_value")
+                deleted = ", ".join(payload.get("deleted", [])[:3]) or self._tr("none_value")
                 self._append_log(self._tr("log_watch_update", changed=changed, deleted=deleted))
+                duplicate_count = int(stats.get("duplicate_block_ids", 0))
+                if duplicate_count:
+                    self._append_log(self._tr("log_duplicate_block_ids", count=duplicate_count))
                 self._refresh_state_chips()
             elif kind == "watch-error":
                 _, tb = item
@@ -1158,17 +2026,39 @@ class OmniClipDesktopApp:
                 messagebox.showerror(self._tr("watch_start_failed_title"), "\n".join([line.strip() for line in tb.splitlines() if line.strip()][-6:]), parent=self.root)
             elif kind == "watch-stopped":
                 _, mode = item
-                self.watch_var.set(self._tr("watch_stopped", mode=mode))
+                localized_mode = self._watch_mode_label(mode)
+                self.watch_var.set(self._tr("watch_stopped", mode=localized_mode))
                 self.status_var.set(self._tr("status_watch_stopped"))
                 self._append_log(self._tr("log_watch_stopped"))
                 self.watch_thread = None
                 self.watch_stop = None
                 self._update_watch_button_state()
-        self.root.after(120, self._drain_queue)
+        if self.root.winfo_exists():
+            self.queue_after_id = self.root.after(120, self._drain_queue)
 
     def _on_close(self) -> None:
         if self.watch_stop is not None:
             self.watch_stop.set()
+        self._stop_task_feedback()
+        if self.queue_after_id is not None:
+            try:
+                self.root.after_cancel(self.queue_after_id)
+            except Exception:
+                pass
+            self.queue_after_id = None
+        if self.layout_after_id is not None:
+            try:
+                self.root.after_cancel(self.layout_after_id)
+            except Exception:
+                pass
+            self.layout_after_id = None
+        self._capture_layout_state()
+        try:
+            config, paths = self._config(False)
+            self._sync_runtime_layout_to_config(config)
+            save_config(config, paths)
+        except Exception:
+            pass
         self.root.destroy()
 
 
