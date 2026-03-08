@@ -23,7 +23,7 @@ from .ui_tooltip import ToolTip
 from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.1.3"
+APP_VERSION = "V0.1.4"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 RELEASES_URL = f"{REPO_URL}/releases"
 
@@ -250,9 +250,16 @@ class OmniClipDesktopApp:
         requested = (self.device_var.get().strip() or 'cpu').lower()
         resolved = resolve_vector_device(requested)
         gpu_name = str(acceleration.get('gpu_name') or acceleration.get('cuda_name') or '').strip()
+        nvcc_version = str(acceleration.get('nvcc_version') or '').strip()
         if acceleration.get('cuda_available'):
             return self._tr('device_summary_cuda_ready', gpu=gpu_name or 'NVIDIA GPU', resolved=resolved)
         if acceleration.get('gpu_present'):
+            if not acceleration.get('torch_available'):
+                if nvcc_version:
+                    return self._tr('device_summary_gpu_runtime_missing_with_nvcc', gpu=gpu_name or 'NVIDIA GPU', cuda=nvcc_version)
+                return self._tr('device_summary_gpu_runtime_missing', gpu=gpu_name or 'NVIDIA GPU')
+            if not acceleration.get('sentence_transformers_available'):
+                return self._tr('device_summary_gpu_runtime_incomplete', gpu=gpu_name or 'NVIDIA GPU')
             return self._tr('device_summary_gpu_detected_no_cuda', gpu=gpu_name or 'NVIDIA GPU')
         return self._tr('device_summary_cpu_only')
 

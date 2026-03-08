@@ -1,6 +1,6 @@
 # OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.3-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.4-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#quick-start)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#why)
@@ -33,13 +33,13 @@ OmniClip RAG takes the opposite approach:
 - and the vault remains under your control.
 
 
-## What's New In v0.1.3
+## What's New In v0.1.4
 
-This patch release closes the Windows packaging gap found right after `v0.1.2`.
+This patch release closes the next runtime gap found right after `v0.1.3`.
 
-- Fixed the packaged EXE so `pyarrow` now ships with the missing `pyarrow.libs` dependency folder.
-- Kept the main release lean: no model files, and no very large optional AI runtimes bundled into the app package.
-- Preserved the separate runtime-install flow through `RUNTIME_SETUP.md` and `InstallRuntime.ps1`.
+- Fixed the missing `_runtime_dependency_message()` path so runtime-missing errors no longer crash into a `NameError`.
+- Clarified CUDA capability reporting: the app now distinguishes between “system CUDA exists” and “this lean package still needs its own runtime install”.
+- Kept the main release lean while making runtime-missing guidance explicit and actionable.
 
 ## What It Does
 
@@ -200,7 +200,7 @@ tests/
 
 ## Current Status
 
-`V0.1.3` is the current public desktop update of the core product shape.
+`V0.1.4` is the current public desktop update of the core product shape.
 
 What is already solid:
 
@@ -239,6 +239,7 @@ The current tree has already been validated with:
 - [Changelog](CHANGELOG.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
 - [Runtime Setup](RUNTIME_SETUP.md)
+- [Release Notes v0.1.4](releases/RELEASE_NOTES_v0.1.4.md)
 - [Release Notes v0.1.3](releases/RELEASE_NOTES_v0.1.3.md)
 - [Release Notes v0.1.2](releases/RELEASE_NOTES_v0.1.2.md)
 - [Release Notes v0.1.1](releases/RELEASE_NOTES_v0.1.1.md)

@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
+from omniclip_rag.errors import RuntimeDependencyError
 from omniclip_rag.vector_index import LanceDbVectorIndex, create_vector_index, is_local_model_ready
 
 
@@ -319,6 +320,50 @@ class VectorIndexTests(unittest.TestCase):
         self.assertEqual(runtime["backend"], "torch")
         self.assertEqual(Path(fake_hub.constants.HF_HOME).parent.name, "models")
         self.assertTrue(fake_hub.constants.HF_HUB_DISABLE_XET)
+
+    def test_default_embedder_reports_missing_runtime_cleanly(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "runtime_missing"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend="lancedb",
+            vector_model="BAAI/bge-m3",
+            vector_runtime="torch",
+            vector_device="cuda",
+        )
+        model_dir = data_paths.cache_dir / "models" / "BAAI__bge-m3"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "modules.json").write_text("{}", encoding="utf-8")
+        (model_dir / "config.json").write_text("{}", encoding="utf-8")
+        (model_dir / "pytorch_model.bin").write_bytes(b"ok")
+
+        fake_hub = types.ModuleType("huggingface_hub")
+        fake_hub.snapshot_download = lambda **kwargs: None
+        fake_hub.constants = types.SimpleNamespace(
+            HF_HOME="",
+            hf_cache_home="",
+            HF_HUB_CACHE="",
+            HUGGINGFACE_HUB_CACHE="",
+            HUGGINGFACE_ASSETS_CACHE="",
+            HF_XET_CACHE="",
+            HF_HUB_DISABLE_XET=False,
+        )
+
+        with patch.dict(
+            sys.modules,
+            {
+                **_fake_lancedb_modules(),
+                "huggingface_hub": fake_hub,
+                "sentence_transformers": None,
+            },
+        ):
+            index = LanceDbVectorIndex(config, data_paths)
+            with self.assertRaises(RuntimeDependencyError) as ctx:
+                index._default_embedder_factory()
+
+        message = str(ctx.exception)
+        self.assertIn('install_runtime.ps1', message.lower())
+        self.assertIn('sentence-transformers', message)
 
     def test_default_embedder_skips_network_when_local_model_is_ready(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "offline_ready"))

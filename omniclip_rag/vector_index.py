@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -325,19 +326,28 @@ def detect_acceleration() -> dict[str, object]:
     payload: dict[str, object] = {
         "torch_available": False,
         "torch_version": "",
+        "sentence_transformers_available": False,
         "cuda_available": False,
         "cuda_device_count": 0,
         "cuda_name": "",
         "gpu_present": False,
         "gpu_name": "",
+        "nvcc_available": False,
+        "nvcc_version": "",
         "device_options": ["auto", "cpu"],
         "recommended_device": "cpu",
+        "runtime_status": "missing",
     }
 
     gpu_names = _detect_nvidia_gpus()
     if gpu_names:
         payload["gpu_present"] = True
         payload["gpu_name"] = gpu_names[0]
+
+    nvcc_version = _detect_nvcc_version()
+    if nvcc_version:
+        payload["nvcc_available"] = True
+        payload["nvcc_version"] = nvcc_version
 
     try:
         import torch
@@ -347,6 +357,7 @@ def detect_acceleration() -> dict[str, object]:
     if torch is not None:
         payload["torch_available"] = True
         payload["torch_version"] = getattr(torch, "__version__", "")
+        payload["runtime_status"] = "cpu"
         try:
             cuda_available = bool(torch.cuda.is_available())
         except Exception:
@@ -365,8 +376,16 @@ def detect_acceleration() -> dict[str, object]:
                     payload["cuda_name"] = ""
             payload["device_options"] = ["auto", "cpu", "cuda"]
             payload["recommended_device"] = "cuda"
+            payload["runtime_status"] = "cuda"
         elif gpu_names:
             payload["recommended_device"] = "cpu"
+
+    try:
+        import sentence_transformers  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        payload["sentence_transformers_available"] = True
 
     _ACCELERATION_CACHE = dict(payload)
     return dict(payload)
@@ -386,6 +405,78 @@ def resolve_vector_device(device_name: str | None) -> str:
         return "cpu"
     return requested
 
+
+def _detect_nvcc_version() -> str:
+    try:
+        result = subprocess.run(
+            ["nvcc", "-V"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return ""
+    output = (result.stdout or result.stderr or "").strip()
+    match = re.search(r"release\s+([0-9]+(?:\.[0-9]+)?)", output, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return output.splitlines()[-1].strip() if output else ""
+
+
+def _runtime_dependency_message(runtime_name: str | None, device_name: str | None) -> str:
+    acceleration = detect_acceleration()
+    gpu_name = str(acceleration.get("gpu_name") or acceleration.get("cuda_name") or "").strip()
+    nvcc_version = str(acceleration.get("nvcc_version") or "").strip()
+    requested = (device_name or "auto").strip().lower() or "auto"
+    runtime_name = (runtime_name or "torch").strip().lower() or "torch"
+    recommended_profile = "cuda" if acceleration.get("gpu_present") else "cpu"
+
+    if getattr(sys, "frozen", False):
+        app_dir = Path(sys.executable).resolve().parent
+        install_script = app_dir / "InstallRuntime.ps1"
+        setup_doc = app_dir / "RUNTIME_SETUP.md"
+        script_path = install_script.name if install_script.exists() else "InstallRuntime.ps1"
+        script_hint = f'PowerShell -ExecutionPolicy Bypass -File "{script_path}" -Profile {recommended_profile}'
+        location_hint = f"程序目录：\n{app_dir}"
+    else:
+        app_dir = Path(__file__).resolve().parents[1]
+        install_script = app_dir / "scripts" / "install_runtime.ps1"
+        setup_doc = app_dir / "RUNTIME_SETUP.md"
+        script_hint = f'powershell -ExecutionPolicy Bypass -File "{install_script}" -Profile {recommended_profile}'
+        location_hint = f"项目目录：\n{app_dir}"
+
+    detail_lines: list[str] = []
+    if acceleration.get("gpu_present"):
+        if nvcc_version:
+            detail_lines.append(f"已检测到显卡 {gpu_name or 'NVIDIA GPU'}，并检测到系统 CUDA 工具链 {nvcc_version}。")
+        else:
+            detail_lines.append(f"已检测到显卡 {gpu_name or 'NVIDIA GPU'}。")
+    else:
+        detail_lines.append("当前没有检测到 NVIDIA 显卡，因此建议先使用 CPU 运行时。")
+
+    if acceleration.get("torch_available"):
+        detail_lines.append(
+            f"当前程序里的 PyTorch 运行时状态：{acceleration.get('torch_version') or 'unknown'} / 设备解析结果 {resolve_vector_device(requested)}。"
+        )
+    else:
+        detail_lines.append("当前程序包里还没有可用于本地向量检索的 PyTorch 运行时。")
+
+    if not acceleration.get("sentence_transformers_available"):
+        detail_lines.append("当前程序包里也还没有 sentence-transformers 运行时，所以无法执行模型编码。")
+
+    setup_hint = f"如果你更想先看说明，请打开：\n{setup_doc}" if setup_doc.exists() else "请先阅读 RUNTIME_SETUP.md 中的运行时安装说明。"
+
+    return "\n".join(
+        [
+            f"当前发布包为了保持轻量，不内置 {runtime_name} / sentence-transformers 这类大型运行时。",
+            *detail_lines,
+            f"要继续执行本地语义检索、全量建库或向量查询，请先安装可选运行时。建议直接运行：\n{script_hint}",
+            location_hint,
+            setup_hint,
+            f"如果你当前只想暂时绕过向量链，也可以先把“设备”保持 {resolve_vector_device(requested)}，并把“向量后端”改成 disabled。",
+        ]
+    )
 
 def _configure_huggingface_environment(hf_home_dir: Path) -> None:
     hub_dir = hf_home_dir / "hub"

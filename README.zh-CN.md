@@ -29,13 +29,13 @@
 - 不把整库直接交给 AI
 
 
-## V0.1.3 重点更新
+## V0.1.4 重点更新
 
-这一轮是紧急补丁版，主要修复正式 Windows 包启动时缺少 `pyarrow.libs` 的问题。
+这一轮是运行时提示补丁版，主要修复缺运行时时报 `NameError`，并把 CUDA 提示改得更准确。
 
-- 修复了正式 EXE 启动时 `pyarrow` 缺少依赖目录导致直接报错退出的问题。
-- 保持主程序包纯净轻量，不把模型和超大的 AI 运行时重新塞回安装包。
-- 继续沿用 `RUNTIME_SETUP.md` 与 `InstallRuntime.ps1` 的外部运行时安装方案。
+- 修复了缺少运行时时 `_runtime_dependency_message` 未定义，导致全量建库直接报 `NameError` 的问题。
+- 当系统里已经有 NVIDIA 显卡和 CUDA 工具链时，界面现在会明确告诉你：系统 CUDA 已存在，但这个轻量程序包仍需单独安装自己的 PyTorch / sentence-transformers 运行时。
+- 继续保持主程序包纯净轻量，并沿用 `RUNTIME_SETUP.md` 与 `InstallRuntime.ps1` 的外部运行时安装方案。
 
 ## 当前能力
 
@@ -121,7 +121,7 @@ OmniClip RAG/
 
 ## 当前版本说明
 
-- 版本：`V0.1.3`
+- 版本：`V0.1.4`
 - 主交付形态：桌面 GUI
 - 当前稳定主线：`torch + bge-m3`
 
@@ -134,6 +134,7 @@ OmniClip RAG/
 - [更新日志](CHANGELOG.md)
 - [空间预检说明](STORAGE_PRECHECK.md)
 - [运行时安装说明](RUNTIME_SETUP.md)
+- [v0.1.4 发布说明](releases/RELEASE_NOTES_v0.1.4.md)
 - [v0.1.3 发布说明](releases/RELEASE_NOTES_v0.1.3.md)
 - [v0.1.2 发布说明](releases/RELEASE_NOTES_v0.1.2.md)
 - [v0.1.1 发布说明](releases/RELEASE_NOTES_v0.1.1.md)

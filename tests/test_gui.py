@@ -130,6 +130,25 @@ class GuiTests(unittest.TestCase):
         finally:
             app._on_close()
 
+    def test_device_summary_explains_missing_runtime_even_with_nvcc(self) -> None:
+        app = self._build_app()
+        try:
+            with patch('omniclip_rag.gui.detect_acceleration', return_value={
+                'gpu_present': True,
+                'gpu_name': 'NVIDIA GeForce RTX 3060',
+                'cuda_name': '',
+                'cuda_available': False,
+                'torch_available': False,
+                'sentence_transformers_available': False,
+                'nvcc_available': True,
+                'nvcc_version': '12.3',
+            }):
+                summary = app._device_capability_summary()
+            self.assertIn('InstallRuntime.ps1', summary)
+            self.assertIn('12.3', summary)
+        finally:
+            app._on_close()
+
     def test_toggle_hit_selection_updates_context_summary(self) -> None:
         app = self._build_app()
         try:

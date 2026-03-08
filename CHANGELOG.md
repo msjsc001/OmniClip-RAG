@@ -1,6 +1,17 @@
 
 # Changelog
 
+## V0.1.4 - 2026-03-08
+
+### Added
+
+- Added [RELEASE_NOTES_v0.1.4](releases/RELEASE_NOTES_v0.1.4.md) for the runtime-messaging hotfix.
+
+### Fixed
+
+- Fixed the runtime-missing error path so packaged builds now raise a clear `RuntimeDependencyError` instead of crashing with `NameError: _runtime_dependency_message is not defined`.
+- Fixed the device summary so a machine with NVIDIA + CUDA toolkit no longer looks “mysteriously broken”; the UI now tells the user that the lean app package still needs its own runtime install.
+
 ## V0.1.3 - 2026-03-08
 
 ### Added

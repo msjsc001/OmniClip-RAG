@@ -1,8 +1,8 @@
 # Architecture Notes
 
-## Release Boundary For V0.1.3
+## Release Boundary For V0.1.4
 
-`V0.1.3` is not trying to ship a giant all-in-one AI platform.
+`V0.1.4` is not trying to ship a giant all-in-one AI platform.
 
 Its delivery goal is narrower and much more deliberate:
 
@@ -140,7 +140,7 @@ Current validation includes:
 - successful GUI startup and shutdown,
 - successful Windows EXE packaging.
 
-## Intentional Tradeoffs In V0.1.3
+## Intentional Tradeoffs In V0.1.4
 
 ### 1. `torch` is the stable default runtime
 
@@ -380,4 +380,14 @@ Current packaging rule:
 - startup validation should treat a missing `pyarrow.libs` folder as a broken build, not as a user-runtime problem.
 
 Why: `lancedb` and `pyarrow` are part of the core desktop retrieval stack. They are not optional runtime add-ons like `torch`.
+
+### 27. System CUDA and app runtime readiness must be reported separately
+
+Current acceleration-reporting rule:
+
+- detecting an NVIDIA GPU or a system `nvcc` installation does not mean the packaged app itself can already run CUDA,
+- the desktop summary must tell the user when the system has CUDA but the lean packaged app still lacks its own PyTorch / sentence-transformers runtime,
+- runtime-missing failures must produce a direct install command instead of a raw traceback.
+
+Why: users reasonably assume “nvcc works” means the app should already use the GPU. The product must explain the missing app-local runtime boundary explicitly.
 
