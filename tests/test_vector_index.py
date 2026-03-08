@@ -364,6 +364,9 @@ class VectorIndexTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn('install_runtime.ps1', message.lower())
         self.assertIn('sentence-transformers', message)
+        self.assertIn('PowerShell -ExecutionPolicy Bypass -File', message)
+        self.assertIn('不需要把向量后端改成 disabled', message)
+        self.assertNotIn('把“设备”保持', message)
 
     def test_default_embedder_skips_network_when_local_model_is_ready(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "offline_ready"))

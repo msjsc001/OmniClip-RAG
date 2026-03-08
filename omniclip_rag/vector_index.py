@@ -430,53 +430,95 @@ def _runtime_dependency_message(runtime_name: str | None, device_name: str | Non
     nvcc_version = str(acceleration.get("nvcc_version") or "").strip()
     requested = (device_name or "auto").strip().lower() or "auto"
     runtime_name = (runtime_name or "torch").strip().lower() or "torch"
-    recommended_profile = "cuda" if acceleration.get("gpu_present") else "cpu"
+    wants_gpu = requested in {"auto", "gpu", "cuda"} and acceleration.get("gpu_present")
+    recommended_profile = "cuda" if wants_gpu else "cpu"
 
     if getattr(sys, "frozen", False):
         app_dir = Path(sys.executable).resolve().parent
         install_script = app_dir / "InstallRuntime.ps1"
         setup_doc = app_dir / "RUNTIME_SETUP.md"
-        script_path = install_script.name if install_script.exists() else "InstallRuntime.ps1"
-        script_hint = f'PowerShell -ExecutionPolicy Bypass -File "{script_path}" -Profile {recommended_profile}'
-        location_hint = f"程序目录：\n{app_dir}"
+        relative_script = install_script.name if install_script.exists() else "InstallRuntime.ps1"
     else:
         app_dir = Path(__file__).resolve().parents[1]
         install_script = app_dir / "scripts" / "install_runtime.ps1"
         setup_doc = app_dir / "RUNTIME_SETUP.md"
-        script_hint = f'powershell -ExecutionPolicy Bypass -File "{install_script}" -Profile {recommended_profile}'
-        location_hint = f"项目目录：\n{app_dir}"
+        relative_script = ".\\scripts\\install_runtime.ps1"
 
-    detail_lines: list[str] = []
-    if acceleration.get("gpu_present"):
-        if nvcc_version:
-            detail_lines.append(f"已检测到显卡 {gpu_name or 'NVIDIA GPU'}，并检测到系统 CUDA 工具链 {nvcc_version}。")
-        else:
-            detail_lines.append(f"已检测到显卡 {gpu_name or 'NVIDIA GPU'}。")
+    direct_command = f'PowerShell -ExecutionPolicy Bypass -File "{install_script}" -Profile {recommended_profile}'
+    in_place_command = f'PowerShell -ExecutionPolicy Bypass -File "{relative_script}" -Profile {recommended_profile}'
+    cpu_command = f'PowerShell -ExecutionPolicy Bypass -File "{install_script}" -Profile cpu'
+    cuda_command = f'PowerShell -ExecutionPolicy Bypass -File "{install_script}" -Profile cuda'
+
+    if recommended_profile == "cuda":
+        disk_usage = "约 4.3 GB - 4.6 GB"
+        download_usage = "约 3 GB - 5 GB"
     else:
-        detail_lines.append("当前没有检测到 NVIDIA 显卡，因此建议先使用 CPU 运行时。")
+        disk_usage = "约 1.3 GB - 2.0 GB"
+        download_usage = "约 1 GB - 2 GB"
+
+    state_lines: list[str] = []
+    if acceleration.get("gpu_present"):
+        state_lines.append(f"- 显卡：{gpu_name or 'NVIDIA GPU'}")
+        if nvcc_version:
+            state_lines.append(f"- 系统 CUDA：{nvcc_version}")
+    else:
+        state_lines.append("- 显卡：未检测到 NVIDIA GPU")
 
     if acceleration.get("torch_available"):
-        detail_lines.append(
-            f"当前程序里的 PyTorch 运行时状态：{acceleration.get('torch_version') or 'unknown'} / 设备解析结果 {resolve_vector_device(requested)}。"
-        )
+        state_lines.append(f"- 程序内 PyTorch：已安装（{acceleration.get('torch_version') or 'unknown'}）")
     else:
-        detail_lines.append("当前程序包里还没有可用于本地向量检索的 PyTorch 运行时。")
+        state_lines.append("- 程序内 PyTorch：未安装")
 
-    if not acceleration.get("sentence_transformers_available"):
-        detail_lines.append("当前程序包里也还没有 sentence-transformers 运行时，所以无法执行模型编码。")
+    if acceleration.get("sentence_transformers_available"):
+        state_lines.append("- 程序内 sentence-transformers：已安装")
+    else:
+        state_lines.append("- 程序内 sentence-transformers：未安装")
 
-    setup_hint = f"如果你更想先看说明，请打开：\n{setup_doc}" if setup_doc.exists() else "请先阅读 RUNTIME_SETUP.md 中的运行时安装说明。"
+    state_lines.append(f"- 当前设备选择：{requested}")
+    state_lines.append(f"- 当前实际设备：{resolve_vector_device(requested)}")
 
-    return "\n".join(
-        [
-            f"当前发布包为了保持轻量，不内置 {runtime_name} / sentence-transformers 这类大型运行时。",
-            *detail_lines,
-            f"要继续执行本地语义检索、全量建库或向量查询，请先安装可选运行时。建议直接运行：\n{script_hint}",
-            location_hint,
-            setup_hint,
-            f"如果你当前只想暂时绕过向量链，也可以先把“设备”保持 {resolve_vector_device(requested)}，并把“向量后端”改成 disabled。",
-        ]
-    )
+    setup_hint = f"说明文档：\n{setup_doc}" if setup_doc.exists() else "说明文档：RUNTIME_SETUP.md"
+
+    lines = [
+        "当前还不能开始本地语义建库或向量查询。",
+        "",
+        "原因",
+        f"- 这个轻量发布包没有内置 {runtime_name} / sentence-transformers 这类大型运行时。",
+        "- 现在缺少的不是模型目录，而是把文本编码成向量的本地运行时。",
+        "",
+        "当前状态",
+        *state_lines,
+        "",
+        "怎么安装",
+        "如果你已经在程序目录：",
+        in_place_command,
+        "",
+        "如果你现在不在程序目录，直接复制完整路径命令：",
+        direct_command,
+        "",
+        "安装后会发生什么",
+        f"- 会在下列目录创建 runtime 文件夹：{app_dir}",
+        "- 会安装 PyTorch、sentence-transformers 和相关依赖。",
+        "- 安装完成后，重启程序，再执行全量建库、模型预热或向量查询即可。",
+        "",
+        "大约需要多少空间",
+        f"- 最终落盘：{disk_usage}",
+        f"- 网络下载：{download_usage}",
+        "",
+        "如果你暂时只想走 CPU",
+        f"- 不需要把向量后端改成 disabled，直接安装 CPU 运行时即可：{cpu_command}",
+    ]
+    if acceleration.get("gpu_present") and recommended_profile != "cuda":
+        lines.extend([
+            "- 如果你以后想启用显卡，再改用这条命令：",
+            cuda_command,
+            "",
+        ])
+    lines.extend([
+        setup_hint,
+        "如果你现在完全不想安装运行时，才把“向量后端”改成 disabled，这会临时关闭向量检索。",
+    ])
+    return "\n".join(lines)
 
 def _configure_huggingface_environment(hf_home_dir: Path) -> None:
     hub_dir = hf_home_dir / "hub"
@@ -563,3 +605,4 @@ def _wait_for_controls(pause_event: threading.Event | None, cancel_event: thread
         if pause_event is None or not pause_event.is_set():
             return
         time.sleep(0.12)
+

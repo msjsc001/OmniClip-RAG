@@ -1,8 +1,8 @@
 # Architecture Notes
 
-## Release Boundary For V0.1.4
+## Release Boundary For V0.1.5
 
-`V0.1.4` is not trying to ship a giant all-in-one AI platform.
+`V0.1.5` is not trying to ship a giant all-in-one AI platform.
 
 Its delivery goal is narrower and much more deliberate:
 
@@ -140,7 +140,7 @@ Current validation includes:
 - successful GUI startup and shutdown,
 - successful Windows EXE packaging.
 
-## Intentional Tradeoffs In V0.1.4
+## Intentional Tradeoffs In V0.1.5
 
 ### 1. `torch` is the stable default runtime
 
@@ -387,7 +387,9 @@ Current acceleration-reporting rule:
 
 - detecting an NVIDIA GPU or a system `nvcc` installation does not mean the packaged app itself can already run CUDA,
 - the desktop summary must tell the user when the system has CUDA but the lean packaged app still lacks its own PyTorch / sentence-transformers runtime,
-- runtime-missing failures must produce a direct install command instead of a raw traceback.
+- runtime-missing failures must produce a direct install command instead of a raw traceback,
+- the guidance must explicitly say that CPU mode can still use LanceDB after installing the `cpu` runtime profile,
+- `disabled` is only a temporary bypass for users who want to turn vector retrieval off completely.
 
 Why: users reasonably assume “nvcc works” means the app should already use the GPU. The product must explain the missing app-local runtime boundary explicitly.
 

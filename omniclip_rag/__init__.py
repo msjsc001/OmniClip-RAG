@@ -18,4 +18,4 @@ _bootstrap_vendor_packages()
 
 __all__ = ["__version__"]
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"

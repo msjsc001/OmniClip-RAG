@@ -1,6 +1,21 @@
 
 # Changelog
 
+## V0.1.5 - 2026-03-08
+
+### Added
+
+- Synchronized the Chinese and English README files so both documents now describe the same workflow, product scope, data layout, and caution boundaries.
+
+### Changed
+
+- Improved the packaged-runtime guidance so CPU users are told to install the `cpu` profile instead of being nudged toward `disabled`.
+- Reworked the runtime-missing dialog into a shorter action-oriented layout with direct commands, folder scope, and size estimates.
+
+### Fixed
+
+- Fixed the desktop task error path so `RuntimeDependencyError` now reaches the GUI as a friendly message instead of a traceback wall in the activity log.
+
 ## V0.1.4 - 2026-03-08
 
 ### Added

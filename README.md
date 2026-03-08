@@ -1,58 +1,60 @@
 # OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.4-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.5-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#quick-start)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
-[![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#why)
+[![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#core-positioning)
 [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md)
 [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
-**OmniClip RAG** is a local-first desktop RAG for local Markdown note libraries such as Typora, Logseq, and Obsidian vaults.
+[中文说明](README.zh-CN.md)
 
-**方寸引** is the Chinese product name. It frames the app as a compact local layer that precisely pulls the right notes toward whatever AI you choose next.
+**方寸引** is the Chinese product name of `OmniClip RAG`. It suggests "drawing countless pages from within a small space", emphasizing a compact local retrieval layer that can precisely pull the right notes toward any AI you choose next.
 
-Its core purpose is to turn your local notes into an independent, hot-reloadable, supervised **manual RAG layer**. You retrieve context locally first, decide what to reveal, and then hand that context to any AI you want. That keeps your note system highly decoupled from any single AI product while still allowing deep interaction between your notes and external AI tools. Even when you are not chatting with an AI, OmniClip RAG still works as a semantic search tool for your own knowledge base.
+The more we rely on large models, the more personal context and private knowledge we hand over. I built **OmniClip RAG / 方寸引** as a local tool to keep that boundary under my own control. It behaves like a firewall between your note system and external AI tools: you can let AI read deeply into your second brain, but only through the context you intentionally retrieve and copy out. (The product is still being refined, so the current experience is usable but not fully polished yet.)
 
-You search locally, inspect the results, and only copy the context you want to expose. The AI never needs blanket access to your vault.
+Its core purpose is to turn a local Markdown note library, such as Typora, Logseq, or Obsidian, into an independent, hot-reloadable, supervised **manual local RAG layer**. You retrieve locally first, then manually provide only the relevant context to any AI you want. That keeps your note system highly decoupled from any single AI product while still enabling deep interaction between your notes and AI. Even when you are not chatting with an AI, OmniClip RAG is still a semantic search tool for your own knowledge base.
+
+You search locally first, review the results, and then copy only the context you are willing to reveal. Your notes still belong to you, not to a chat product.
 
 > Future direction, time permitting: 1. gradually support more non-Markdown note systems and database-backed note tools; 2. provide an API or MCP bridge so AIs that need it can call the retrieval layer directly. In practice, if you keep saving your AI chats or other text material back into your note vault, OmniClip RAG also becomes a kind of ever-growing semantic memory index for your own workflow.
 
-## Why
+## Core Positioning
 
-Most note-to-AI integrations are too tightly coupled. They either:
+OmniClip RAG fits a workflow like this:
 
-- force your notes into one product,
-- expose too much context by default,
-- or make incremental updates and cleanup unreliable.
+1. You keep writing long-term knowledge in Logseq or any Markdown-based note library.
+2. A local retrieval layer continuously maintains the index.
+3. When needed, you package high-quality related pages, semantic paths, and relevant snippets.
+4. You then paste that context pack into any AI.
 
-OmniClip RAG takes the opposite approach:
+This naturally emphasizes:
 
-- your notes stay local,
-- your retrieval layer stays separate,
-- any AI can consume the final context pack,
-- and the vault remains under your control.
+- local-first operation
+- strong decoupling
+- hot reload
+- controlled exposure
+- no blanket vault access for AI
 
+## What's New In v0.1.5
 
-## What's New In v0.1.4
+This round keeps the packaged app lightweight while making the desktop guidance much clearer:
 
-This patch release closes the next runtime gap found right after `v0.1.3`.
+- Synchronized the English README with the latest Chinese product description, workflow, and positioning.
+- Clarified runtime guidance so CPU users are told to install the `cpu` runtime profile instead of being nudged toward `disabled`.
+- Reworked runtime-missing feedback into a shorter action-oriented message with direct commands, folder scope, and size estimates.
 
-- Fixed the missing `_runtime_dependency_message()` path so runtime-missing errors no longer crash into a `NameError`.
-- Clarified CUDA capability reporting: the app now distinguishes between “system CUDA exists” and “this lean package still needs its own runtime install”.
-- Kept the main release lean while making runtime-missing guidance explicit and actionable.
+## Current Capabilities
 
-## What It Does
-
-- Parses both standard Markdown and Logseq-style Markdown
-- Understands page properties, block properties, block refs, and block embeds
-- Builds a hybrid retrieval stack with `SQLite + FTS5 + LanceDB`
-- Supports local `BAAI/bge-m3` embeddings
-- Supports multiple vaults with isolated per-vault workspaces
-- Performs preflight space and time estimation before model bootstrap or indexing
-- Can resume or pause a full rebuild instead of forcing a restart
-- Hot-reloads vault changes with incremental reindexing
-- Exports ready-to-paste context packs for any AI tool
-- Provides a desktop GUI as the primary workflow
+- Desktop GUI: configuration, precheck, model bootstrap, indexing, search, live watch, selective cleanup
+- Dual parser: standard Markdown and Logseq Markdown
+- Logseq semantics: page properties, block properties, `id:: UUID`, block refs, block embeds
+- Hybrid retrieval: `SQLite + FTS5 + structural scoring + LanceDB`
+- Local embedding model: `BAAI/bge-m3`
+- Multi-vault support: shared common data plus isolated per-vault workspace data
+- Space and time precheck: estimate disk usage and first-run duration before indexing
+- Full rebuilds can be resumed and paused
+- Context-pack export for use with any AI
 
 ## Architecture At A Glance
 
@@ -67,92 +69,41 @@ flowchart LR
     F --> G["Any AI"]
 ```
 
-## Core Experience
+## Entry Points
 
-1. Point OmniClip RAG to your vault.
-2. Run a precheck for disk space and time.
-3. Download or validate the local model.
-4. Build the index.
-5. Search from the desktop app.
-6. Review pages, semantic anchors, and snippets.
-7. Copy the generated context pack into any AI chat or writing tool.
-
-## Desktop-First Workflow
-
-The primary entry point is the GUI:
+Desktop app:
 
 ```powershell
 .\scripts\run_gui.ps1
 ```
 
-The Windows build script creates a desktop executable:
+Build the packaged Windows EXE:
 
 ```powershell
 .\scripts\build_exe.ps1
 ```
 
-Default output:
-
-```text
-dist\OmniClipRAG\OmniClipRAG.exe
-```
-
-CLI is still available for debugging and automation:
+CLI is still kept for debugging and automation:
 
 ```powershell
 .\scripts\run.ps1 status
-.\scripts\run.ps1 query "boundary and tolerance"
+.\scripts\run.ps1 query "your question"
 ```
 
 ## Quick Start
 
-1. Launch the GUI.
-2. Choose your vault directory.
+1. Launch the desktop app.
+2. Choose the root folder of your note vault.
 3. Confirm the data directory.
-4. Run **Precheck space/time**.
-5. Run **Download model** once, or point the app at a manually downloaded local model.
-6. Run **Build index**.
-7. Search and copy your context pack.
-
-## Model And Storage Notes
-
-Current stable default:
-
-- Vector backend: `LanceDB`
-- Embedding model: `BAAI/bge-m3`
-- Runtime: `torch`
-- Device: `auto` by default, which resolves to `cuda` when the local PyTorch runtime really supports NVIDIA acceleration and falls back to `cpu` otherwise
-
-For a first local run on Windows, plan for at least **8 GB to 10 GB** of free space.
-
-OmniClip RAG estimates:
-
-- SQLite metadata size
-- FTS size
-- vector index size
-- model cache size
-- temporary peak usage
-- safety margin
-- first full-build time
-- first model-download time
-
-before starting model bootstrap or indexing.
-
-See [STORAGE_PRECHECK.md](STORAGE_PRECHECK.md) for details.
-
-
-The official Windows release is now intentionally a lean app package:
-
-- it does **not** bundle model files,
-- it does **not** bundle very large optional AI runtimes such as `torch`, `sentence-transformers`, or `onnxruntime`,
-- and users install heavy runtime components separately only when they actually need them.
-
-See [RUNTIME_SETUP.md](RUNTIME_SETUP.md) for the packaged-app runtime flow.
+4. Run the space-and-time precheck first.
+5. Run model bootstrap, or place a manually downloaded model in the expected directory.
+6. Run a full build.
+7. Then search and copy the context pack.
 
 ## Data Directory
 
 By default, user data goes to `%APPDATA%\OmniClip RAG`.
-If that location is not writable in the current environment, the app falls back to a writable local directory automatically.
+If that location is not writable in the current environment, the app falls back to a writable local directory automatically so startup does not fail.
 
 Current layout:
 
@@ -174,10 +125,26 @@ OmniClip RAG/
 
 Design rule:
 
-- `shared/` stores cross-vault assets such as model cache and general logs
-- `workspaces/<workspace-id>/` stores only vault-specific data such as SQLite state, LanceDB state, exports, and unfinished-build state
+- `shared/` stores reusable cross-vault assets such as model cache and general logs
+- `workspaces/<workspace-id>/` stores only vault-specific indexes, vector data, exports, and unfinished-build state
 
-This means reinstalling the app does **not** force a model re-download as long as you keep the same data directory.
+As long as you keep the same data directory, reinstalling the app usually does not force a model re-download.
+
+The official Windows package is intentionally kept as a lean app package:
+
+- it does **not** bundle model files
+- it does **not** bundle very large optional AI runtimes such as `torch`, `sentence-transformers`, or `onnxruntime`
+- only users who truly need local vector retrieval install the heavy runtime separately
+
+See [RUNTIME_SETUP.md](RUNTIME_SETUP.md) for the packaged runtime flow.
+
+## Current Version
+
+- Version: `V0.1.5`
+- Main delivery form: desktop GUI
+- Current stable path: `torch + bge-m3`
+
+This version continues to stabilize the "local knowledge retrieval layer + desktop interaction layer" instead of rushing into a bloated all-in-one AI platform.
 
 ## Project Structure
 
@@ -198,39 +165,16 @@ scripts/
 tests/
 ```
 
-## Current Status
-
-`V0.1.4` is the current public desktop update of the core product shape.
-
-What is already solid:
-
-- local parsing,
-- local indexing,
-- hybrid retrieval,
-- desktop interaction,
-- hot reload,
-- context export,
-- resumable rebuilds,
-- pausable full rebuilds,
-- multi-vault workspace isolation.
-
-What is intentionally deferred:
-
-- reranker integration,
-- tray mode and global hotkeys,
-- deeper settings panels,
-- a smaller ONNX-first production path.
-
 ## Validation
 
 The current tree has already been validated with:
 
-- automated unit tests,
-- real sample indexing,
-- GUI startup verification,
-- EXE build verification,
-- EXE startup smoke verification,
-- CLI query verification.
+- automated unit tests
+- real sample indexing
+- GUI startup verification
+- EXE build verification
+- EXE startup smoke verification
+- CLI query verification
 
 ## Documentation
 
@@ -249,27 +193,16 @@ The current tree has already been validated with:
 
 This project is released under the [MIT License](LICENSE).
 
-## Project Positioning
-
-OmniClip RAG is not trying to become another monolithic AI workspace.
-
-It aims to be a **clean local knowledge interface layer**:
-
-- strong separation,
-- controllable exposure,
-- fast retrieval,
-- and compatibility with whatever AI tools you choose next.
-
 ## Disclaimer
 
-OmniClip RAG is provided on an "as is" and "as available" basis, without warranties of any kind, whether express or implied, including but not limited to merchantability, fitness for a particular purpose, non-infringement, uninterrupted operation, or error-free behavior.
+OmniClip RAG / 方寸引 is provided on an "as is" and "as available" basis, without warranties of any kind, whether express or implied, including but not limited to merchantability, fitness for a particular purpose, non-infringement, uninterrupted operation, or error-free behavior.
 
 You are solely responsible for:
 
-- verifying all retrieval results, exported context packs, and AI-generated outputs before relying on them;
-- maintaining backups of your notes, databases, models, and exported materials;
-- reviewing the legality, sensitivity, and sharing scope of any data you index or paste into third-party AI tools;
-- complying with the licenses, terms, and usage restrictions of third-party models, libraries, datasets, and services used with this project.
+- verifying all retrieval results, exported context packs, and AI-generated outputs before relying on them
+- maintaining backups of your notes, databases, models, and exported materials
+- reviewing the legality, sensitivity, and sharing scope of any data you index or paste into third-party AI tools
+- complying with the licenses, terms, and usage restrictions of third-party models, libraries, datasets, and services used with this project
 
 OmniClip RAG may return incomplete, outdated, misleading, or incorrect results. Any downstream AI may also hallucinate, misinterpret, overgeneralize, or fabricate conclusions even when the retrieved context is accurate. This project is not a substitute for professional judgment, internal review, or independent verification.
 

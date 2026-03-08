@@ -17,20 +17,39 @@ The packaged app includes `InstallRuntime.ps1` next to `OmniClipRAG.exe`.
 
 ### CPU runtime
 
+If you are already inside the app folder:
+
 ```powershell
 .\InstallRuntime.ps1 -Profile cpu
 ```
 
+If you are in another folder, use the full path to `InstallRuntime.ps1`.
+
+Expected size:
+
+- final disk usage: about `1.3 GB - 2.0 GB`
+- download volume: about `1 GB - 2 GB`
+
 ### NVIDIA CUDA runtime
+
+If you are already inside the app folder:
 
 ```powershell
 .\InstallRuntime.ps1 -Profile cuda
 ```
 
+If you are in another folder, use the full path to `InstallRuntime.ps1`.
+
+Expected size:
+
+- final disk usage: about `4.3 GB - 4.6 GB`
+- download volume: about `3 GB - 5 GB`
+
 Notes:
 
 - `cuda` requires an NVIDIA GPU, working drivers, and a compatible PyTorch CUDA environment. A working `nvcc` on the system is not enough by itself; this lean app package still needs its own runtime installed into `runtime/`.
 - The installer script uses your system Python to download the runtime into the app-local `runtime/` folder.
+- The script creates or updates the app-local `runtime/` folder next to `OmniClipRAG.exe`.
 - The main app package remains unchanged; only the optional runtime folder grows.
 
 ## If Python is not installed

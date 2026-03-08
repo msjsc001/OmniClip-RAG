@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from .clipboard import copy_text
 from .config import AppConfig, default_data_root, ensure_data_paths, load_config, normalize_vault_path, save_config
-from .errors import BuildCancelledError
+from .errors import BuildCancelledError, RuntimeDependencyError
 from .formatting import format_bytes, format_duration, format_space_report, summarize_preflight
 from .preflight import estimate_model_cache_bytes
 from .service import WATCHDOG_AVAILABLE, OmniClipService
@@ -23,7 +23,7 @@ from .ui_tooltip import ToolTip
 from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.1.4"
+APP_VERSION = "V0.1.5"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 RELEASES_URL = f"{REPO_URL}/releases"
 
@@ -1640,6 +1640,8 @@ class OmniClipDesktopApp:
                 payload = action(service)
             except BuildCancelledError:
                 self.queue.put(("cancelled", label_key, label, service.status_snapshot(), callback))
+            except RuntimeDependencyError as exc:
+                self.queue.put(("runtime-error", label_key, label, str(exc).strip()))
             except Exception:
                 self.queue.put(("error", label_key, label, traceback.format_exc()))
             else:
@@ -1761,8 +1763,6 @@ class OmniClipDesktopApp:
         return lines[-1] if lines else "Unknown error"
 
     def _friendly_task_error(self, label_key: str, label: str, tb: str) -> str:
-        if 'RuntimeDependencyError:' in tb:
-            return tb.split('RuntimeDependencyError:', 1)[1].strip()
         summary = self._traceback_summary(tb)
         if label_key == "bootstrap_button":
             try:
@@ -2292,6 +2292,14 @@ class OmniClipDesktopApp:
                     self._append_log(self._tr("log_rebuild_cancelled"))
                 else:
                     self.status_var.set(self._tr("status_failed", label=self._tr(label_key)))
+            elif kind == "runtime-error":
+                _, _label_key, label, message = item
+                self.busy = False
+                self._stop_task_feedback()
+                self.status_var.set(self._tr("status_failed", label=label))
+                self._append_log(message)
+                self.tabs.select(2)
+                messagebox.showerror(label, message, parent=self.root)
             elif kind == "error":
                 _, label_key, label, tb = item
                 self.busy = False

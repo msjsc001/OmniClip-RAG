@@ -1,18 +1,23 @@
 # 方寸引 / OmniClip RAG
 
+[![Version](https://img.shields.io/badge/version-v0.1.5-1d7467)](CHANGELOG.md)
+[![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#首次使用建议)
+[![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
+[![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#核心定位)
+[![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md)
+[![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+
 [English README](README.md)
 
 **方寸引** 是 `OmniClip RAG` 的中文名，取“方寸之间，牵引万卷”之意，强调在本地检索层中把你的笔记精准引向任意 AI。
 
-在AI时代，我们越依赖大模型，交出的个人隐私就越多。为了让我的笔记和思想真正属于自己，我花时间手搓了这个本地工具‘方寸引’。它像一个防火墙，让你可以毫无顾忌地让AI深度读取你的第二大脑，但不用担心数据被任何云端产品绑架。(❗目前还在打磨中,它还不是很适手)
+在 AI 时代，我们越依赖大模型，交出的个人隐私就越多。为了让我的笔记和思想真正属于自己，我花时间手搓了这个本地工具“方寸引”。它像一个防火墙，让你可以毫无顾忌地让 AI 深度读取你的第二大脑，但不用担心数据被任何云端产品绑架。（它现在仍在持续打磨，所以当前版本已经能用，但还没有完全达到最顺手的状态。）
 
-它的核心意义是把本地的 Markdown 笔记库(例如 Typora、Logseq、Obsidian的笔记库) 做成一个独立、可热更新、可监督使用的**本地手动RAG**（检索层），我们手动RAG后与任何所需要的 AI 进行互动，也可询问 AI 需要那些 RAG 相关内容我们手动提供。达到**笔记库和任意 AI 产品高度解耦分离的同时还能让 AI 和笔记内容进行深度交互的效果**。从而不让我们的笔记非得绑死到某一个 AI 产品里。同时**不用AI聊天时它自身也是一个语义搜索工具。**
+它的核心意义是把本地 Markdown 笔记库，例如 Typora、Logseq、Obsidian 的笔记库，做成一个独立、可热更新、可监督使用的**本地手动 RAG**（检索层）。我们先在本地检索，再把愿意提交给 AI 的上下文手动复制给任意 AI，也可以反过来让 AI 告诉我们还需要哪些本地上下文再去继续检索。这样就能在**笔记库和任意 AI 产品高度解耦分离的同时，还让 AI 和笔记内容进行深度交互**。同时，即使你暂时不用 AI 聊天，它自身也还是一个本地语义搜索工具。
 
-你先在本地通过软件进行手动RAG检索，再把你愿意提交给AI的上下文手动复制给任意 AI。这样你的笔记仍然属于你自己，而不是属于某个聊天产品。
+你先在本地通过软件进行手动 RAG 检索，再把你愿意提交给 AI 的上下文手动复制给任意 AI。这样你的笔记仍然属于你自己，而不是属于某个聊天产品。
 
-> 后续时间允许的话 1、我会考虑逐步兼容到更多非 MD 格式笔记软件的 db 库。 2、推出 API 或 MCP 让需要的AI 自行调用会更方便。
-> 
-> 理论上如果你把与 AI 聊天或任意文本内容保存到你的笔记库下，它也变相的成为了一个无限记忆的语义索引库或记忆库。
+> 后续时间允许的话：1. 我会考虑逐步兼容到更多非 MD 格式笔记软件的 db 库；2. 推出 API 或 MCP，让需要的 AI 自行调用会更方便。理论上，如果你把与 AI 的聊天内容或任意文本持续保存到笔记库下，它也会逐渐变成一个无限扩展的语义记忆索引库。
 
 ## 核心定位
 
@@ -31,14 +36,13 @@
 - 可控暴露面
 - 不把整库直接交给 AI
 
+## V0.1.5 重点更新
 
-## V0.1.4 重点更新
+这一轮继续保持轻量发布包路线，同时把桌面提示和双语文档都理顺了：
 
-这一轮是运行时提示补丁版，主要修复缺运行时时报 `NameError`，并把 CUDA 提示改得更准确。
-
-- 修复了缺少运行时时 `_runtime_dependency_message` 未定义，导致全量建库直接报 `NameError` 的问题。
-- 当系统里已经有 NVIDIA 显卡和 CUDA 工具链时，界面现在会明确告诉你：系统 CUDA 已存在，但这个轻量程序包仍需单独安装自己的 PyTorch / sentence-transformers 运行时。
-- 继续保持主程序包纯净轻量，并沿用 `RUNTIME_SETUP.md` 与 `InstallRuntime.ps1` 的外部运行时安装方案。
+- 已把最新中文说明同步翻译到英文 README，并把中英文两边的章节结构、定位说明、数据目录说明和免责声明重新对齐。
+- 运行时提示已改成更明确的人话：想用 CPU 就安装 `cpu` 运行时，不再误导成去改 `disabled`。
+- 缺少运行时时，桌面提示现在会直接告诉你命令、目录和大致空间，而不是丢一整屏难读的报错。
 
 ## 当前能力
 
@@ -52,25 +56,38 @@
 - 全量建库可恢复、可暂停
 - 上下文包导出：给任意 AI 使用
 
+## 架构一览
+
+```mermaid
+flowchart LR
+    A["Markdown / Logseq Vault"] --> B["Parser"]
+    B --> C["SQLite + FTS5"]
+    B --> D["LanceDB + Embeddings"]
+    C --> E["Hybrid Retrieval"]
+    D --> E
+    E --> F["Context Pack"]
+    F --> G["Any AI"]
+```
+
 ## 使用入口
 
 桌面版：
 
 ```powershell
-.\scripts\run_gui.ps1
+.\scriptsun_gui.ps1
 ```
 
 打包 EXE：
 
 ```powershell
-.\scripts\build_exe.ps1
+.\scriptsuild_exe.ps1
 ```
 
 CLI 仍然保留，用于调试和自动化：
 
 ```powershell
-.\scripts\run.ps1 status
-.\scripts\run.ps1 query "你的问题"
+.\scriptsun.ps1 status
+.\scriptsun.ps1 query "你的问题"
 ```
 
 ## 首次使用建议
@@ -113,22 +130,51 @@ OmniClip RAG/
 
 所以只要你保留同一个数据目录，重装软件后通常不需要重新下载模型。
 
-
 正式发布包现在刻意保持为轻量主程序包：
 
-- 不打包模型文件；
-- 不把 `torch`、`sentence-transformers`、`onnxruntime` 这类大型可选 AI 运行时直接塞进程序本体；
-- 只有当用户真的需要本地向量能力时，才单独安装运行时。
+- 不打包模型文件
+- 不把 `torch`、`sentence-transformers`、`onnxruntime` 这类大型可选 AI 运行时直接塞进程序本体
+- 只有当用户真的需要本地向量能力时，才单独安装运行时
 
 打包版的运行时安装方式见 [RUNTIME_SETUP.md](RUNTIME_SETUP.md)。
 
 ## 当前版本说明
 
-- 版本：`V0.1.4`
+- 版本：`V0.1.5`
 - 主交付形态：桌面 GUI
 - 当前稳定主线：`torch + bge-m3`
 
 这一版继续把“本地知识检索层 + 桌面交互层”做稳，不急着把它膨胀成一个庞杂的 AI 平台。
+
+## 项目结构
+
+```text
+omniclip_rag/
+  config.py
+  parser.py
+  storage.py
+  preflight.py
+  vector_index.py
+  service.py
+  gui.py
+  __main__.py
+scripts/
+  run.ps1
+  run_gui.ps1
+  build_exe.ps1
+tests/
+```
+
+## 验证情况
+
+当前代码树已经做过这些验证：
+
+- 自动化单元测试
+- 样本笔记建库验证
+- GUI 启动验证
+- EXE 构建验证
+- EXE 启动烟测
+- CLI 查询验证
 
 ## 相关文档
 
@@ -153,10 +199,10 @@ OmniClip RAG/
 
 你需要自行负责以下事项：
 
-- 在依赖检索结果、导出的上下文包或下游 AI 输出前，进行独立核对与判断；
-- 自行做好笔记库、数据库、模型缓存和导出内容的备份；
-- 自行判断被索引、检索、复制到第三方 AI 工具中的数据是否涉及隐私、机密、合规或授权边界；
-- 自行遵守本项目所配套使用的第三方模型、库、数据集、服务及平台的许可证、使用条款与限制。
+- 在依赖检索结果、导出的上下文包或下游 AI 输出前，进行独立核对与判断
+- 自行做好笔记库、数据库、模型缓存和导出内容的备份
+- 自行判断被索引、检索、复制到第三方 AI 工具中的数据是否涉及隐私、机密、合规或授权边界
+- 自行遵守本项目所配套使用的第三方模型、库、数据集、服务及平台的许可证、使用条款与限制
 
 方寸引可能返回不完整、过时、误导性或错误的结果；下游 AI 即使基于正确上下文，也仍可能出现幻觉、误读、过度推断或编造内容。本项目不能替代专业判断、正式审查流程或独立事实核验。
 

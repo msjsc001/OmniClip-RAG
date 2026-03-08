@@ -149,6 +149,17 @@ class GuiTests(unittest.TestCase):
         finally:
             app._on_close()
 
+    def test_runtime_error_uses_friendly_message_in_log_and_dialog(self) -> None:
+        app = self._build_app()
+        try:
+            app.queue.put(('runtime-error', 'rebuild_button', '全量建库', '当前还不能开始本地语义建库或向量查询。'))
+            with patch('omniclip_rag.gui.messagebox.showerror') as showerror_mock:
+                app._drain_queue()
+            self.assertIn('当前还不能开始本地语义建库或向量查询。', app.log_lines[-1])
+            self.assertEqual(showerror_mock.call_args.args[1], '当前还不能开始本地语义建库或向量查询。')
+        finally:
+            app._on_close()
+
     def test_toggle_hit_selection_updates_context_summary(self) -> None:
         app = self._build_app()
         try:
