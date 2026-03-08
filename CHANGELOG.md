@@ -1,6 +1,25 @@
 
 # Changelog
 
+## V0.1.6 - 2026-03-08
+
+### Added
+
+- Added [RELEASE_NOTES_v0.1.6](releases/RELEASE_NOTES_v0.1.6.md) for the packaged-runtime bootstrap update.
+- Added runtime bootstrap metadata so packaged builds can recover the external Python standard-library and DLL search paths needed by an installed `runtime/` folder.
+
+### Changed
+
+- Changed the Windows runtime installer to install `torch`, `sentence-transformers`, and the pinned support packages in a single pip resolution pass.
+- Changed build packaging so local `dist/OmniClipRAG/runtime/` content is preserved across rebuilds instead of being deleted.
+- Changed `.gitignore` so standalone `runtime/` folders stay untracked together with the existing build-output ignores.
+
+### Fixed
+
+- Fixed packaged runtime installation on Windows PowerShell by rewriting `InstallRuntime.ps1` as an ASCII-safe script.
+- Fixed the CUDA runtime path so the installer no longer replaces a just-installed CUDA `torch` build with the CPU build during the second dependency step.
+- Fixed packaged startup bootstrap so external runtime installs can be discovered before the app decides that `torch` or `sentence-transformers` are missing.
+
 ## V0.1.5 - 2026-03-08
 
 ### Added

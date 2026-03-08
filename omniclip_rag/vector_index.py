@@ -326,7 +326,9 @@ def detect_acceleration() -> dict[str, object]:
     payload: dict[str, object] = {
         "torch_available": False,
         "torch_version": "",
+        "torch_error": "",
         "sentence_transformers_available": False,
+        "sentence_transformers_error": "",
         "cuda_available": False,
         "cuda_device_count": 0,
         "cuda_name": "",
@@ -351,7 +353,8 @@ def detect_acceleration() -> dict[str, object]:
 
     try:
         import torch
-    except ImportError:
+    except Exception as exc:
+        payload["torch_error"] = f"{type(exc).__name__}: {exc}"
         torch = None
 
     if torch is not None:
@@ -382,8 +385,8 @@ def detect_acceleration() -> dict[str, object]:
 
     try:
         import sentence_transformers  # noqa: F401
-    except ImportError:
-        pass
+    except Exception as exc:
+        payload["sentence_transformers_error"] = f"{type(exc).__name__}: {exc}"
     else:
         payload["sentence_transformers_available"] = True
 
@@ -476,6 +479,10 @@ def _runtime_dependency_message(runtime_name: str | None, device_name: str | Non
 
     state_lines.append(f"- 当前设备选择：{requested}")
     state_lines.append(f"- 当前实际设备：{resolve_vector_device(requested)}")
+    if acceleration.get("torch_error"):
+        state_lines.append(f"- PyTorch 导入失败：{acceleration.get('torch_error')}")
+    if acceleration.get("sentence_transformers_error"):
+        state_lines.append(f"- sentence-transformers 导入失败：{acceleration.get('sentence_transformers_error')}")
 
     setup_hint = f"说明文档：\n{setup_doc}" if setup_doc.exists() else "说明文档：RUNTIME_SETUP.md"
 

@@ -1,8 +1,8 @@
 # Architecture Notes
 
-## Release Boundary For V0.1.5
+## Release Boundary For V0.1.6
 
-`V0.1.5` is not trying to ship a giant all-in-one AI platform.
+`V0.1.6` is not trying to ship a giant all-in-one AI platform.
 
 Its delivery goal is narrower and much more deliberate:
 
@@ -140,7 +140,7 @@ Current validation includes:
 - successful GUI startup and shutdown,
 - successful Windows EXE packaging.
 
-## Intentional Tradeoffs In V0.1.5
+## Intentional Tradeoffs In V0.1.6
 
 ### 1. `torch` is the stable default runtime
 
@@ -208,6 +208,27 @@ Current asset policy:
 Why: the desktop app, taskbar icon, and packaged EXE must present a consistent identity without adding heavy image-tool dependencies.
 
 ### 12. Global shared data and per-vault workspace data must be separated explicitly
+### 13. Lean packaged builds must discover external runtime installs explicitly
+
+Current runtime policy:
+
+- the public Windows package stays lean and does not bundle `torch` or `sentence-transformers`,
+- optional local runtimes are installed into `dist/OmniClipRAG/runtime/`,
+- the runtime installer writes `_runtime_bootstrap.json` with the Python stdlib and DLL locations used during installation,
+- packaged startup reads that marker and restores the search paths before probing `torch` or `sentence_transformers`.
+
+Why: a lean PyInstaller build cannot assume that every stdlib module or DLL needed by an externally installed runtime is already discoverable inside the frozen app environment.
+
+### 14. Rebuilds must preserve an existing local runtime install
+
+Current packaging rule:
+
+- rebuilding the EXE must not wipe a user's already-downloaded `dist/OmniClipRAG/runtime/` directory,
+- source control still ignores `runtime/`, `dist/`, and other large local artifacts,
+- GitHub releases may ship a lightweight app package, but the heavyweight runtime remains a user-installed optional layer.
+
+Why: deleting a multi-gigabyte local runtime on every rebuild is wasteful and makes packaged testing far slower than necessary.
+
 
 Current storage policy:
 

@@ -31,6 +31,16 @@ $env:OMNICLIP_TARGET = $target
 $env:OMNICLIP_RESOURCES = $resources
 $env:OMNICLIP_ICON = $icon
 $env:OMNICLIP_BUILD_MODE = $Mode
+$distRoot = Join-Path $root "dist"
+$buildDir = Join-Path $root "build"
+$distAppDir = Join-Path $distRoot "OmniClipRAG"
+$preservedRuntime = Join-Path $distRoot "OmniClipRAG.runtime-preserve"
+if (($Mode -eq 'onedir') -and (Test-Path (Join-Path $distAppDir 'runtime'))) {
+    if (Test-Path $preservedRuntime) {
+        Remove-Item $preservedRuntime -Recurse -Force
+    }
+    Move-Item (Join-Path $distAppDir 'runtime') $preservedRuntime
+}
 $code = @"
 import os
 import sys
@@ -106,8 +116,6 @@ if spec_path.exists():
 
 $code | & $python -
 
-$distRoot = Join-Path $root "dist"
-$buildDir = Join-Path $root "build"
 if ($Mode -eq 'onedir') {
     $staleExe = Join-Path $distRoot "OmniClipRAG.exe"
     if (Test-Path $staleExe) {
@@ -129,8 +137,14 @@ if (Test-Path $buildDir) {
 if ($Mode -eq 'onedir') {
     $runtimeGuide = Join-Path $root 'RUNTIME_SETUP.md'
     $runtimeScript = Join-Path $root 'scripts\install_runtime.ps1'
-    $distAppDir = Join-Path $distRoot 'OmniClipRAG'
     $pyarrowLibs = Join-Path $packages 'pyarrow.libs'
+    if (Test-Path $preservedRuntime) {
+        $restoredRuntime = Join-Path $distAppDir 'runtime'
+        if (Test-Path $restoredRuntime) {
+            Remove-Item $restoredRuntime -Recurse -Force
+        }
+        Move-Item $preservedRuntime $restoredRuntime
+    }
     if (Test-Path $runtimeGuide) { Copy-Item $runtimeGuide (Join-Path $distAppDir 'RUNTIME_SETUP.md') -Force }
     if (Test-Path $runtimeScript) { Copy-Item $runtimeScript (Join-Path $distAppDir 'InstallRuntime.ps1') -Force }
     if (Test-Path $pyarrowLibs) { Copy-Item $pyarrowLibs (Join-Path $distAppDir '_internal\pyarrow.libs') -Recurse -Force }

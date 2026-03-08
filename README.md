@@ -1,6 +1,6 @@
 # OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.5-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.6-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#quick-start)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#core-positioning)
@@ -36,13 +36,13 @@ This naturally emphasizes:
 - controlled exposure
 - no blanket vault access for AI
 
-## What's New In v0.1.5
+## What's New In v0.1.6
 
-This round keeps the packaged app lightweight while making the desktop guidance much clearer:
+This release closes the gap between the lean packaged app and the optional local runtime:
 
-- Synchronized the English README with the latest Chinese product description, workflow, and positioning.
-- Clarified runtime guidance so CPU users are told to install the `cpu` runtime profile instead of being nudged toward `disabled`.
-- Reworked runtime-missing feedback into a shorter action-oriented message with direct commands, folder scope, and size estimates.
+- Fixed the packaged runtime installer so `InstallRuntime.ps1` resolves `torch`, `sentence-transformers`, and their dependencies in one pass instead of accidentally replacing the CUDA build with a CPU-only build.
+- Added runtime bootstrap metadata plus startup path recovery so packaged Windows builds can reuse an external `runtime/` install more reliably.
+- Preserved the local `runtime/` folder across EXE rebuilds and clarified in the docs that GitHub source pushes still exclude large runtime and build artifacts.
 
 ## Current Capabilities
 
@@ -140,7 +140,7 @@ See [RUNTIME_SETUP.md](RUNTIME_SETUP.md) for the packaged runtime flow.
 
 ## Current Version
 
-- Version: `V0.1.5`
+- Version: `V0.1.6`
 - Main delivery form: desktop GUI
 - Current stable path: `torch + bge-m3`
 
@@ -183,6 +183,7 @@ The current tree has already been validated with:
 - [Changelog](CHANGELOG.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
 - [Runtime Setup](RUNTIME_SETUP.md)
+- [Release Notes v0.1.6](releases/RELEASE_NOTES_v0.1.6.md)
 - [Release Notes v0.1.4](releases/RELEASE_NOTES_v0.1.4.md)
 - [Release Notes v0.1.3](releases/RELEASE_NOTES_v0.1.3.md)
 - [Release Notes v0.1.2](releases/RELEASE_NOTES_v0.1.2.md)

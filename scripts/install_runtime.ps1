@@ -27,19 +27,53 @@ try {
     }
 }
 if (-not $pythonExe) {
-    throw "找不到可用的 Python。请先安装 Python 3.13+，然后重新运行 InstallRuntime.ps1。"
+    throw "Python 3.13+ was not found. Install Python first, then run InstallRuntime.ps1 again."
 }
+
+$torchIndex = if ($Profile -eq 'cuda') { 'https://download.pytorch.org/whl/cu128' } else { 'https://download.pytorch.org/whl/cpu' }
+$packageList = @(
+    'torch==2.10.0',
+    'sentence-transformers==5.2.3',
+    'huggingface-hub==0.36.0',
+    'safetensors==0.7.0'
+)
+$cleanupPatterns = @(
+    'torch',
+    'torch-*dist-info',
+    'functorch',
+    'functorch-*dist-info',
+    'torchgen',
+    'torchgen-*dist-info'
+)
 
 Write-Host "Installing OmniClip runtime profile '$Profile' into $target"
 
-if ($Profile -eq 'cuda') {
-    & $pythonExe @pythonPrefix -m pip install --upgrade --target $target --index-url https://download.pytorch.org/whl/cu128 torch==2.10.0
-} else {
-    & $pythonExe @pythonPrefix -m pip install --upgrade --target $target --index-url https://download.pytorch.org/whl/cpu torch==2.10.0
+foreach ($pattern in $cleanupPatterns) {
+    Get-ChildItem -Path $target -Filter $pattern -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
-if ($LASTEXITCODE -ne 0) { throw "PyTorch runtime installation failed." }
 
-& $pythonExe @pythonPrefix -m pip install --upgrade --target $target sentence-transformers==5.2.3 huggingface-hub==0.36.0 safetensors==0.7.0
-if ($LASTEXITCODE -ne 0) { throw "SentenceTransformer runtime installation failed." }
+& $pythonExe @pythonPrefix -m pip install --upgrade --upgrade-strategy only-if-needed --target $target --index-url $torchIndex --extra-index-url https://pypi.org/simple @packageList
+if ($LASTEXITCODE -ne 0) { throw "Runtime installation failed." }
+
+$bootstrapPath = Join-Path $target '_runtime_bootstrap.json'
+@'
+import json
+import sys
+import sysconfig
+from pathlib import Path
+
+target = Path(sys.argv[1])
+payload = {
+    'python_exe': sys.executable,
+    'python_version': sys.version.split()[0],
+    'stdlib': sysconfig.get_path('stdlib') or '',
+    'platstdlib': sysconfig.get_path('platstdlib') or '',
+    'dll_dir': str(Path(sys.base_prefix) / 'DLLs'),
+}
+target.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding='utf-8')
+'@ | & $pythonExe @pythonPrefix - $bootstrapPath
+if ($LASTEXITCODE -ne 0) { throw "Runtime bootstrap metadata generation failed." }
 
 Write-Host "Runtime installation completed. Restart OmniClipRAG and retry model bootstrap or indexing."

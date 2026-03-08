@@ -1,6 +1,6 @@
 # 方寸引 / OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.5-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.6-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#首次使用建议)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#核心定位)
@@ -36,13 +36,13 @@
 - 可控暴露面
 - 不把整库直接交给 AI
 
-## V0.1.5 重点更新
+## V0.1.6 重点更新
 
-这一轮继续保持轻量发布包路线，同时把桌面提示和双语文档都理顺了：
+这一轮继续保持轻量发布包路线，同时把打包版运行时链路补齐：
 
-- 已把最新中文说明同步翻译到英文 README，并把中英文两边的章节结构、定位说明、数据目录说明和免责声明重新对齐。
-- 运行时提示已改成更明确的人话：想用 CPU 就安装 `cpu` 运行时，不再误导成去改 `disabled`。
-- 缺少运行时时，桌面提示现在会直接告诉你命令、目录和大致空间，而不是丢一整屏难读的报错。
+- 修复了 `InstallRuntime.ps1` 的依赖安装顺序，避免先装好的 CUDA 版 `torch` 又被后续依赖覆盖成 CPU 版。
+- 补上了打包版运行时引导元数据和启动时的路径恢复，让 EXE 更稳定地识别外部 `runtime/`。
+- 构建脚本现在会保留本地 `runtime/` 目录，并在文档里进一步明确：GitHub 源码推送仍然不会提交大型运行时或构建产物。
 
 ## 当前能力
 
@@ -74,7 +74,8 @@ flowchart LR
 桌面版：
 
 ```powershell
-.\scriptsun_gui.ps1
+.\scripts
+un_gui.ps1
 ```
 
 打包 EXE：
@@ -86,8 +87,10 @@ flowchart LR
 CLI 仍然保留，用于调试和自动化：
 
 ```powershell
-.\scriptsun.ps1 status
-.\scriptsun.ps1 query "你的问题"
+.\scripts
+un.ps1 status
+.\scripts
+un.ps1 query "你的问题"
 ```
 
 ## 首次使用建议
@@ -140,7 +143,7 @@ OmniClip RAG/
 
 ## 当前版本说明
 
-- 版本：`V0.1.5`
+- 版本：`V0.1.6`
 - 主交付形态：桌面 GUI
 - 当前稳定主线：`torch + bge-m3`
 
@@ -183,6 +186,7 @@ tests/
 - [更新日志](CHANGELOG.md)
 - [空间预检说明](STORAGE_PRECHECK.md)
 - [运行时安装说明](RUNTIME_SETUP.md)
+- [v0.1.6 发布说明](releases/RELEASE_NOTES_v0.1.6.md)
 - [v0.1.4 发布说明](releases/RELEASE_NOTES_v0.1.4.md)
 - [v0.1.3 发布说明](releases/RELEASE_NOTES_v0.1.3.md)
 - [v0.1.2 发布说明](releases/RELEASE_NOTES_v0.1.2.md)

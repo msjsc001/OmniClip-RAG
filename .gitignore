@@ -43,3 +43,4 @@ logseq笔记样本/
 Thumbs.db
 .DS_Store
 .wheelhouse_gpu/
+/runtime/
