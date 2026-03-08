@@ -5,7 +5,23 @@ from pathlib import Path
 
 _handles = []
 base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+app_dir = Path(getattr(sys, "executable", base_dir)).resolve().parent if getattr(sys, "frozen", False) else base_dir
+runtime_dir = app_dir / "runtime"
+
+for candidate in (runtime_dir,):
+    if candidate.exists():
+        candidate_path = str(candidate)
+        if candidate_path not in sys.path:
+            sys.path.insert(0, candidate_path)
+
 search_dirs = [
+    runtime_dir,
+    runtime_dir / "pyarrow",
+    runtime_dir / "pyarrow.libs",
+    runtime_dir / "numpy.libs",
+    runtime_dir / "scipy.libs",
+    runtime_dir / "torch" / "lib",
+    runtime_dir / "onnxruntime",
     base_dir,
     base_dir / "pyarrow",
     base_dir / "pyarrow.libs",

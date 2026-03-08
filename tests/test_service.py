@@ -19,7 +19,7 @@ class _StubVectorIndex:
     def __init__(self) -> None:
         self.reset_called = False
 
-    def rebuild(self, documents, *, on_progress=None, pause_event=None):
+    def rebuild(self, documents, *, on_progress=None, pause_event=None, cancel_event=None):
         return None
 
     def upsert(self, documents):

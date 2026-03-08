@@ -1,9 +1,11 @@
 from pathlib import Path
 import shutil
+import time
 import unittest
 from unittest.mock import patch
 
 from omniclip_rag.gui import OmniClipDesktopApp
+from omniclip_rag.models import SearchHit
 from omniclip_rag.vector_index import get_local_model_dir
 
 
@@ -107,6 +109,42 @@ class GuiTests(unittest.TestCase):
             app._update_task_progress({'stage': 'indexing', 'current': 2, 'total': 4, 'current_path': 'pages/a.md'})
             self.assertIn('2/4', app.task_detail_var.get())
             self.assertEqual(float(app.task_progress.cget('value')), 2.0)
+        finally:
+            app._on_close()
+
+
+    def test_paused_rebuild_freezes_elapsed_display(self) -> None:
+        app = self._build_app()
+        try:
+            config, paths = app._config(True)
+            app.busy = True
+            app._start_task_feedback('rebuild_button', config, paths)
+            app.task_started_at = time.time() - 20
+            app._tick_task_feedback()
+            before = app.task_elapsed_var.get()
+            app._toggle_rebuild_pause()
+            time.sleep(1.1)
+            app._tick_task_feedback()
+            after = app.task_elapsed_var.get()
+            self.assertEqual(before, after)
+        finally:
+            app._on_close()
+
+    def test_toggle_hit_selection_updates_context_summary(self) -> None:
+        app = self._build_app()
+        try:
+            app.current_query_text = 'test query'
+            app.current_hits = [
+                SearchHit(score=80.0, title='Page A', anchor='A', source_path='pages/a.md', rendered_text='Alpha body', chunk_id='a', preview_text='Alpha', reason='正文命中'),
+                SearchHit(score=70.0, title='Page B', anchor='B', source_path='pages/b.md', rendered_text='Beta body', chunk_id='b', preview_text='Beta', reason='正文命中'),
+            ]
+            app.selected_chunk_ids = {'a', 'b'}
+            app._render_hits()
+            app._rebuild_context_view()
+            app._toggle_hit_selection(1)
+            self.assertEqual(app.context_selection_var.get(), app._tr('context_selection_summary', selected=1, total=2))
+            self.assertIn('Page A', app.current_context)
+            self.assertNotIn('Page B', app.current_context)
         finally:
             app._on_close()
 

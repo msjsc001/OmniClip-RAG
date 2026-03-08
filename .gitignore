@@ -42,3 +42,4 @@ logseq笔记样本/
 .idea/
 Thumbs.db
 .DS_Store
+.wheelhouse_gpu/

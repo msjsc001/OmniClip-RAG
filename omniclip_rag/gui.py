@@ -14,15 +14,16 @@ from tkinter import filedialog, messagebox, ttk
 
 from .clipboard import copy_text
 from .config import AppConfig, default_data_root, ensure_data_paths, load_config, normalize_vault_path, save_config
+from .errors import BuildCancelledError
 from .formatting import format_bytes, format_duration, format_space_report, summarize_preflight
 from .preflight import estimate_model_cache_bytes
 from .service import WATCHDOG_AVAILABLE, OmniClipService
 from .ui_i18n import language_code_from_label, language_label, normalize_language, text, tooltip
 from .ui_tooltip import ToolTip
-from .vector_index import get_local_model_dir, is_local_model_ready
+from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
-APP_TITLE = "OmniClip RAG · 无界 RAG"
-APP_VERSION = "V0.1.1"
+APP_TITLE = "OmniClip RAG · 方寸引"
+APP_VERSION = "V0.1.2"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 RELEASES_URL = f"{REPO_URL}/releases"
 
@@ -56,8 +57,8 @@ class OmniClipDesktopApp:
         _enable_high_dpi_awareness()
         self.root = tk.Tk()
         self.root.title(APP_TITLE)
-        self.root.geometry("1520x980")
-        self.root.minsize(1280, 820)
+        self.root.geometry("1560x1000")
+        self.root.minsize(1320, 860)
 
         self.queue: queue.Queue[tuple] = queue.Queue()
         self.busy = False
@@ -157,14 +158,18 @@ class OmniClipDesktopApp:
         self.backend_var = tk.StringVar(value="lancedb")
         self.model_var = tk.StringVar(value="BAAI/bge-m3")
         self.runtime_var = tk.StringVar(value="torch")
-        self.device_var = tk.StringVar(value="cpu")
+        self.device_var = tk.StringVar(value="auto")
+        self.device_summary_var = tk.StringVar(value="")
         self.limit_var = tk.StringVar(value="8")
+        self.score_threshold_var = tk.StringVar(value="0")
         self.interval_var = tk.StringVar(value="2.0")
         self.query_var = tk.StringVar()
+        self.context_selection_var = tk.StringVar(value="")
         self.local_only_var = tk.BooleanVar(value=False)
         self.force_var = tk.BooleanVar(value=False)
         self.polling_var = tk.BooleanVar(value=False)
         self.show_advanced_var = tk.BooleanVar(value=False)
+        self.quick_start_expanded_var = tk.BooleanVar(value=False)
         self.clear_index_var = tk.BooleanVar(value=False)
         self.clear_logs_var = tk.BooleanVar(value=False)
         self.clear_cache_var = tk.BooleanVar(value=False)
@@ -182,21 +187,30 @@ class OmniClipDesktopApp:
         self.current_workspace_var = tk.StringVar(value=self._tr("workspace_empty"))
         self.task_state_var = tk.StringVar(value=self._tr("task_idle"))
         self.task_detail_var = tk.StringVar(value=self._tr("task_idle_detail"))
+        self.task_percent_var = tk.StringVar(value=self._tr("task_percent_idle"))
         self.task_elapsed_var = tk.StringVar(value=self._tr("task_elapsed", value="00:00"))
         self.task_eta_var = tk.StringVar(value=self._tr("task_eta_idle"))
         self.rebuild_pause_var = tk.StringVar(value=self._tr("pause_rebuild"))
         self.task_started_at = 0.0
+        self.task_paused_started_at = 0.0
+        self.task_paused_total_seconds = 0.0
+        self.task_last_eta_text = self._tr("task_eta_idle")
         self.latest_task_progress: dict[str, object] | None = None
         self.rebuild_pause_event = threading.Event()
+        self.rebuild_cancel_event = threading.Event()
         self.task_after_id: str | None = None
         self.queue_after_id: str | None = None
         self.layout_after_id: str | None = None
         self.active_task_key: str | None = None
+        self.active_task_config: AppConfig | None = None
         self.resume_prompt_workspace_id: str | None = None
-        self.ui_window_geometry = "1520x980"
+        self.current_query_text = ""
+        self.selected_chunk_ids: set[str] = set()
+        self.device_options = get_device_options()
+        self.ui_window_geometry = "1560x1000"
         self.ui_main_sash = 520
-        self.ui_right_sash = 156
-        self.ui_results_sash = 260
+        self.ui_right_sash = 170
+        self.ui_results_sash = 230
 
     def _tr(self, key: str, **kwargs) -> str:
         return text(self.language_code, key, **kwargs)
@@ -216,14 +230,77 @@ class OmniClipDesktopApp:
             use_polling = bool(mode)
         return self._tr("watch_mode_polling") if use_polling else self._tr("watch_mode_watchdog")
 
+
+    def _refresh_device_options(self) -> None:
+        self.device_options = get_device_options()
+        if self.device_var.get().strip() not in self.device_options:
+            fallback = 'auto' if 'auto' in self.device_options else ('cpu' if 'cpu' in self.device_options else self.device_options[0])
+            self.device_var.set(fallback)
+        self.device_summary_var.set(self._device_capability_summary())
+        device_combo = getattr(self, 'device_combo', None)
+        if device_combo is not None:
+            try:
+                if int(device_combo.winfo_exists()):
+                    device_combo.configure(values=self.device_options)
+            except Exception:
+                pass
+
+    def _device_capability_summary(self) -> str:
+        acceleration = detect_acceleration()
+        requested = (self.device_var.get().strip() or 'cpu').lower()
+        resolved = resolve_vector_device(requested)
+        gpu_name = str(acceleration.get('gpu_name') or acceleration.get('cuda_name') or '').strip()
+        if acceleration.get('cuda_available'):
+            return self._tr('device_summary_cuda_ready', gpu=gpu_name or 'NVIDIA GPU', resolved=resolved)
+        if acceleration.get('gpu_present'):
+            return self._tr('device_summary_gpu_detected_no_cuda', gpu=gpu_name or 'NVIDIA GPU')
+        return self._tr('device_summary_cpu_only')
+
+    def _current_task_elapsed_seconds(self) -> float:
+        if not self.task_started_at:
+            return 0.0
+        paused_extra = 0.0
+        if self.task_paused_started_at:
+            paused_extra = max(time.time() - self.task_paused_started_at, 0.0)
+        return max(time.time() - self.task_started_at - self.task_paused_total_seconds - paused_extra, 0.0)
+
+    def _selected_hits(self) -> list:
+        return [hit for hit in self.current_hits if hit.chunk_id in self.selected_chunk_ids]
+
+    def _rebuild_context_view(self) -> None:
+        if not self.current_query_text and not self.current_hits:
+            self.current_context = ''
+            self.context_view_text = ''
+            self._update_context_selection_summary()
+            return
+        self.current_context = OmniClipService.compose_context_pack_text(self.current_query_text, self._selected_hits())
+        self.context_view_text = self.current_context
+        if hasattr(self, 'context_text'):
+            self._set_text(self.context_text, self.current_context or self._tr('context_empty'))
+        self._update_context_selection_summary()
+
+    def _update_context_selection_summary(self) -> None:
+        selected = len(self._selected_hits())
+        total = len(self.current_hits)
+        if total <= 0:
+            self.context_selection_var.set(self._tr('context_selection_empty'))
+        else:
+            self.context_selection_var.set(self._tr('context_selection_summary', selected=selected, total=total))
+
     def _load_window_icons(self) -> None:
         png_path = _resource_path("app_icon.png")
         ico_path = _resource_path("app_icon.ico")
         if png_path.exists():
             self.icon_image = tk.PhotoImage(file=str(png_path))
-            self.root.iconphoto(True, self.icon_image)
             try:
-                self.header_icon = self.icon_image.subsample(7, 7)
+                self.root.iconphoto(True, self.icon_image)
+            except Exception:
+                self.icon_image = None
+            try:
+                if self.icon_image is not None:
+                    self.header_icon = self.icon_image.subsample(7, 7)
+                else:
+                    self.header_icon = None
             except Exception:
                 self.header_icon = self.icon_image
         if sys.platform == "win32" and ico_path.exists():
@@ -376,9 +453,9 @@ class OmniClipDesktopApp:
                 pass
 
         pane_specs = (
-            ("main_pane", "ui_main_sash", 460, 820),
-            ("right_pane", "ui_right_sash", 140, 420),
-            ("results_pane", "ui_results_sash", 180, 300),
+            ("main_pane", "ui_main_sash", 460, 860),
+            ("right_pane", "ui_right_sash", 120, 520),
+            ("results_pane", "ui_results_sash", 190, 300),
         )
 
         def restore(attempt: int = 0) -> None:
@@ -512,26 +589,51 @@ class OmniClipDesktopApp:
         parent.grid_columnconfigure(1, weight=1)
 
         guide_panel = self._panel(parent, 0, columnspan=2)
-        tk.Label(guide_panel, text=self._tr("quick_start_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
+        guide_panel.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            guide_panel,
+            text=self._tr("quick_start_subtitle"),
+            bg=self.colors["soft_2"],
+            fg=self.colors["muted"],
+            font=self.fonts["small"],
+            anchor="w",
+            justify="left",
+            wraplength=420,
+        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 8))
+        toggle_row = tk.Frame(guide_panel, bg=self.colors["soft_2"])
+        toggle_row.grid(row=1, column=0, sticky="ew", padx=16)
+        toggle_row.grid_columnconfigure(0, weight=1)
+        quick_start_button = ttk.Button(
+            toggle_row,
+            text=self._tr("quick_start_show") if not self.quick_start_expanded_var.get() else self._tr("quick_start_hide"),
+            style="Secondary.TButton",
+            command=self._toggle_quick_start,
+        )
+        quick_start_button.grid(row=0, column=0, sticky="w")
+        self._attach_tooltip(quick_start_button, "quick_start_toggle")
 
-        steps = tk.Frame(guide_panel, bg=self.colors["soft_2"])
-        steps.grid(row=1, column=0, sticky="ew", padx=16)
-        for index, key in enumerate(("step_1", "step_2", "step_3")):
-            badge = tk.Label(steps, text=str(index + 1), bg=self.colors["accent_soft"], fg=self.colors["accent_dark"], font=self.fonts["chip"], width=2, pady=3)
-            badge.grid(row=index, column=0, sticky="nw")
-            tk.Label(
-                steps,
-                text=self._tr(key),
-                bg=self.colors["soft_2"],
-                fg=self.colors["ink"],
-                font=self.fonts["body"],
-                anchor="w",
-                justify="left",
-                wraplength=330,
-            ).grid(row=index, column=1, sticky="w", padx=(8, 0), pady=(0 if index == 0 else 6, 0))
+        if self.quick_start_expanded_var.get():
+            steps = tk.Frame(guide_panel, bg=self.colors["soft_2"])
+            steps.grid(row=2, column=0, sticky="ew", padx=16, pady=(12, 0))
+            for index, key in enumerate(("step_1", "step_2", "step_3")):
+                badge = tk.Label(steps, text=str(index + 1), bg=self.colors["accent_soft"], fg=self.colors["accent_dark"], font=self.fonts["chip"], width=2, pady=3)
+                badge.grid(row=index, column=0, sticky="nw")
+                tk.Label(
+                    steps,
+                    text=self._tr(key),
+                    bg=self.colors["soft_2"],
+                    fg=self.colors["ink"],
+                    font=self.fonts["body"],
+                    anchor="w",
+                    justify="left",
+                    wraplength=360,
+                ).grid(row=index, column=1, sticky="w", padx=(8, 0), pady=(0 if index == 0 else 8, 0))
+            chip_row = 3
+        else:
+            chip_row = 2
 
         chips = tk.Frame(guide_panel, bg=self.colors["soft_2"])
-        chips.grid(row=2, column=0, sticky="ew", padx=16, pady=(14, 14))
+        chips.grid(row=chip_row, column=0, sticky="ew", padx=16, pady=(14, 14))
         chips.grid_columnconfigure((0, 1, 2), weight=1)
         self.vault_chip = self._chip(chips, self.vault_state_var, 0)
         self.model_chip = self._chip(chips, self.model_state_var, 1)
@@ -583,8 +685,8 @@ class OmniClipDesktopApp:
         for index, (label, variable) in enumerate(((self._tr("stat_files"), self.files_var), (self._tr("stat_chunks"), self.chunks_var), (self._tr("stat_refs"), self.refs_var))):
             stats.grid_columnconfigure(index, weight=1)
             self._stat_box(stats, label, variable, index)
-        tk.Label(status_panel, textvariable=self.preflight_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", wraplength=180, anchor="w").grid(row=1, column=0, sticky="ew", padx=16, pady=(14, 4))
-        tk.Label(status_panel, textvariable=self.watch_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", wraplength=180, anchor="w").grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
+        tk.Label(status_panel, textvariable=self.preflight_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", wraplength=220, anchor="w").grid(row=1, column=0, sticky="ew", padx=16, pady=(14, 4))
+        tk.Label(status_panel, textvariable=self.watch_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", wraplength=220, anchor="w").grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
 
         task_panel = tk.Frame(status_panel, bg=self.colors["soft_2"], highlightbackground=self.colors["border"], highlightthickness=1)
         task_panel.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
@@ -592,27 +694,49 @@ class OmniClipDesktopApp:
         tk.Label(task_panel, text=self._tr("task_panel_title"), bg=self.colors["soft_2"], fg=self.colors["ink"], font=self.fonts["small"], anchor="w").grid(row=0, column=0, sticky="w", padx=12, pady=(10, 6))
         self.task_progress = ttk.Progressbar(task_panel, mode="indeterminate")
         self.task_progress.grid(row=1, column=0, sticky="ew", padx=12)
-        self.rebuild_pause_button = ttk.Button(task_panel, textvariable=self.rebuild_pause_var, style="Secondary.TButton", command=self._toggle_rebuild_pause)
-        self.rebuild_pause_button.grid(row=2, column=0, sticky="e", padx=12, pady=(8, 0))
+        button_row = tk.Frame(task_panel, bg=self.colors["soft_2"])
+        button_row.grid(row=2, column=0, sticky="ew", padx=12, pady=(8, 0))
+        button_row.grid_columnconfigure(0, weight=1)
+        button_row.grid_columnconfigure(1, weight=1)
+        self.rebuild_pause_button = ttk.Button(button_row, textvariable=self.rebuild_pause_var, style="Secondary.TButton", command=self._toggle_rebuild_pause)
+        self.rebuild_pause_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.rebuild_pause_button.grid_remove()
         self._attach_tooltip(self.rebuild_pause_button, "pause_rebuild")
+        self.rebuild_cancel_button = ttk.Button(button_row, text=self._tr("cancel_rebuild"), style="Danger.TButton", command=self._cancel_rebuild)
+        self.rebuild_cancel_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self.rebuild_cancel_button.grid_remove()
+        self._attach_tooltip(self.rebuild_cancel_button, "cancel_rebuild")
         tk.Label(task_panel, textvariable=self.task_state_var, bg=self.colors["soft_2"], fg=self.colors["ink"], font=self.fonts["small"], anchor="w").grid(row=3, column=0, sticky="w", padx=12, pady=(8, 0))
-        tk.Label(task_panel, textvariable=self.task_elapsed_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=4, column=0, sticky="w", padx=12, pady=(4, 0))
-        tk.Label(task_panel, textvariable=self.task_eta_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=180).grid(row=5, column=0, sticky="w", padx=12, pady=(4, 0))
-        tk.Label(task_panel, textvariable=self.task_detail_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=180).grid(row=6, column=0, sticky="w", padx=12, pady=(4, 10))
-
+        tk.Label(task_panel, textvariable=self.task_percent_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=4, column=0, sticky="w", padx=12, pady=(4, 0))
+        tk.Label(task_panel, textvariable=self.task_elapsed_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=5, column=0, sticky="w", padx=12, pady=(4, 0))
+        tk.Label(task_panel, textvariable=self.task_eta_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=220).grid(row=6, column=0, sticky="w", padx=12, pady=(4, 0))
+        tk.Label(task_panel, textvariable=self.task_detail_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=220).grid(row=7, column=0, sticky="w", padx=12, pady=(4, 10))
     def _build_settings_card(self, parent: tk.Widget) -> None:
         parent.grid_columnconfigure(0, weight=1)
+        self._refresh_device_options()
 
         form_panel = self._panel(parent, 0)
-        tk.Label(form_panel, text=self._tr("settings_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
+        tk.Label(form_panel, text=self._tr("settings_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 8))
+        tk.Label(form_panel, textvariable=self.device_summary_var, bg=self.colors["soft_2"], fg=self.colors["accent_dark"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
         form = tk.Frame(form_panel, bg=self.colors["soft_2"])
-        form.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 14))
+        form.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 14))
         form.grid_columnconfigure(1, weight=1)
         form.grid_columnconfigure(3, weight=1)
         self._combo_row(form, 0, self._tr("backend_label"), self.backend_var, ["lancedb", "disabled"], tooltip_key="backend")
         self._entry_row(form, 1, self._tr("model_label"), self.model_var, tooltip_key="model")
-        self._combo_pair_row(form, 2, self._tr("runtime_label"), self.runtime_var, ["torch", "onnx"], self._tr("device_label"), self.device_var, ["cpu", "cuda"], left_tip="runtime", right_tip="device")
+        self.runtime_combo, self.device_combo = self._combo_pair_row(
+            form,
+            2,
+            self._tr("runtime_label"),
+            self.runtime_var,
+            ["torch", "onnx"],
+            self._tr("device_label"),
+            self.device_var,
+            self.device_options,
+            left_tip="runtime",
+            right_tip="device",
+        )
+        self.device_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_device_options())
         self._entry_pair_row(form, 3, self._tr("limit_label"), self.limit_var, self._tr("interval_label"), self.interval_var, left_tip="limit", right_tip="interval")
 
         action_panel = self._panel(parent, 1, pady=(12, 0))
@@ -648,7 +772,6 @@ class OmniClipDesktopApp:
 
         refresh_button = ttk.Button(action_panel, text=self._tr("refresh_button"), style="Secondary.TButton", command=self._refresh)
         refresh_button.grid(row=3, column=0, sticky="ew", padx=16, pady=(14, 14))
-
     def _build_data_card(self, parent: tk.Widget) -> None:
         parent.grid_columnconfigure(0, weight=1)
 
@@ -687,7 +810,7 @@ class OmniClipDesktopApp:
         search_card = self._card(self.search_host, self._tr("search_title"), self._tr("search_subtitle"), 0)
         tk.Label(search_card, text=self._tr("query_hint"), bg=self.colors["card"], fg=self.colors["accent_dark"], font=self.fonts["small"], anchor="w").grid(row=2, column=0, sticky="w", padx=16)
         query_row = tk.Frame(search_card, bg=self.colors["card"])
-        query_row.grid(row=3, column=0, sticky="ew", padx=16, pady=(10, 14))
+        query_row.grid(row=3, column=0, sticky="ew", padx=16, pady=(10, 6))
         query_row.grid_columnconfigure(0, weight=1)
         entry = ttk.Entry(query_row, textvariable=self.query_var, style="Query.TEntry")
         entry.grid(row=0, column=0, sticky="ew")
@@ -703,6 +826,17 @@ class OmniClipDesktopApp:
         copy_context_button.grid(row=0, column=3, padx=(10, 0))
         self._attach_tooltip(copy_context_button, "copy_context")
 
+        query_meta = tk.Frame(search_card, bg=self.colors["card"])
+        query_meta.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 14))
+        query_meta.grid_columnconfigure(3, weight=1)
+        threshold_label = tk.Label(query_meta, text=self._tr("score_threshold_label"), bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        threshold_label.grid(row=0, column=0, sticky="w")
+        self._attach_tooltip(threshold_label, "score_threshold")
+        threshold_entry = ttk.Entry(query_meta, textvariable=self.score_threshold_var, width=8, style="Field.TEntry")
+        threshold_entry.grid(row=0, column=1, sticky="w", padx=(8, 14))
+        self._attach_tooltip(threshold_entry, "score_threshold")
+        tk.Label(query_meta, textvariable=self.context_selection_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=0, column=3, sticky="w")
+
         result_card = self._card(self.results_host, self._tr("results_title"), self._tr("results_subtitle"), 0)
         result_card.grid_rowconfigure(2, weight=1)
         result_card.grid_columnconfigure(0, weight=1)
@@ -713,17 +847,19 @@ class OmniClipDesktopApp:
         table_frame = tk.Frame(self.results_pane, bg=self.colors["card"])
         table_frame.grid_columnconfigure(0, weight=1)
         table_frame.grid_rowconfigure(0, weight=1)
-        self.tree = ttk.Treeview(table_frame, columns=("title", "anchor", "source", "score"), show="headings", style="App.Treeview")
+        self.tree = ttk.Treeview(table_frame, columns=("include", "title", "reason", "anchor", "score"), show="headings", style="App.Treeview")
         for key, title, width in (
+            ("include", self._tr("col_include"), 76),
             ("title", self._tr("col_page"), 220),
-            ("anchor", self._tr("col_anchor"), 360),
-            ("source", self._tr("col_source"), 240),
+            ("reason", self._tr("col_reason"), 220),
+            ("anchor", self._tr("col_anchor"), 320),
             ("score", self._tr("col_score"), 90),
         ):
             self.tree.heading(key, text=title)
-            self.tree.column(key, width=width, anchor="w" if key != "score" else "e")
+            self.tree.column(key, width=width, anchor="center" if key in {"include", "score"} else "w")
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.tree.bind("<<TreeviewSelect>>", self._select_hit)
+        self.tree.bind("<Button-1>", self._on_result_tree_click)
         scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=scroll.set)
@@ -746,7 +882,6 @@ class OmniClipDesktopApp:
 
         self.results_pane.add(table_frame, weight=1)
         self.results_pane.add(tabs_host, weight=1)
-
     def _chip(self, parent: tk.Widget, variable: tk.StringVar, column: int) -> tk.Label:
         label = tk.Label(parent, textvariable=variable, bg=self.colors["chip_neutral_bg"], fg=self.colors["chip_neutral_fg"], font=self.fonts["chip"], padx=10, pady=6)
         label.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0))
@@ -791,7 +926,7 @@ class OmniClipDesktopApp:
         combo.grid(row=row, column=1, columnspan=3, sticky="ew", pady=(8, 0))
         self._attach_tooltip(combo, tooltip_key)
 
-    def _combo_pair_row(self, parent: tk.Widget, row: int, left_label: str, left_var: tk.StringVar, left_values: list[str], right_label: str, right_var: tk.StringVar, right_values: list[str], *, left_tip: str, right_tip: str) -> None:
+    def _combo_pair_row(self, parent: tk.Widget, row: int, left_label: str, left_var: tk.StringVar, left_values: list[str], right_label: str, right_var: tk.StringVar, right_values: list[str], *, left_tip: str, right_tip: str):
         background = str(parent.cget("bg"))
         left_caption = tk.Label(parent, text=left_label, bg=background, fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
         left_caption.grid(row=row, column=0, sticky="w", pady=(8, 0))
@@ -806,6 +941,7 @@ class OmniClipDesktopApp:
         right_combo = ttk.Combobox(parent, textvariable=right_var, values=right_values, state="readonly", style="Field.TCombobox")
         right_combo.grid(row=row, column=3, sticky="ew", pady=(8, 0))
         self._attach_tooltip(right_combo, right_tip)
+        return left_combo, right_combo
 
     def _entry_pair_row(self, parent: tk.Widget, row: int, left_label: str, left_var: tk.StringVar, right_label: str, right_var: tk.StringVar, *, left_tip: str, right_tip: str) -> None:
         background = str(parent.cget("bg"))
@@ -874,6 +1010,8 @@ class OmniClipDesktopApp:
 
     def _reset_workspace_views(self) -> None:
         self.current_hits = []
+        self.current_query_text = ""
+        self.selected_chunk_ids.clear()
         self.current_context = ""
         self.current_report = None
         self.latest_preflight_snapshot = None
@@ -884,6 +1022,7 @@ class OmniClipDesktopApp:
         self.refs_var.set("0")
         self.preflight_var.set(self._tr("preflight_empty"))
         self.result_var.set(self._tr("result_empty"))
+        self._update_context_selection_summary()
 
     def _refresh_workspace_summary(self) -> None:
         vault = normalize_vault_path(self.vault_var.get().strip())
@@ -969,45 +1108,87 @@ class OmniClipDesktopApp:
         visible = self.busy and self._is_rebuild_task(self.active_task_key)
         if not visible:
             self.rebuild_pause_event.clear()
+            self.rebuild_cancel_event.clear()
             self.rebuild_pause_var.set(self._tr("pause_rebuild"))
             self.rebuild_pause_button.grid_remove()
+            if hasattr(self, "rebuild_cancel_button"):
+                self.rebuild_cancel_button.grid_remove()
             return
         paused = self.rebuild_pause_event.is_set()
         self.rebuild_pause_var.set(self._tr("resume_rebuild_button") if paused else self._tr("pause_rebuild"))
         self.rebuild_pause_button.configure(style="Primary.TButton" if paused else "Secondary.TButton")
         self.rebuild_pause_button.grid()
+        if hasattr(self, "rebuild_cancel_button"):
+            self.rebuild_cancel_button.grid()
 
     def _toggle_rebuild_pause(self) -> None:
         if not self.busy or not self._is_rebuild_task(self.active_task_key):
             return
         if self.rebuild_pause_event.is_set():
+            if self.task_paused_started_at:
+                self.task_paused_total_seconds += max(time.time() - self.task_paused_started_at, 0.0)
+            self.task_paused_started_at = 0.0
             self.rebuild_pause_event.clear()
             self.status_var.set(self._tr("status_rebuild_resumed"))
             self._append_log(self._tr("log_rebuild_resumed"))
             self.task_state_var.set(self._tr("task_running", task=self._tr(self.active_task_key or "rebuild_button")))
+            if self.active_task_config is not None:
+                current_device = (self.device_var.get().strip() or 'cpu').lower()
+                if current_device != (self.active_task_config.vector_device or 'cpu').lower():
+                    self._append_log(
+                        self._tr(
+                            "log_rebuild_resume_original_device",
+                            original=self.active_task_config.vector_device,
+                            current=current_device,
+                        )
+                    )
             if self.latest_task_progress is not None:
                 self._update_task_progress(dict(self.latest_task_progress))
         else:
             self.rebuild_pause_event.set()
+            self.task_paused_started_at = time.time()
             self.status_var.set(self._tr("status_rebuild_paused"))
             self._append_log(self._tr("log_rebuild_paused"))
             self.task_state_var.set(self._tr("task_paused", task=self._tr(self.active_task_key or "rebuild_button")))
             self.task_detail_var.set(self._tr("task_detail_rebuild_paused"))
-            self.task_eta_var.set(self._tr("task_eta_paused"))
+            self.task_eta_var.set(self._tr("task_eta_paused", value=self.task_last_eta_text))
+            self.task_elapsed_var.set(self._tr("task_elapsed", value=self._format_elapsed(self._current_task_elapsed_seconds())))
             if hasattr(self, "task_progress"):
                 self.task_progress.stop()
+        self._update_rebuild_pause_button()
+
+    def _cancel_rebuild(self) -> None:
+        if not self.busy or not self._is_rebuild_task(self.active_task_key):
+            return
+        if not messagebox.askyesno(self._tr("cancel_rebuild_confirm_title"), self._tr("cancel_rebuild_confirm_body"), parent=self.root):
+            return
+        if self.task_paused_started_at:
+            self.task_paused_total_seconds += max(time.time() - self.task_paused_started_at, 0.0)
+            self.task_paused_started_at = 0.0
+        self.rebuild_pause_event.clear()
+        self.rebuild_cancel_event.set()
+        self.task_state_var.set(self._tr("task_state_cancelling"))
+        self.task_detail_var.set(self._tr("task_detail_rebuild_cancelling"))
+        self.status_var.set(self._tr("status_rebuild_cancel_requested"))
+        self._append_log(self._tr("log_rebuild_cancel_requested"))
         self._update_rebuild_pause_button()
 
     def _start_task_feedback(self, label_key: str, config: AppConfig, paths) -> None:
         eta_text, detail_text = self._task_profile(label_key, config, paths)
         self.active_task_key = label_key
+        self.active_task_config = config
         self.latest_task_progress = None
         self.rebuild_pause_event.clear()
+        self.rebuild_cancel_event.clear()
         self.task_started_at = time.time()
+        self.task_paused_started_at = 0.0
+        self.task_paused_total_seconds = 0.0
+        self.task_last_eta_text = self._tr("task_eta_label", value=eta_text)
         self.task_state_var.set(self._tr("task_running", task=self._tr(label_key)))
         self.task_detail_var.set(detail_text)
+        self.task_percent_var.set(self._tr("task_percent_idle"))
         self.task_elapsed_var.set(self._tr("task_elapsed", value="00:00"))
-        self.task_eta_var.set(self._tr("task_eta_label", value=eta_text))
+        self.task_eta_var.set(self.task_last_eta_text)
         self._update_rebuild_pause_button()
         if hasattr(self, "task_progress"):
             self.task_progress.stop()
@@ -1024,8 +1205,9 @@ class OmniClipDesktopApp:
             self.task_after_id = None
         if not self.busy:
             return
-        elapsed = self._format_elapsed(time.time() - self.task_started_at)
-        self.task_elapsed_var.set(self._tr("task_elapsed", value=elapsed))
+        if not (self.rebuild_pause_event.is_set() and self._is_rebuild_task(self.active_task_key)):
+            elapsed = self._format_elapsed(self._current_task_elapsed_seconds())
+            self.task_elapsed_var.set(self._tr("task_elapsed", value=elapsed))
         self.task_after_id = self.root.after(500, self._tick_task_feedback)
 
     def _stop_task_feedback(self) -> None:
@@ -1039,11 +1221,17 @@ class OmniClipDesktopApp:
             self.task_progress.stop()
             self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
         self.rebuild_pause_event.clear()
+        self.rebuild_cancel_event.clear()
         self.latest_task_progress = None
         self.active_task_key = None
+        self.active_task_config = None
         self.task_started_at = 0.0
+        self.task_paused_started_at = 0.0
+        self.task_paused_total_seconds = 0.0
+        self.task_last_eta_text = self._tr("task_eta_idle")
         self.task_state_var.set(self._tr("task_idle"))
         self.task_detail_var.set(self._tr("task_idle_detail"))
+        self.task_percent_var.set(self._tr("task_percent_idle"))
         self.task_elapsed_var.set(self._tr("task_elapsed", value="00:00"))
         self.task_eta_var.set(self._tr("task_eta_idle"))
         self._update_rebuild_pause_button()
@@ -1053,47 +1241,72 @@ class OmniClipDesktopApp:
             return
         self.latest_task_progress = dict(payload)
         stage = str(payload.get("stage") or "")
+        stage_status = str(payload.get('stage_status') or '')
         current = max(0, int(payload.get("current", 0) or 0))
         total = max(0, int(payload.get("total", 0) or 0))
+        percent_value = payload.get('overall_percent')
+        if percent_value is None and total > 0 and stage in {"indexing", "rendering", "vectorizing"}:
+            percent_value = min((current / max(total, 1)) * 100.0, 100.0)
+        if total > 0 and percent_value is not None:
+            self.task_percent_var.set(self._tr("task_percent_label", percent=float(percent_value), current=current, total=total))
+        elif stage == "rendering":
+            self.task_percent_var.set(self._tr("task_percent_stage", stage=self._tr("resume_phase_rendering")))
+        else:
+            self.task_percent_var.set(self._tr("task_percent_idle"))
+
+        eta_seconds = payload.get('eta_seconds')
+        if eta_seconds is not None and not (self.rebuild_pause_event.is_set() and self._is_rebuild_task(self.active_task_key)):
+            self.task_last_eta_text = self._tr("task_eta_label", value=format_duration(int(max(float(eta_seconds), 0.0))))
+            self.task_eta_var.set(self.task_last_eta_text)
+
         if self.rebuild_pause_event.is_set() and self._is_rebuild_task(self.active_task_key):
-            if stage in {"indexing", "vectorizing"} and total > 0:
+            if stage in {"indexing", "rendering", "vectorizing"} and total > 0:
                 self.task_progress.stop()
                 self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
             else:
                 self.task_progress.stop()
                 self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
             return
+
         if stage == "indexing" and total > 0:
             self.task_progress.stop()
             self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
             current_path = str(payload.get("current_path") or self._tr("none_value"))
             self.task_detail_var.set(self._tr("task_detail_rebuild_progress", current=current, total=total, path=current_path))
-            if current > 0 and self.task_started_at > 0:
-                elapsed_seconds = max(time.time() - self.task_started_at, 0.1)
-                remaining_seconds = int((elapsed_seconds / current) * max(total - current, 0))
-                self.task_eta_var.set(self._tr("task_eta_label", value=format_duration(remaining_seconds)))
         elif stage == "rendering":
-            self.task_progress.stop()
-            self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
-            self.task_progress.start(10)
-            self.task_detail_var.set(self._tr("task_detail_rebuild_rendering"))
-        elif stage == "vectorizing":
             if total > 0:
                 self.task_progress.stop()
                 self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
+                self.task_detail_var.set(self._tr("task_detail_rebuild_rendering_progress", current=current, total=total))
             else:
                 self.task_progress.stop()
                 self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
                 self.task_progress.start(10)
-            self.task_detail_var.set(self._tr("task_detail_rebuild_vectorizing", total=total))
+                self.task_detail_var.set(self._tr("task_detail_rebuild_rendering"))
+        elif stage == "vectorizing":
+            if stage_status == 'loading_model' and current <= 0:
+                self.task_progress.stop()
+                self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
+                self.task_progress.start(10)
+                self.task_detail_var.set(self._tr("task_detail_rebuild_vector_loading"))
+            elif total > 0:
+                self.task_progress.stop()
+                self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
+                self.task_detail_var.set(self._tr("task_detail_rebuild_vectorizing", total=total))
+            else:
+                self.task_progress.stop()
+                self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
+                self.task_progress.start(10)
+                self.task_detail_var.set(self._tr("task_detail_rebuild_vectorizing", total=total))
 
     def _refresh_dynamic_views(self) -> None:
         self._refresh_state_chips()
         self._render_hits()
         self._set_text(self.preview_text, self._current_preview_text())
-        self._set_text(self.context_text, self.context_view_text or self._tr("context_empty"))
+        self._set_text(self.context_text, self.current_context or self.context_view_text or self._tr("context_empty"))
         self._set_text(self.log_text, "\n".join(self.log_lines) if self.log_lines else self._tr("log_empty"))
         self._update_watch_button_state()
+        self._update_context_selection_summary()
 
     def _current_preview_text(self) -> str:
         if not self.current_hits:
@@ -1112,8 +1325,10 @@ class OmniClipDesktopApp:
             f"{self._tr('col_page')}：{hit.title}\n"
             f"{self._tr('col_anchor')}：{hit.anchor}\n"
             f"{self._tr('col_source')}：{hit.source_path}\n"
-            f"{self._tr('col_score')}：{hit.score:.2f}\n\n"
-            f"{hit.rendered_text}"
+            f"{self._tr('col_score')}：{hit.score:.1f}/100\n"
+            f"{self._tr('col_reason')}：{hit.reason or self._tr('reason_fallback')}\n\n"
+            f"{self._tr('preview_excerpt_label')}\n{hit.preview_text or self._tr('none_value')}\n\n"
+            f"{self._tr('preview_full_label')}\n{hit.rendered_text}"
         )
 
     def _render_hits(self) -> None:
@@ -1122,10 +1337,38 @@ class OmniClipDesktopApp:
         for item in self.tree.get_children():
             self.tree.delete(item)
         for index, hit in enumerate(self.current_hits):
-            self.tree.insert("", "end", iid=str(index), values=(hit.title, hit.anchor, hit.source_path, f"{hit.score:.1f}"))
+            include_value = '[x]' if hit.chunk_id in self.selected_chunk_ids else '[ ]'
+            self.tree.insert(
+                "",
+                "end",
+                iid=str(index),
+                values=(include_value, hit.title, hit.reason or self._tr('reason_fallback'), hit.anchor, f"{hit.score:.1f}"),
+            )
         if self.current_hits:
             self.tree.selection_set("0")
 
+    def _on_result_tree_click(self, event) -> str | None:
+        if not hasattr(self, 'tree'):
+            return None
+        row_id = self.tree.identify_row(event.y)
+        column_id = self.tree.identify_column(event.x)
+        if row_id and column_id == '#1':
+            self._toggle_hit_selection(int(row_id))
+            self.tree.selection_set(row_id)
+            self._show_hit(int(row_id))
+            return 'break'
+        return None
+
+    def _toggle_hit_selection(self, index: int) -> None:
+        if index < 0 or index >= len(self.current_hits):
+            return
+        hit = self.current_hits[index]
+        if hit.chunk_id in self.selected_chunk_ids:
+            self.selected_chunk_ids.remove(hit.chunk_id)
+        else:
+            self.selected_chunk_ids.add(hit.chunk_id)
+        self._render_hits()
+        self._rebuild_context_view()
     def _refresh_state_chips(self) -> None:
         self._refresh_workspace_summary()
         try:
@@ -1167,6 +1410,7 @@ class OmniClipDesktopApp:
 
     def _refresh_localized_runtime_state(self) -> None:
         self._refresh_workspace_summary()
+        self._refresh_device_options()
         if self.current_report is not None:
             self.preflight_var.set(summarize_preflight(self.current_report, self.language_code))
             if not self.current_context:
@@ -1203,17 +1447,22 @@ class OmniClipDesktopApp:
                     self.status_var.set(self._tr("status_ready"))
 
         if self.busy and self.active_task_key:
-            self.task_state_var.set(self._tr("task_running", task=self._tr(self.active_task_key)))
+            if self.rebuild_pause_event.is_set() and self._is_rebuild_task(self.active_task_key):
+                self.task_state_var.set(self._tr("task_paused", task=self._tr(self.active_task_key)))
+            else:
+                self.task_state_var.set(self._tr("task_running", task=self._tr(self.active_task_key)))
             try:
                 config, paths = self._config(False)
                 eta_text, detail_text = self._task_profile(self.active_task_key, config, paths)
             except Exception:
                 eta_text, detail_text = self._tr("task_eta_unknown"), self._tr("task_detail_unknown")
-            self.task_detail_var.set(detail_text)
-            self.task_eta_var.set(self._tr("task_eta_label", value=eta_text))
+            if not (self.rebuild_pause_event.is_set() and self._is_rebuild_task(self.active_task_key)):
+                self.task_detail_var.set(detail_text)
+                self.task_eta_var.set(self._tr("task_eta_label", value=eta_text))
         else:
             self.task_state_var.set(self._tr("task_idle"))
             self.task_detail_var.set(self._tr("task_idle_detail"))
+            self.task_percent_var.set(self._tr("task_percent_idle"))
             self.task_elapsed_var.set(self._tr("task_elapsed", value="00:00"))
             self.task_eta_var.set(self._tr("task_eta_idle"))
 
@@ -1221,19 +1470,26 @@ class OmniClipDesktopApp:
             self.result_var.set(self._tr("query_hits", count=len(self.current_hits)))
         else:
             self.result_var.set(self._tr("result_empty"))
+        self._update_context_selection_summary()
 
     def _apply_recommended(self) -> None:
         self.backend_var.set("lancedb")
         self.model_var.set("BAAI/bge-m3")
         self.runtime_var.set("torch")
-        self.device_var.set("cpu")
+        self.device_var.set("auto")
         self.limit_var.set("8")
+        self.score_threshold_var.set("0")
         self.interval_var.set("2.0")
         self.local_only_var.set(False)
         self.force_var.set(False)
         self.polling_var.set(False)
+        self._refresh_device_options()
         self.status_var.set(self._tr("status_recommended"))
         self._refresh_state_chips()
+
+    def _toggle_quick_start(self) -> None:
+        self.quick_start_expanded_var.set(not self.quick_start_expanded_var.get())
+        self._render_ui()
 
     def _toggle_advanced(self) -> None:
         self.show_advanced_var.set(not self.show_advanced_var.get())
@@ -1282,14 +1538,20 @@ class OmniClipDesktopApp:
         self.backend_var.set(config.vector_backend or "disabled")
         self.model_var.set(config.vector_model)
         self.runtime_var.set(config.vector_runtime)
-        self.device_var.set(config.vector_device)
+        self.device_var.set(config.vector_device or 'auto')
+        acceleration = detect_acceleration()
+        if (config.vector_device or '').strip().lower() in {'', 'cpu'} and acceleration.get('cuda_available'):
+            self.device_var.set('auto')
         self.limit_var.set(str(config.query_limit))
+        self.score_threshold_var.set(str(config.query_score_threshold))
         self.interval_var.set(str(config.poll_interval_seconds))
         self.local_only_var.set(config.vector_local_files_only)
+        self.quick_start_expanded_var.set(config.ui_quick_start_expanded)
         self.ui_window_geometry = config.ui_window_geometry or self.ui_window_geometry
         self.ui_main_sash = self._coerce_layout_value(config.ui_main_sash, self.ui_main_sash)
         self.ui_right_sash = self._coerce_layout_value(config.ui_right_sash, self.ui_right_sash)
         self.ui_results_sash = self._coerce_layout_value(config.ui_results_sash, self.ui_results_sash)
+        self._refresh_device_options()
         self._append_log(self._tr("log_loaded_config", path=paths.config_file))
         if language_changed:
             self._render_ui()
@@ -1311,20 +1573,23 @@ class OmniClipDesktopApp:
         paths = ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()), vault or None)
         limit = int(self.limit_var.get().strip() or "8")
         interval = float(self.interval_var.get().strip() or "2.0")
-        if limit <= 0 or interval <= 0:
+        score_threshold = float(self.score_threshold_var.get().strip() or "0")
+        if limit <= 0 or interval <= 0 or score_threshold < 0:
             raise ValueError(self._tr("number_invalid"))
         config = AppConfig(
             vault_path=vault,
             vault_paths=self._collect_vault_paths(vault),
             data_root=str(paths.global_root),
             query_limit=limit,
+            query_score_threshold=score_threshold,
             poll_interval_seconds=interval,
             vector_backend=self.backend_var.get().strip() or "disabled",
             vector_model=self.model_var.get().strip() or "BAAI/bge-m3",
             vector_runtime=self.runtime_var.get().strip() or "torch",
-            vector_device=self.device_var.get().strip() or "cpu",
+            vector_device=self.device_var.get().strip() or "auto",
             vector_local_files_only=self.local_only_var.get(),
             ui_language=self.language_code,
+            ui_quick_start_expanded=self.quick_start_expanded_var.get(),
             ui_window_geometry=self.ui_window_geometry,
             ui_main_sash=int(self.ui_main_sash),
             ui_right_sash=int(self.ui_right_sash),
@@ -1366,6 +1631,8 @@ class OmniClipDesktopApp:
             service = OmniClipService(config, paths)
             try:
                 payload = action(service)
+            except BuildCancelledError:
+                self.queue.put(("cancelled", label_key, label, service.status_snapshot(), callback))
             except Exception:
                 self.queue.put(("error", label_key, label, traceback.format_exc()))
             else:
@@ -1487,6 +1754,8 @@ class OmniClipDesktopApp:
         return lines[-1] if lines else "Unknown error"
 
     def _friendly_task_error(self, label_key: str, label: str, tb: str) -> str:
+        if 'RuntimeDependencyError:' in tb:
+            return tb.split('RuntimeDependencyError:', 1)[1].strip()
         summary = self._traceback_summary(tb)
         if label_key == "bootstrap_button":
             try:
@@ -1568,6 +1837,7 @@ class OmniClipDesktopApp:
                 resume=resume,
                 on_progress=lambda progress: self.queue.put(("progress", progress)),
                 pause_event=self.rebuild_pause_event,
+                cancel_event=self.rebuild_cancel_event,
             )
             return {"blocked": False, "report": report, "stats": stats, "status": service.status_snapshot(), "resumed": resume}
 
@@ -1697,9 +1967,19 @@ class OmniClipDesktopApp:
         if not query:
             messagebox.showinfo(self._tr("empty_query_title"), self._tr("empty_query_body"), parent=self.root)
             return
+        try:
+            score_threshold = float(self.score_threshold_var.get().strip() or "0")
+        except ValueError:
+            messagebox.showerror(self._tr("cannot_start_title"), self._tr("number_invalid"), parent=self.root)
+            return
         self._start_task(
             "search_button",
-            lambda service: {"query": query, "copied": copy_result, "payload": service.query(query, copy_result=copy_result)},
+            lambda service: {
+                "query": query,
+                "copied": copy_result,
+                "score_threshold": score_threshold,
+                "payload": service.query(query, copy_result=copy_result, score_threshold=score_threshold),
+            },
             self._after_query,
             ensure_model=True,
         )
@@ -1838,17 +2118,17 @@ class OmniClipDesktopApp:
     def _after_query(self, payload) -> None:
         query = payload["query"]
         copied = payload["copied"]
-        hits, context = payload["payload"]
+        hits, _context = payload["payload"]
+        self.current_query_text = query
         self.current_hits = hits
-        self.current_context = context
-        self.context_view_text = context
+        self.selected_chunk_ids = {hit.chunk_id for hit in hits}
         self._render_hits()
+        self._rebuild_context_view()
         if hits:
             self.tree.selection_set("0")
             self._show_hit(0)
         else:
             self._set_text(self.preview_text, self._tr("no_results"))
-        self._set_text(self.context_text, context)
         self.tabs.select(1)
         self.result_var.set(self._tr("query_hits", count=len(hits)))
         self.status_var.set(self._tr("status_query_copied") if copied else self._tr("status_query_done"))
@@ -1907,12 +2187,15 @@ class OmniClipDesktopApp:
                 f"{self._tr('col_page')}：{hit.title}\n"
                 f"{self._tr('col_anchor')}：{hit.anchor}\n"
                 f"{self._tr('col_source')}：{hit.source_path}\n"
-                f"{self._tr('col_score')}：{hit.score:.2f}\n\n"
-                f"{hit.rendered_text}"
+                f"{self._tr('col_score')}：{hit.score:.1f}/100\n"
+                f"{self._tr('col_reason')}：{hit.reason or self._tr('reason_fallback')}\n\n"
+                f"{self._tr('preview_excerpt_label')}\n{hit.preview_text or self._tr('none_value')}\n\n"
+                f"{self._tr('preview_full_label')}\n{hit.rendered_text}"
             ),
         )
 
     def _copy_context(self) -> None:
+        self._rebuild_context_view()
         if not self.current_context.strip():
             messagebox.showinfo(self._tr("copy_empty_title"), self._tr("copy_empty_body"), parent=self.root)
             return
@@ -1992,6 +2275,16 @@ class OmniClipDesktopApp:
                 self._stop_task_feedback()
                 if callback:
                     callback(payload)
+            elif kind == "cancelled":
+                _, label_key, _label, payload, _callback = item
+                self.busy = False
+                self._stop_task_feedback()
+                self._apply_status(payload)
+                if self._is_rebuild_task(label_key):
+                    self.status_var.set(self._tr("status_rebuild_cancelled"))
+                    self._append_log(self._tr("log_rebuild_cancelled"))
+                else:
+                    self.status_var.set(self._tr("status_failed", label=self._tr(label_key)))
             elif kind == "error":
                 _, label_key, label, tb = item
                 self.busy = False

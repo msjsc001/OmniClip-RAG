@@ -46,19 +46,21 @@ class AppConfig:
         ]
     )
     query_limit: int = 8
+    query_score_threshold: float = 0.0
     poll_interval_seconds: float = 2.0
     vector_backend: str = "disabled"
     vector_model: str = "BAAI/bge-m3"
     vector_candidate_limit: int = 24
-    vector_device: str = "cpu"
+    vector_device: str = "auto"
     vector_runtime: str = "torch"
     vector_batch_size: int = 16
     vector_local_files_only: bool = False
     ui_language: str = field(default_factory=detect_system_language)
+    ui_quick_start_expanded: bool = False
     ui_window_geometry: str = ''
     ui_main_sash: int = 500
-    ui_right_sash: int = 190
-    ui_results_sash: int = 320
+    ui_right_sash: int = 180
+    ui_results_sash: int = 230
 
     @property
     def vault_dir(self) -> Path:

@@ -1,4 +1,30 @@
+
 # Changelog
+
+## V0.1.2 - 2026-03-08
+
+### Added
+
+- Added workspace-level build-history timing so later prechecks and rebuild ETAs can learn from real local runs.
+- Added explicit cancel handling for full rebuilds alongside the existing pause / resume flow.
+- Added the new Chinese product name **方寸引** across the desktop title and Chinese-facing documentation.
+- Added [RELEASE_NOTES_v0.1.2](releases/RELEASE_NOTES_v0.1.2.md) for the runtime and naming update.
+- Added [RUNTIME_SETUP.md](RUNTIME_SETUP.md) and a packaged `InstallRuntime.ps1` flow for lean Windows releases.
+
+### Changed
+
+- Changed the default device policy from fixed `cpu` to `auto`, so the app can use CUDA automatically when the active runtime truly supports it.
+- Changed the Chinese-facing product name from `无界 RAG` to `方寸引`.
+- Changed the precheck and rebuild ETA pipeline to blend static expectations, live progress, and recent workspace history.
+- Changed the public README files so they match the current product positioning, acceleration behavior, data-layout model, and lean-release packaging strategy.
+
+### Fixed
+
+- Fixed the vector rebuild path so pause / resume and live ETA use the real interruptible batching implementation instead of an older coarse-grained loop.
+- Fixed Windows release bloat by removing very large optional AI runtimes from the main packaged app and moving them to a separate runtime-install flow.
+- Fixed clipboard export failures on Chinese Windows by bypassing `gbk` console encoding when writing context packs to `clip`.
+- Fixed paused rebuild timing so elapsed time no longer keeps drifting while work is suspended.
+- Fixed the last remaining test and UI naming references that still pointed at the old Chinese product name.
 
 ## V0.1.1 - 2026-03-08
 
@@ -10,8 +36,12 @@
 - Added space-and-time prechecks that estimate both disk usage and first-run duration.
 - Added persisted unfinished-build state, restart-time resume prompts, and real pause/resume for full rebuilds.
 - Added live task progress, elapsed-time, and ETA feedback to the desktop task panel.
+- Added workspace-level build-history timing so later prechecks and rebuild ETAs can learn from real local runs.
 - Added regression tests for paused rebuild control in the service layer, vector layer, and GUI layer.
-- Added [RELEASE_NOTES_v0.1.1](RELEASE_NOTES_v0.1.1.md) for the post-`v0.1.0` desktop hardening update.
+- Added cancel support for full rebuilds so users can stop an in-flight rebuild without leaving an unhandled task failure.
+- Added score-threshold filtering and per-hit include toggles so users can curate the final context pack before copying.
+- Added runtime device capability reporting for `auto` / `cpu` / `cuda` selection in the desktop settings panel.
+- Added [RELEASE_NOTES_v0.1.1](releases/RELEASE_NOTES_v0.1.1.md) for the post-`v0.1.0` desktop hardening update.
 
 ### Changed
 
@@ -22,6 +52,10 @@
 - Changed model loading so a valid local model cache is treated as authoritative and is reused across query, rebuild, and bootstrap flows.
 - Changed full rebuild execution to support interruption recovery, batch-based vector writes, and explicit desktop-side pause/resume control.
 - Changed desktop task feedback so users see task state, elapsed time, ETA, and rebuild progress instead of waiting silently.
+- Changed the default device policy from fixed `cpu` to `auto`, so the runtime can use CUDA when it is genuinely available and otherwise fall back safely.
+- Changed the quick-start area into a collapsible newcomer guide so the first screen stays compact while preserving onboarding help.
+- Changed query presentation to show explicit hit reasons, focused excerpts, and a 0-100 relevance scale that maps to the visible score filter.
+- Changed build packaging hygiene so only the formal `dist/OmniClipRAG/` delivery folder is kept after validation.
 
 ### Fixed
 
@@ -31,6 +65,10 @@
 - Fixed stale or invalid split-pane state that could collapse parts of the desktop layout after launch.
 - Fixed first-run friction where startup background work could collide with a user's first button click.
 - Fixed repeated model-download prompting when the model was already present and passed local integrity checks.
+- Fixed rebuild progress plumbing so the vector stage actually uses the interruptible batch path that pause / resume and live ETA depend on.
+- Fixed clipboard export failures on Chinese Windows by bypassing `gbk` console encoding when writing context packs to `clip`.
+- Fixed paused rebuild timing so elapsed time and ETA no longer keep drifting while work is suspended.
+- Fixed query-result usability by preventing the context pack from blindly copying every returned hit unless the user keeps it selected.
 
 ## V0.1.0 - 2026-03-07
 

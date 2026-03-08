@@ -3,17 +3,17 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
 from .config import AppConfig, DataPaths
+from .errors import BuildCancelledError, RuntimeDependencyError
 
 
-@dataclass(slots=True)
-class VectorCandidate:
+class VectorCandidate(Protocol):
     chunk_id: str
     score: float
 
@@ -29,20 +29,28 @@ class VectorIndex(Protocol):
         *,
         on_progress: Callable[[dict[str, object]], None] | None = None,
         pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None: ...
 
     def upsert(self, documents: list[dict[str, str]]) -> None: ...
 
     def delete(self, chunk_ids: list[str]) -> None: ...
 
-    def search(self, query_text: str, limit: int) -> list[VectorCandidate]: ...
+    def search(self, query_text: str, limit: int) -> list["_VectorCandidate"]: ...
 
     def warmup(self) -> dict[str, object]: ...
 
     def reset(self) -> None: ...
 
 
+class _VectorCandidate:
+    def __init__(self, chunk_id: str, score: float) -> None:
+        self.chunk_id = chunk_id
+        self.score = score
+
+
 _EMBEDDER_CACHE: dict[tuple[str, str, str], Embedder] = {}
+_ACCELERATION_CACHE: dict[str, object] | None = None
 
 
 class NullVectorIndex:
@@ -52,6 +60,7 @@ class NullVectorIndex:
         *,
         on_progress: Callable[[dict[str, object]], None] | None = None,
         pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         return None
 
@@ -61,11 +70,20 @@ class NullVectorIndex:
     def delete(self, chunk_ids: list[str]) -> None:
         return None
 
-    def search(self, query_text: str, limit: int) -> list[VectorCandidate]:
+    def search(self, query_text: str, limit: int) -> list[_VectorCandidate]:
         return []
 
     def warmup(self) -> dict[str, object]:
-        return {"backend": "disabled", "model": None, "dimension": 0}
+        acceleration = detect_acceleration()
+        return {
+            "backend": "disabled",
+            "model": None,
+            "dimension": 0,
+            "model_ready": False,
+            "requested_device": "cpu",
+            "resolved_device": resolve_vector_device("cpu"),
+            **acceleration,
+        }
 
     def reset(self) -> None:
         return None
@@ -97,19 +115,27 @@ class LanceDbVectorIndex:
         *,
         on_progress: Callable[[dict[str, object]], None] | None = None,
         pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         self.reset()
         if not documents:
             return
         total = len(documents)
         processed = 0
-        batch_size = max(int(self.config.vector_batch_size or 16) * 4, 32)
+        inner_batch_size = max(int(self.config.vector_batch_size or 16), 1)
+        resolved_device = resolve_vector_device(self.config.vector_device)
+        batch_size = inner_batch_size * (2 if resolved_device == 'cuda' else 1)
         table = None
 
+        _wait_for_controls(pause_event, cancel_event)
+        _emit_progress(on_progress, {"stage": "vectorizing", "current": 0, "total": total, "stage_status": "loading_model"})
+        self._load_embedder()
+
         for start in range(0, total, batch_size):
-            _wait_if_paused(pause_event)
+            _wait_for_controls(pause_event, cancel_event)
             batch = documents[start : start + batch_size]
             rows = self._embed_documents(batch)
+            _wait_for_controls(pause_event, cancel_event)
             if not rows:
                 continue
             if table is None:
@@ -133,24 +159,30 @@ class LanceDbVectorIndex:
         quoted = ", ".join(f"'{self._escape(value)}'" for value in chunk_ids)
         self._table().delete(f"chunk_id IN ({quoted})")
 
-    def search(self, query_text: str, limit: int) -> list[VectorCandidate]:
+    def search(self, query_text: str, limit: int) -> list[_VectorCandidate]:
         if not query_text.strip() or not self._table_exists():
             return []
         vector = self._encode([query_text])[0]
         rows = self._table().search(vector).limit(limit).to_list()
         return [
-            VectorCandidate(chunk_id=row["chunk_id"], score=_distance_to_score(row.get("_distance", 1.0)))
+            _VectorCandidate(chunk_id=row["chunk_id"], score=_distance_to_score(row.get("_distance", 1.0)))
             for row in rows
         ]
 
     def warmup(self) -> dict[str, object]:
         vector = self._encode(["模型预热"])[0]
+        acceleration = detect_acceleration()
+        requested_device = (self.config.vector_device or "cpu").lower()
+        resolved_device = resolve_vector_device(self.config.vector_device)
         return {
             "backend": "lancedb",
             "model": self.config.vector_model,
             "dimension": len(vector),
             "local_model_dir": str(get_local_model_dir(self.config, self.paths)),
             "model_ready": is_local_model_ready(self.config, self.paths),
+            "requested_device": requested_device,
+            "resolved_device": resolved_device,
+            **acceleration,
         }
 
     def reset(self) -> None:
@@ -222,7 +254,10 @@ class LanceDbVectorIndex:
         _configure_huggingface_environment(hf_home_dir)
 
         from huggingface_hub import snapshot_download
-        from sentence_transformers import SentenceTransformer
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise RuntimeDependencyError(_runtime_dependency_message(self.config.vector_runtime, self.config.vector_device)) from exc
 
         if not is_local_model_ready(self.config, self.paths):
             snapshot_download(
@@ -237,14 +272,16 @@ class LanceDbVectorIndex:
                 "或清理 cache/models 后重新预热。"
             )
 
-        cache_key = (str(local_model_dir), (self.config.vector_runtime or "torch").lower(), (self.config.vector_device or "cpu").lower())
+        runtime_name = (self.config.vector_runtime or "torch").lower()
+        resolved_device = resolve_vector_device(self.config.vector_device)
+        cache_key = (str(local_model_dir), runtime_name, resolved_device)
         cached = _EMBEDDER_CACHE.get(cache_key)
         if cached is not None:
             return cached
 
         embedder = SentenceTransformer(
             str(local_model_dir),
-            device=self.config.vector_device,
+            device=resolved_device,
             cache_folder=str(runtime_cache_dir),
             backend=self.config.vector_runtime,
             local_files_only=True,
@@ -278,6 +315,76 @@ def get_local_model_dir(config: AppConfig, paths: DataPaths) -> Path:
 
 def is_local_model_ready(config: AppConfig, paths: DataPaths) -> bool:
     return _is_model_dir_ready(get_local_model_dir(config, paths), config.vector_runtime)
+
+
+def detect_acceleration() -> dict[str, object]:
+    global _ACCELERATION_CACHE
+    if _ACCELERATION_CACHE is not None:
+        return dict(_ACCELERATION_CACHE)
+
+    payload: dict[str, object] = {
+        "torch_available": False,
+        "torch_version": "",
+        "cuda_available": False,
+        "cuda_device_count": 0,
+        "cuda_name": "",
+        "gpu_present": False,
+        "gpu_name": "",
+        "device_options": ["auto", "cpu"],
+        "recommended_device": "cpu",
+    }
+
+    gpu_names = _detect_nvidia_gpus()
+    if gpu_names:
+        payload["gpu_present"] = True
+        payload["gpu_name"] = gpu_names[0]
+
+    try:
+        import torch
+    except ImportError:
+        torch = None
+
+    if torch is not None:
+        payload["torch_available"] = True
+        payload["torch_version"] = getattr(torch, "__version__", "")
+        try:
+            cuda_available = bool(torch.cuda.is_available())
+        except Exception:
+            cuda_available = False
+        payload["cuda_available"] = cuda_available
+        if cuda_available:
+            try:
+                device_count = int(torch.cuda.device_count())
+            except Exception:
+                device_count = 0
+            payload["cuda_device_count"] = device_count
+            if device_count > 0:
+                try:
+                    payload["cuda_name"] = str(torch.cuda.get_device_name(0))
+                except Exception:
+                    payload["cuda_name"] = ""
+            payload["device_options"] = ["auto", "cpu", "cuda"]
+            payload["recommended_device"] = "cuda"
+        elif gpu_names:
+            payload["recommended_device"] = "cpu"
+
+    _ACCELERATION_CACHE = dict(payload)
+    return dict(payload)
+
+
+def get_device_options() -> list[str]:
+    options = detect_acceleration().get("device_options") or ["auto", "cpu"]
+    return [str(item) for item in options]
+
+
+def resolve_vector_device(device_name: str | None) -> str:
+    requested = (device_name or "cpu").strip().lower() or "cpu"
+    acceleration = detect_acceleration()
+    if requested in {"auto", "gpu"}:
+        return "cuda" if acceleration.get("cuda_available") else "cpu"
+    if requested == "cuda" and not acceleration.get("cuda_available"):
+        return "cpu"
+    return requested
 
 
 def _configure_huggingface_environment(hf_home_dir: Path) -> None:
@@ -338,12 +445,30 @@ def _is_model_dir_ready(path: Path, runtime: str) -> bool:
     return any(candidate.exists() for candidate in weight_files)
 
 
+def _detect_nvidia_gpus() -> list[str]:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def _emit_progress(on_progress: Callable[[dict[str, object]], None] | None, payload: dict[str, object]) -> None:
     if on_progress is None:
         return
     on_progress(payload)
 
 
-def _wait_if_paused(pause_event: threading.Event | None) -> None:
-    while pause_event is not None and pause_event.is_set():
+def _wait_for_controls(pause_event: threading.Event | None, cancel_event: threading.Event | None) -> None:
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise BuildCancelledError("cancelled")
+        if pause_event is None or not pause_event.is_set():
+            return
         time.sleep(0.12)

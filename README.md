@@ -1,17 +1,21 @@
 # OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.1-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.2-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#quick-start)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#why)
 [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md)
 [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
-**OmniClip RAG** is a local-first desktop RAG for Markdown and Logseq vaults.
+**OmniClip RAG** is a local-first desktop RAG for local Markdown note libraries such as Typora, Logseq, and Obsidian vaults.
 
-It focuses on one job: **bridge your notes to any AI without coupling your knowledge base to any single AI product**.
+**方寸引** is the Chinese product name. It frames the app as a compact local layer that precisely pulls the right notes toward whatever AI you choose next.
+
+Its core purpose is to turn your local notes into an independent, hot-reloadable, supervised **manual RAG layer**. You retrieve context locally first, decide what to reveal, and then hand that context to any AI you want. That keeps your note system highly decoupled from any single AI product while still allowing deep interaction between your notes and external AI tools. Even when you are not chatting with an AI, OmniClip RAG still works as a semantic search tool for your own knowledge base.
 
 You search locally, inspect the results, and only copy the context you want to expose. The AI never needs blanket access to your vault.
+
+> Future direction, time permitting: 1. gradually support more non-Markdown note systems and database-backed note tools; 2. provide an API or MCP bridge so AIs that need it can call the retrieval layer directly. In practice, if you keep saving your AI chats or other text material back into your note vault, OmniClip RAG also becomes a kind of ever-growing semantic memory index for your own workflow.
 
 ## Why
 
@@ -28,17 +32,18 @@ OmniClip RAG takes the opposite approach:
 - any AI can consume the final context pack,
 - and the vault remains under your control.
 
-## What's New In v0.1.1
 
-This update consolidates the desktop hardening work after the first public release candidate.
+## What's New In v0.1.2
 
-- Added newcomer-first desktop guidance, bilingual UI switching, and hover tooltips across the main workflow.
-- Added multi-vault switching with isolated per-vault workspaces and shared cross-vault model cache.
-- Added manual model-download guidance with `hf-mirror.com` / Hugging Face fallback and exact target folders.
-- Added space-and-time prechecks, live task progress, elapsed time, ETA feedback, and clearer first-run prompts.
-- Added unfinished-build recovery after restart or power loss, plus real **pause / resume** for full rebuilds.
-- Tightened local-model behavior so a complete local cache no longer triggers unnecessary remote Hugging Face calls during search or indexing.
-- Hardened indexing against unreadable Markdown files, duplicate Logseq block ids, and stale layout-state edge cases.
+This update packages the runtime, retrieval-review, and product-naming refinements after `v0.1.1`.
+
+- Renamed the Chinese product name from `无界 RAG` to **方寸引** and synced the desktop title plus bilingual documentation.
+- Switched the default device policy to `auto`, which now resolves to CUDA automatically when the active PyTorch runtime really supports your NVIDIA GPU.
+- Added workspace-level build-history timing so both **Precheck space/time** and the rebuild task panel can learn from recent local runs instead of relying only on a static guess.
+- Tightened full-rebuild control with more credible elapsed-time / ETA behavior, explicit cancel handling, and interruptible vector batches that pause faster.
+- Improved query review with visible relevance filtering, per-hit include toggles, clearer matched excerpts, and safer context-pack curation before copying.
+- Hardened clipboard export on Chinese Windows so formatted context packs no longer fail on `gbk` console encoding.
+- Refreshed the public docs to match the current desktop workflow, shared-vs-workspace data layout, and runtime acceleration behavior.
 
 ## What It Does
 
@@ -120,7 +125,7 @@ Current stable default:
 - Vector backend: `LanceDB`
 - Embedding model: `BAAI/bge-m3`
 - Runtime: `torch`
-- Device: `cpu` by default, `cuda` when the user's CUDA environment is already working
+- Device: `auto` by default, which resolves to `cuda` when the local PyTorch runtime really supports NVIDIA acceleration and falls back to `cpu` otherwise
 
 For a first local run on Windows, plan for at least **8 GB to 10 GB** of free space.
 
@@ -138,6 +143,15 @@ OmniClip RAG estimates:
 before starting model bootstrap or indexing.
 
 See [STORAGE_PRECHECK.md](STORAGE_PRECHECK.md) for details.
+
+
+The official Windows release is now intentionally a lean app package:
+
+- it does **not** bundle model files,
+- it does **not** bundle very large optional AI runtimes such as `torch`, `sentence-transformers`, or `onnxruntime`,
+- and users install heavy runtime components separately only when they actually need them.
+
+See [RUNTIME_SETUP.md](RUNTIME_SETUP.md) for the packaged-app runtime flow.
 
 ## Data Directory
 
@@ -190,7 +204,7 @@ tests/
 
 ## Current Status
 
-`V0.1.1` is the current public desktop update of the core product shape.
+`V0.1.2` is the current public desktop update of the core product shape.
 
 What is already solid:
 
@@ -228,8 +242,10 @@ The current tree has already been validated with:
 - [Architecture Notes](ARCHITECTURE.md)
 - [Changelog](CHANGELOG.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
-- [Release Notes v0.1.1](RELEASE_NOTES_v0.1.1.md)
-- [Release Notes v0.1.0](RELEASE_NOTES_v0.1.0.md)
+- [Runtime Setup](RUNTIME_SETUP.md)
+- [Release Notes v0.1.2](releases/RELEASE_NOTES_v0.1.2.md)
+- [Release Notes v0.1.1](releases/RELEASE_NOTES_v0.1.1.md)
+- [Release Notes v0.1.0](releases/RELEASE_NOTES_v0.1.0.md)
 
 ## License
 

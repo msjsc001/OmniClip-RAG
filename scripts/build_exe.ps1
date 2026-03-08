@@ -79,9 +79,13 @@ args = [
     '--hidden-import', 'watchdog.events',
     '--hidden-import', 'watchdog.observers',
     '--hidden-import', 'charset_normalizer',
-    '--collect-submodules', 'transformers.models',
-    '--collect-submodules', 'sentence_transformers',
     '--exclude-module', 'rich',
+    '--exclude-module', 'torch',
+    '--exclude-module', 'torchgen',
+    '--exclude-module', 'functorch',
+    '--exclude-module', 'sentence_transformers',
+    '--exclude-module', 'transformers',
+    '--exclude-module', 'onnxruntime',
     '--runtime-hook', str(Path(root) / 'pyi_rth_omniclip.py'),
 ]
 args.append('--onefile' if mode == 'onefile' else '--onedir')
@@ -101,3 +105,31 @@ if spec_path.exists():
 "@
 
 $code | & $python -
+
+$distRoot = Join-Path $root "dist"
+$buildDir = Join-Path $root "build"
+if ($Mode -eq 'onedir') {
+    $staleExe = Join-Path $distRoot "OmniClipRAG.exe"
+    if (Test-Path $staleExe) {
+        Remove-Item $staleExe -Force
+    }
+    $duplicatePackages = Join-Path $distRoot "OmniClipRAG\_internal\.packages"
+    if (Test-Path $duplicatePackages) {
+        Remove-Item $duplicatePackages -Recurse -Force
+    }
+} else {
+    $staleDir = Join-Path $distRoot "OmniClipRAG"
+    if (Test-Path $staleDir) {
+        Remove-Item $staleDir -Recurse -Force
+    }
+}
+if (Test-Path $buildDir) {
+    Remove-Item $buildDir -Recurse -Force
+}
+if ($Mode -eq 'onedir') {
+    $runtimeGuide = Join-Path $root 'RUNTIME_SETUP.md'
+    $runtimeScript = Join-Path $root 'scripts\install_runtime.ps1'
+    $distAppDir = Join-Path $distRoot 'OmniClipRAG'
+    if (Test-Path $runtimeGuide) { Copy-Item $runtimeGuide (Join-Path $distAppDir 'RUNTIME_SETUP.md') -Force }
+    if (Test-Path $runtimeScript) { Copy-Item $runtimeScript (Join-Path $distAppDir 'InstallRuntime.ps1') -Force }
+}

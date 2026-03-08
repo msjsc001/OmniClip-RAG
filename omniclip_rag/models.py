@@ -42,6 +42,8 @@ class SearchHit:
     source_path: str
     rendered_text: str
     chunk_id: str
+    preview_text: str = ""
+    reason: str = ""
 
 
 @dataclass(slots=True)

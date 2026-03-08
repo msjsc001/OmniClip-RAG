@@ -10,6 +10,7 @@ from .config import AppConfig, DataPaths
 from .models import SpaceEstimate
 from .parser import parse_markdown_file
 from .ui_i18n import normalize_language
+from .timing import build_history_file, estimate_total_build_seconds, find_matching_history
 from .vector_index import is_local_model_ready
 
 
@@ -25,6 +26,7 @@ _PRECHECK_TEXTS = {
         "vector": "向量后端：{backend}，模型：{model}。",
         "build_time": "预计首轮全量建库时间约 {build_time}。",
         "build_time_with_download": "预计首轮全量建库时间约 {build_time}；如果本地还没有模型，再额外预留约 {download_time} 用于首次下载。",
+        "build_time_history": "本次建库时间优先参考了当前笔记库最近一次真实建库记录，比纯公式预估更接近实际。",
         "bge_m3": "bge-m3 在 Windows 本地首轮落盘按保守值估算，建议至少预留 8-10 GB 空闲。",
         "space_blocked": "可用空间低于预估需求，默认不建议直接开始建库。",
         "space_tight": "空间刚够，但余量偏紧，建议先清理磁盘再跑首轮建库。",
@@ -41,6 +43,7 @@ _PRECHECK_TEXTS = {
         "vector": "Vector backend: {backend}, model: {model}.",
         "build_time": "Estimated first full build time: about {build_time}.",
         "build_time_with_download": "Estimated first full build time: about {build_time}; if the model is not cached yet, keep about {download_time} extra for the first download.",
+        "build_time_history": "This build-time estimate is based primarily on the most recent real build of the current vault, so it should be closer to reality than a fixed formula.",
         "bge_m3": "For bge-m3 on Windows, the first local download is estimated conservatively. Keep at least 8-10 GB free when possible.",
         "space_blocked": "Available space is below the estimated requirement, so starting immediately is not recommended.",
         "space_tight": "Space is only barely enough. Cleaning disk space before the first full index build is recommended.",
@@ -121,13 +124,14 @@ def estimate_storage_for_vault(
         estimated_model_bytes = estimate_model_cache_bytes(config.vector_model, config.vector_runtime)
 
     model_ready = is_local_model_ready(config, paths)
-    estimated_build_seconds = _estimate_build_duration_seconds(
+    history_entry = find_matching_history(build_history_file(paths.state_dir), config)
+    estimated_build_seconds, build_time_history = estimate_total_build_seconds(
         config,
         file_count,
         parsed_chunk_count,
-        ref_count,
-        model_ready=model_ready,
         vector_enabled=vector_enabled,
+        model_ready=model_ready,
+        history_entry=history_entry,
     )
     estimated_download_seconds = _estimate_download_duration_seconds(config.vector_model, config.vector_runtime) if vector_enabled and not model_ready else 0
 
@@ -156,6 +160,8 @@ def estimate_storage_for_vault(
         notes.append(labels["skipped"].format(count=len(skipped_files), example=skipped_files[0]))
     if vector_enabled and "bge-m3" in (config.vector_model or "").lower():
         notes.append(labels["bge_m3"])
+    if build_time_history:
+        notes.append(labels["build_time_history"])
     if estimated_download_seconds > 0:
         notes.append(labels["build_time_with_download"].format(build_time=_format_duration(estimated_build_seconds), download_time=_format_duration(estimated_download_seconds)))
     else:
@@ -274,29 +280,6 @@ def _safe_relative_path(vault_root: Path, path: Path) -> str:
 
 def _encoded_len(text: str) -> int:
     return len((text or '').encode('utf-8'))
-
-
-def _estimate_build_duration_seconds(
-    config: AppConfig,
-    file_count: int,
-    parsed_chunk_count: int,
-    ref_count: int,
-    *,
-    model_ready: bool,
-    vector_enabled: bool,
-) -> int:
-    parse_seconds = file_count * 0.35 + parsed_chunk_count * 0.012 + ref_count * 0.003
-    render_seconds = max(parsed_chunk_count * 0.006, file_count * 0.08)
-    vector_seconds = 0.0
-    if vector_enabled:
-        lowered_model = (config.vector_model or '').lower()
-        per_chunk = 0.020 if 'bge-m3' in lowered_model else 0.012
-        load_penalty = 6.0 if model_ready else 18.0
-        runtime_factor = 0.9 if (config.vector_runtime or 'torch').lower() == 'onnx' else 1.0
-        device_factor = 0.32 if (config.vector_device or 'cpu').lower() == 'cuda' else 1.0
-        vector_seconds = (parsed_chunk_count * per_chunk + load_penalty) * runtime_factor * device_factor
-    total = parse_seconds + render_seconds + vector_seconds
-    return max(6, int(total) + 1)
 
 
 def _estimate_download_duration_seconds(model_name: str, runtime: str) -> int:

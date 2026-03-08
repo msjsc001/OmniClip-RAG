@@ -58,10 +58,10 @@ This update has been verified with:
 
 ## Documentation
 
-- English README: [README.md](README.md)
-- Chinese README: [README.zh-CN.md](README.zh-CN.md)
-- Architecture: [ARCHITECTURE.md](ARCHITECTURE.md)
-- Changelog: [CHANGELOG.md](CHANGELOG.md)
+- English README: [README.md](../README.md)
+- Chinese README: [README.zh-CN.md](../README.zh-CN.md)
+- Architecture: [ARCHITECTURE.md](../ARCHITECTURE.md)
+- Changelog: [CHANGELOG.md](../CHANGELOG.md)
 
 ## Short Release Summary
 

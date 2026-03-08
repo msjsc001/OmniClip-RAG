@@ -1,8 +1,8 @@
 # Architecture Notes
 
-## Release Boundary For V0.1.1
+## Release Boundary For V0.1.2
 
-`V0.1.1` is not trying to ship a giant all-in-one AI platform.
+`V0.1.2` is not trying to ship a giant all-in-one AI platform.
 
 Its delivery goal is narrower and much more deliberate:
 
@@ -140,7 +140,7 @@ Current validation includes:
 - successful GUI startup and shutdown,
 - successful Windows EXE packaging.
 
-## Intentional Tradeoffs In V0.1.1
+## Intentional Tradeoffs In V0.1.2
 
 ### 1. `torch` is the stable default runtime
 
@@ -298,3 +298,76 @@ Current rebuild-control rule:
 - closing the app while paused still falls back to the existing rebuild-resume flow on the next launch.
 
 Why: long local indexing runs compete with normal desktop work. Users need a safe way to yield CPU temporarily without throwing away an in-flight full rebuild.
+
+### 20. Paused rebuild timing must reflect real paused time
+
+Current rebuild-timing rule:
+
+- elapsed time stops increasing while rebuild is paused,
+- ETA keeps the last credible estimate instead of dropping to nonsense values,
+- the desktop task panel shows progress percentage and paused-state wording explicitly,
+- cancellation is a first-class rebuild outcome, not an unhandled error path.
+
+Why: once pause exists as a real control, time reporting has to match the user's expectation of what paused means.
+
+### 21. Clipboard export must be Unicode-safe on Chinese Windows
+
+Current clipboard rule:
+
+- context packs are normalized to Windows newlines,
+- clipboard writes use a Unicode-safe byte path instead of the process default console encoding,
+- symbols that are common in formatted context packs must not fail because the host code page is `gbk`.
+
+Why: the core workflow of this product is copying context into other AI tools. Clipboard export is not optional plumbing; it is the product bridge.
+
+### 22. Query review must be user-steerable after retrieval
+
+Current query-review rule:
+
+- each hit exposes a relevance score, hit reason, and a focused matched excerpt,
+- the user can filter low-confidence hits with a score threshold,
+- the user can include or exclude individual hits from the generated context pack,
+- the details pane separates matched excerpt from full chunk so the result list is easier to audit.
+
+Why: if retrieval output is not reviewable and editable, users cannot trust the context pack they are about to hand to an external AI.
+
+### 23. GPU detection must be honest about the actual backend
+
+Current acceleration UX rule:
+
+- the settings panel can show detected NVIDIA hardware separately from runtime readiness,
+- `auto` remains the safe default,
+- `cuda` is only presented as truly usable when the active runtime confirms PyTorch CUDA support,
+- there is no fake generic-GPU mode that silently falls back to CPU while pretending otherwise.
+
+Why: performance hints are useful, but false promises about GPU acceleration create more confusion than a conservative capability report.
+
+## Packaging Hygiene
+
+The repository should keep only one formal Windows desktop deliverable at a time:
+
+- keep `dist/OmniClipRAG/` as the release artifact,
+- remove stale one-file EXEs, smoke-build folders, and temporary build directories after validation.
+
+Why: duplicate package shapes increase user confusion and make issue reports harder to reason about.
+
+### 24. Build ETA should learn from real workspace history
+
+Current timing rule:
+
+- precheck and rebuild ETA first use a conservative static profile,
+- once a workspace has finished one or more rebuilds, later estimates reuse recent indexing / rendering / vectorizing timings from that same workspace,
+- the ETA blends static expectations with live observed progress instead of trusting either one blindly.
+
+Why: a purely static estimate is too abstract, while a purely live estimate is unstable at the start of a run. Real local history gives later predictions a much better baseline.
+
+### 25. Runtime acceleration should default to `auto`
+
+Current acceleration rule:
+
+- the persisted device default is `auto`, not hard-coded `cpu`,
+- `auto` resolves to `cuda` only when the active runtime really confirms CUDA availability,
+- the GUI may still show detected NVIDIA hardware separately from actual runtime readiness.
+
+Why: users should not have to hand-tune the common case, but the app also must not pretend GPU acceleration exists when the active runtime cannot use it.
+
