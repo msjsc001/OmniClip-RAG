@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ctypes
+import locale
+import re
 import queue
 import sys
 import threading
@@ -23,9 +25,54 @@ from .ui_tooltip import ToolTip
 from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.1.6"
+APP_VERSION = "V0.1.7"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
-RELEASES_URL = f"{REPO_URL}/releases"
+_CONTEXT_PAGE_RE = re.compile(r'^# 笔记名：(.*)$')
+_CONTEXT_FRAGMENT_RE = re.compile(r'^笔记片段\d+：$')
+DEFAULT_PAGE_FILTER_RULES: tuple[tuple[bool, str], ...] = (
+    (True, r"^2026-.*\.android$"),
+    (True, r"^.*\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]+$"),
+    (True, r"^\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2}\.\d{3}Z\.(?:Desktop|android)$"),
+    (True, r"^hls__.*?_\d+_\d+_\d+_\d+$"),
+)
+
+
+def _serialize_page_filter_rules(rules: list[tuple[bool, str]] | tuple[tuple[bool, str], ...]) -> str:
+    lines: list[str] = []
+    for enabled, pattern in rules:
+        rule = str(pattern or "").strip()
+        if not rule:
+            continue
+        lines.append(f"{'1' if enabled else '0'}\t{rule}")
+    return "\n".join(lines)
+
+
+def _deserialize_page_filter_rules(raw_rules: str) -> list[tuple[bool, str]]:
+    parsed: list[tuple[bool, str]] = []
+    for raw_line in (raw_rules or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        enabled = True
+        pattern = line
+        if '\t' in line:
+            flag, rest = line.split('\t', 1)
+            if flag in {'0', '1'}:
+                enabled = flag == '1'
+                pattern = rest.strip()
+        if pattern:
+            parsed.append((enabled, pattern))
+    return parsed
+
+
+def _merge_page_filter_defaults(raw_rules: str) -> str:
+    parsed = _deserialize_page_filter_rules(raw_rules)
+    existing = {pattern for _enabled, pattern in parsed}
+    merged = list(parsed)
+    for enabled, pattern in DEFAULT_PAGE_FILTER_RULES:
+        if pattern not in existing:
+            merged.append((enabled, pattern))
+    return _serialize_page_filter_rules(merged)
 
 
 def _enable_high_dpi_awareness() -> None:
@@ -73,6 +120,8 @@ class OmniClipDesktopApp:
         self.tooltips: list[ToolTip] = []
         self.icon_image: tk.PhotoImage | None = None
         self.header_icon: tk.PhotoImage | None = None
+        self.page_blocklist_window: tk.Toplevel | None = None
+        self.sensitive_filter_window: tk.Toplevel | None = None
 
         self._init_style()
         self._init_vars()
@@ -160,16 +209,28 @@ class OmniClipDesktopApp:
         self.runtime_var = tk.StringVar(value="torch")
         self.device_var = tk.StringVar(value="auto")
         self.device_summary_var = tk.StringVar(value="")
-        self.limit_var = tk.StringVar(value="8")
+        self.limit_var = tk.StringVar(value="15")
         self.score_threshold_var = tk.StringVar(value="0")
         self.interval_var = tk.StringVar(value="2.0")
         self.query_var = tk.StringVar()
         self.context_selection_var = tk.StringVar(value="")
+        self.context_toggle_var = tk.StringVar(value=self._tr("context_select_all"))
+        self.result_sort_column: str | None = None
+        self.result_sort_reverse = False
         self.local_only_var = tk.BooleanVar(value=False)
+        self.rag_filter_core_var = tk.BooleanVar(value=True)
+        self.rag_filter_extended_var = tk.BooleanVar(value=False)
+        self.rag_filter_custom_rules_var = tk.StringVar(value="")
+        self.page_blocklist_rules_var = tk.StringVar(value=_merge_page_filter_defaults(""))
+        self.page_blocklist_summary_var = tk.StringVar(value="")
+        self.context_jump_var = tk.StringVar(value="")
+        self.context_jump_summary_var = tk.StringVar(value=self._tr("context_jump_summary_empty"))
+        self.context_jump_options: list[dict[str, object]] = []
+        self.text_search_state: dict[str, dict[str, object]] = {}
         self.force_var = tk.BooleanVar(value=False)
         self.polling_var = tk.BooleanVar(value=False)
-        self.show_advanced_var = tk.BooleanVar(value=False)
-        self.quick_start_expanded_var = tk.BooleanVar(value=False)
+        self.show_advanced_var = tk.BooleanVar(value=True)
+        self.quick_start_expanded_var = tk.BooleanVar(value=True)
         self.clear_index_var = tk.BooleanVar(value=False)
         self.clear_logs_var = tk.BooleanVar(value=False)
         self.clear_cache_var = tk.BooleanVar(value=False)
@@ -201,6 +262,7 @@ class OmniClipDesktopApp:
         self.task_after_id: str | None = None
         self.queue_after_id: str | None = None
         self.layout_after_id: str | None = None
+        self.capture_after_id: str | None = None
         self.active_task_key: str | None = None
         self.active_task_config: AppConfig | None = None
         self.resume_prompt_workspace_id: str | None = None
@@ -208,9 +270,9 @@ class OmniClipDesktopApp:
         self.selected_chunk_ids: set[str] = set()
         self.device_options = get_device_options()
         self.ui_window_geometry = "1560x1000"
-        self.ui_main_sash = 520
-        self.ui_right_sash = 170
-        self.ui_results_sash = 230
+        self.ui_main_sash = 900
+        self.ui_right_sash = 280
+        self.ui_results_sash = 300
 
     def _tr(self, key: str, **kwargs) -> str:
         return text(self.language_code, key, **kwargs)
@@ -278,10 +340,12 @@ class OmniClipDesktopApp:
         if not self.current_query_text and not self.current_hits:
             self.current_context = ''
             self.context_view_text = ''
+            self._refresh_context_jump_controls()
             self._update_context_selection_summary()
             return
         self.current_context = OmniClipService.compose_context_pack_text(self.current_query_text, self._selected_hits())
         self.context_view_text = self.current_context
+        self._refresh_context_jump_controls()
         if hasattr(self, 'context_text'):
             self._set_text(self.context_text, self.current_context or self._tr('context_empty'))
         self._update_context_selection_summary()
@@ -293,6 +357,102 @@ class OmniClipDesktopApp:
             self.context_selection_var.set(self._tr('context_selection_empty'))
         else:
             self.context_selection_var.set(self._tr('context_selection_summary', selected=selected, total=total))
+        self._update_context_toggle_button(selected=selected, total=total)
+
+    def _update_context_toggle_button(self, *, selected: int | None = None, total: int | None = None) -> None:
+        if selected is None or total is None:
+            total = len(self.current_hits)
+            selected = len(self._selected_hits())
+        if total <= 0:
+            self.context_toggle_var.set(self._tr('context_select_all'))
+            if hasattr(self, 'context_toggle_button'):
+                self.context_toggle_button.state(['disabled'])
+            return
+        self.context_toggle_var.set(self._tr('context_clear_all') if selected >= total else self._tr('context_select_all'))
+        if hasattr(self, 'context_toggle_button'):
+            self.context_toggle_button.state(['!disabled'])
+
+
+    def _show_query_workspace(self, detail_index: int | None = None) -> None:
+        if hasattr(self, 'main_tabs'):
+            try:
+                self.main_tabs.select(0)
+            except Exception:
+                pass
+        if detail_index is not None and hasattr(self, 'tabs'):
+            try:
+                self.tabs.select(detail_index)
+            except Exception:
+                pass
+
+    def _selected_tree_chunk_id(self) -> str | None:
+        if not hasattr(self, 'tree'):
+            return None
+        selection = self.tree.selection()
+        if not selection:
+            return None
+        try:
+            index = int(selection[0])
+        except (TypeError, ValueError):
+            return None
+        if index < 0 or index >= len(self.current_hits):
+            return None
+        return self.current_hits[index].chunk_id
+
+    def _find_hit_index(self, chunk_id: str | None) -> int | None:
+        if not chunk_id:
+            return None
+        for index, hit in enumerate(self.current_hits):
+            if hit.chunk_id == chunk_id:
+                return index
+        return None
+
+    def _sort_text_value(self, value: str) -> str:
+        raw = str(value or '').strip().casefold()
+        try:
+            return locale.strxfrm(raw)
+        except Exception:
+            return raw
+
+    def _hit_sort_value(self, hit, column: str):
+        if column == 'include':
+            return (1 if hit.chunk_id in self.selected_chunk_ids else 0, self._sort_text_value(hit.title))
+        if column == 'score':
+            return float(hit.score)
+        if column == 'title':
+            return self._sort_text_value(hit.title)
+        if column == 'reason':
+            return self._sort_text_value(hit.reason or self._tr('reason_fallback'))
+        if column == 'anchor':
+            return self._sort_text_value(hit.anchor)
+        return self._sort_text_value(getattr(hit, column, ''))
+
+    def _refresh_tree_headings(self) -> None:
+        if not hasattr(self, 'tree'):
+            return
+        for key, title, _width in getattr(self, 'tree_columns', ()):
+            heading_text = title
+            if key == self.result_sort_column:
+                heading_text = f"{title} {'↓' if self.result_sort_reverse else '↑'}"
+            self.tree.heading(key, text=heading_text, command=lambda column=key: self._sort_hits_by(column))
+
+    def _sort_hits_by(self, column: str) -> None:
+        if not self.current_hits:
+            return
+        preserve_chunk_id = self._selected_tree_chunk_id() or (self.current_hits[0].chunk_id if self.current_hits else None)
+        if self.result_sort_column == column:
+            self.result_sort_reverse = not self.result_sort_reverse
+        else:
+            self.result_sort_column = column
+            self.result_sort_reverse = column in {'score', 'include'}
+        self.current_hits.sort(key=lambda hit: self._hit_sort_value(hit, column), reverse=self.result_sort_reverse)
+        self._render_hits(selected_chunk_id=preserve_chunk_id)
+        self._refresh_tree_headings()
+        selected_index = self._find_hit_index(preserve_chunk_id)
+        if selected_index is None and self.current_hits:
+            selected_index = 0
+        if selected_index is not None:
+            self._show_hit(selected_index)
 
     def _load_window_icons(self) -> None:
         png_path = _resource_path("app_icon.png")
@@ -317,21 +477,27 @@ class OmniClipDesktopApp:
                 pass
 
     def _render_ui(self) -> None:
-        left_index = 0
-        right_index = 0
+        main_index = 0
+        config_index = 0
+        detail_index = 0
         if self.root.winfo_children():
             self._capture_layout_state()
 
+        if hasattr(self, "main_tabs"):
+            try:
+                main_index = self.main_tabs.index(self.main_tabs.select())
+            except Exception:
+                main_index = 0
         if hasattr(self, "left_tabs"):
             try:
-                left_index = self.left_tabs.index(self.left_tabs.select())
+                config_index = self.left_tabs.index(self.left_tabs.select())
             except Exception:
-                left_index = 0
+                config_index = 0
         if hasattr(self, "tabs"):
             try:
-                right_index = self.tabs.index(self.tabs.select())
+                detail_index = self.tabs.index(self.tabs.select())
             except Exception:
-                right_index = 0
+                detail_index = 0
 
         for child in self.root.winfo_children():
             child.destroy()
@@ -343,16 +509,22 @@ class OmniClipDesktopApp:
         self._build_header()
         self._build_body()
         self._build_footer()
+        self._bind_layout_tracking()
         self._apply_layout_state()
 
+        if hasattr(self, "main_tabs"):
+            try:
+                self.main_tabs.select(min(main_index, max(self.main_tabs.index("end") - 1, 0)))
+            except Exception:
+                pass
         if hasattr(self, "left_tabs"):
             try:
-                self.left_tabs.select(min(left_index, max(self.left_tabs.index("end") - 1, 0)))
+                self.left_tabs.select(min(config_index, max(self.left_tabs.index("end") - 1, 0)))
             except Exception:
                 pass
         if hasattr(self, "tabs"):
             try:
-                self.tabs.select(min(right_index, max(self.tabs.index("end") - 1, 0)))
+                self.tabs.select(min(detail_index, max(self.tabs.index("end") - 1, 0)))
             except Exception:
                 pass
 
@@ -364,31 +536,30 @@ class OmniClipDesktopApp:
         header.grid_columnconfigure(1, weight=1)
 
         icon_label = tk.Label(header, image=self.header_icon, bg=self.colors["card"])
-        icon_label.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(16, 12), pady=14)
+        icon_label.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(16, 10), pady=(16, 12))
 
         title_wrap = tk.Frame(header, bg=self.colors["card"])
-        title_wrap.grid(row=0, column=1, sticky="w", pady=(14, 6))
-        tk.Label(title_wrap, text=self._tr("title"), bg=self.colors["card"], fg=self.colors["ink"], font=self.fonts["header_title"]).grid(row=0, column=0, sticky="w")
-        tk.Label(title_wrap, text=self._tr("tagline"), bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["header_subtitle"]).grid(row=1, column=0, sticky="w", pady=(3, 0))
-        tk.Label(header, text=self._tr("header_guide"), bg=self.colors["card"], fg=self.colors["accent_dark"], font=self.fonts["guide"], anchor="w").grid(row=1, column=1, sticky="ew", pady=(0, 14))
+        title_wrap.grid(row=0, column=1, sticky="nw", pady=(14, 0))
+        title_line = tk.Frame(title_wrap, bg=self.colors["card"])
+        title_line.grid(row=0, column=0, sticky="w")
+        tk.Label(title_line, text=self._tr("title"), bg=self.colors["card"], fg=self.colors["ink"], font=self.fonts["header_title"]).grid(row=0, column=0, sticky="w")
+        tk.Label(title_line, text=self._tr("tagline"), bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["header_subtitle"], anchor="w").grid(row=0, column=1, sticky="w", padx=(16, 0), pady=(3, 0))
+        guide_label = tk.Label(title_wrap, text=self._tr("header_guide"), bg=self.colors["card"], fg=self.colors["accent_dark"], font=self.fonts["guide"], anchor="w", justify="left")
+        guide_label.grid(row=1, column=0, sticky="w", pady=(12, 0))
+        self._configure_responsive_wrap(guide_label, padding=12, min_wrap=240, max_wrap=880)
 
         controls = tk.Frame(header, bg=self.colors["card"])
-        controls.grid(row=0, column=2, rowspan=2, sticky="ne", padx=16, pady=14)
-        tk.Label(controls, text=self._tr("language"), bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"]).grid(row=0, column=0, sticky="e")
-        language_box = ttk.Combobox(controls, state="readonly", width=12, values=[language_label("zh-CN"), language_label("en")], textvariable=self.language_var, style="Field.TCombobox")
-        language_box.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        controls.grid(row=0, column=2, rowspan=2, sticky="ne", padx=16, pady=(14, 12))
+        language_row = tk.Frame(controls, bg=self.colors["card"])
+        language_row.grid(row=0, column=0, sticky="e")
+        tk.Label(language_row, text=self._tr("language"), bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="e").grid(row=0, column=0, sticky="e", padx=(0, 8))
+        language_box = ttk.Combobox(language_row, state="readonly", width=12, values=[language_label("zh-CN"), language_label("en")], textvariable=self.language_var, style="Field.TCombobox")
+        language_box.grid(row=0, column=1, sticky="e")
         language_box.bind("<<ComboboxSelected>>", self._on_language_changed)
         self._attach_tooltip(language_box, "language_switch")
 
-        help_button = ttk.Button(controls, text=self._tr("help"), style="Secondary.TButton", command=self._open_help)
-        help_button.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        self._attach_tooltip(help_button, "help")
-        updates_button = ttk.Button(controls, text=self._tr("updates"), style="Secondary.TButton", command=self._open_updates)
-        updates_button.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
-        self._attach_tooltip(updates_button, "updates")
-
         version_badge = tk.Label(controls, text=self._tr("version", version=APP_VERSION), bg=self.colors["accent_soft"], fg=self.colors["accent_dark"], font=self.fonts["chip"], padx=10, pady=5)
-        version_badge.grid(row=2, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        version_badge.grid(row=1, column=0, sticky="e", pady=(10, 0))
 
     def _build_body(self) -> None:
         body = tk.Frame(self.root, bg=self.colors["bg"])
@@ -396,21 +567,22 @@ class OmniClipDesktopApp:
         body.grid_columnconfigure(0, weight=1)
         body.grid_rowconfigure(0, weight=1)
 
-        self.main_pane = ttk.Panedwindow(body, orient="horizontal")
-        self.main_pane.grid(row=0, column=0, sticky="nsew")
+        self.main_pane = None
+        self.main_tabs = ttk.Notebook(body, style="App.TNotebook")
+        self.main_tabs.grid(row=0, column=0, sticky="nsew")
 
-        self.left = tk.Frame(self.main_pane, bg=self.colors["bg"])
+        self.left = tk.Frame(self.main_tabs, bg=self.colors["bg"])
         self.left.grid_columnconfigure(0, weight=1)
         self.left.grid_rowconfigure(0, weight=1)
 
-        self.right = tk.Frame(self.main_pane, bg=self.colors["bg"])
+        self.right = tk.Frame(self.main_tabs, bg=self.colors["bg"])
         self.right.grid_columnconfigure(0, weight=1)
         self.right.grid_rowconfigure(0, weight=1)
 
-        self.main_pane.add(self.left, weight=0)
-        self.main_pane.add(self.right, weight=1)
+        self.main_tabs.add(self.left, text=self._tr("main_tab_query"))
+        self.main_tabs.add(self.right, text=self._tr("main_tab_config"))
 
-        self.right_pane = ttk.Panedwindow(self.right, orient="vertical")
+        self.right_pane = ttk.Panedwindow(self.left, orient="vertical")
         self.right_pane.grid(row=0, column=0, sticky="nsew")
 
         self.search_host = tk.Frame(self.right_pane, bg=self.colors["bg"])
@@ -424,8 +596,8 @@ class OmniClipDesktopApp:
         self.right_pane.add(self.search_host, weight=0)
         self.right_pane.add(self.results_host, weight=1)
 
-        self._build_left_cards()
         self._build_right_cards()
+        self._build_left_cards()
 
     def _build_footer(self) -> None:
         footer = tk.Frame(self.root, bg=self.colors["card"], highlightbackground=self.colors["border"], highlightthickness=1, height=34)
@@ -435,7 +607,21 @@ class OmniClipDesktopApp:
         tk.Label(footer, textvariable=self.status_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=0, column=0, sticky="w", padx=12, pady=7)
         tk.Label(footer, textvariable=self.result_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="e").grid(row=0, column=1, sticky="e", padx=12, pady=7)
 
-    def _capture_layout_state(self) -> None:
+    def _bind_layout_tracking(self) -> None:
+        self.root.bind("<Configure>", self._capture_window_geometry, add="+")
+        for pane_name in ("right_pane", "results_pane"):
+            pane = getattr(self, pane_name, None)
+            if pane is not None:
+                pane.bind("<ButtonRelease-1>", self._capture_layout_state, add="+")
+
+    def _capture_window_geometry(self, _event=None) -> None:
+        try:
+            if self.root.winfo_exists():
+                self.ui_window_geometry = self.root.geometry()
+        except Exception:
+            pass
+
+    def _capture_layout_state(self, _event=None) -> None:
         try:
             self.ui_window_geometry = self.root.geometry()
         except Exception:
@@ -460,9 +646,9 @@ class OmniClipDesktopApp:
                 pass
 
         pane_specs = (
-            ("main_pane", "ui_main_sash", 460, 860),
-            ("right_pane", "ui_right_sash", 120, 520),
-            ("results_pane", "ui_results_sash", 190, 300),
+            ("main_pane", "ui_main_sash", 760, 420),
+            ("right_pane", "ui_right_sash", 260, 420),
+            ("results_pane", "ui_results_sash", 260, 280),
         )
 
         def restore(attempt: int = 0) -> None:
@@ -521,9 +707,11 @@ class OmniClipDesktopApp:
     def _card(self, parent: tk.Widget, title: str, subtitle: str, row: int, *, pady: tuple[int, int] = (0, 0)) -> tk.Frame:
         card = tk.Frame(parent, bg=self.colors["card"], highlightbackground=self.colors["border"], highlightthickness=1)
         card.grid(row=row, column=0, sticky="ew", pady=pady)
-        card.grid_columnconfigure(0, weight=1)
-        tk.Label(card, text=title, bg=self.colors["card"], fg=self.colors["ink"], font=self.fonts["card_title"], anchor="w").grid(row=0, column=0, sticky="w", padx=16, pady=(14, 2))
-        tk.Label(card, text=subtitle, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+        card.grid_columnconfigure(1, weight=1)
+        header = tk.Frame(card, bg=self.colors["card"])
+        header.grid(row=0, column=0, sticky="w", padx=16, pady=(14, 10))
+        tk.Label(header, text=title, bg=self.colors["card"], fg=self.colors["ink"], font=self.fonts["card_title"], anchor="w").grid(row=0, column=0, sticky="w")
+        tk.Label(header, text=subtitle, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=760).grid(row=0, column=1, sticky="w", padx=(10, 0), pady=(1, 0))
         return card
 
     def _panel(self, parent: tk.Widget, row: int, *, column: int = 0, columnspan: int = 1, pady: tuple[int, int] = (0, 0)) -> tk.Frame:
@@ -569,13 +757,24 @@ class OmniClipDesktopApp:
         return outer, inner
 
     def _build_left_cards(self) -> None:
-        shell = tk.Frame(self.left, bg=self.colors["card"], highlightbackground=self.colors["border"], highlightthickness=1)
+        shell = tk.Frame(self.right, bg=self.colors["card"], highlightbackground=self.colors["border"], highlightthickness=1)
         shell.grid(row=0, column=0, sticky="nsew")
         shell.grid_columnconfigure(0, weight=1)
         shell.grid_rowconfigure(1, weight=1)
 
-        tk.Label(shell, text=self._tr("workspace_title"), bg=self.colors["card"], fg=self.colors["ink"], font=self.fonts["card_title"], anchor="w").grid(row=0, column=0, sticky="w", padx=16, pady=(14, 2))
-        tk.Label(shell, text=self._tr("workspace_subtitle"), bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=420).grid(row=0, column=0, sticky="ew", padx=16, pady=(38, 10))
+        shell_header = tk.Frame(shell, bg=self.colors["card"])
+        shell_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 10))
+        shell_header.grid_columnconfigure(0, weight=1)
+        title_row = tk.Frame(shell_header, bg=self.colors["card"])
+        title_row.grid(row=0, column=0, sticky="ew")
+        title_row.grid_columnconfigure(0, weight=1)
+        tk.Label(title_row, text=self._tr("workspace_title"), bg=self.colors["card"], fg=self.colors["ink"], font=self.fonts["card_title"], anchor="w").grid(row=0, column=0, sticky="w")
+        help_button = ttk.Button(title_row, text=self._tr("help_updates"), style="Secondary.TButton", command=self._open_help_and_updates)
+        help_button.grid(row=0, column=1, sticky="e")
+        self._attach_tooltip(help_button, "help_updates")
+        subtitle_label = tk.Label(shell_header, text=self._tr("workspace_subtitle"), bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left")
+        subtitle_label.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self._configure_responsive_wrap(subtitle_label, padding=12, min_wrap=260, max_wrap=820)
 
         self.left_tabs = ttk.Notebook(shell, style="App.TNotebook")
         self.left_tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
@@ -597,7 +796,7 @@ class OmniClipDesktopApp:
 
         guide_panel = self._panel(parent, 0, columnspan=2)
         guide_panel.grid_columnconfigure(0, weight=1)
-        tk.Label(
+        quick_start_subtitle = tk.Label(
             guide_panel,
             text=self._tr("quick_start_subtitle"),
             bg=self.colors["soft_2"],
@@ -605,8 +804,9 @@ class OmniClipDesktopApp:
             font=self.fonts["small"],
             anchor="w",
             justify="left",
-            wraplength=420,
-        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 8))
+        )
+        quick_start_subtitle.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+        self._configure_responsive_wrap(quick_start_subtitle, padding=20, min_wrap=260, max_wrap=760)
         toggle_row = tk.Frame(guide_panel, bg=self.colors["soft_2"])
         toggle_row.grid(row=1, column=0, sticky="ew", padx=16)
         toggle_row.grid_columnconfigure(0, weight=1)
@@ -692,8 +892,12 @@ class OmniClipDesktopApp:
         for index, (label, variable) in enumerate(((self._tr("stat_files"), self.files_var), (self._tr("stat_chunks"), self.chunks_var), (self._tr("stat_refs"), self.refs_var))):
             stats.grid_columnconfigure(index, weight=1)
             self._stat_box(stats, label, variable, index)
-        tk.Label(status_panel, textvariable=self.preflight_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", wraplength=220, anchor="w").grid(row=1, column=0, sticky="ew", padx=16, pady=(14, 4))
-        tk.Label(status_panel, textvariable=self.watch_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", wraplength=220, anchor="w").grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+        preflight_label = tk.Label(status_panel, textvariable=self.preflight_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", anchor="w")
+        preflight_label.grid(row=1, column=0, sticky="ew", padx=16, pady=(14, 4))
+        self._configure_responsive_wrap(preflight_label, padding=20, min_wrap=220, max_wrap=520)
+        watch_label = tk.Label(status_panel, textvariable=self.watch_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", anchor="w")
+        watch_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self._configure_responsive_wrap(watch_label, padding=20, min_wrap=220, max_wrap=520)
 
         task_panel = tk.Frame(status_panel, bg=self.colors["soft_2"], highlightbackground=self.colors["border"], highlightthickness=1)
         task_panel.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
@@ -723,8 +927,12 @@ class OmniClipDesktopApp:
         self._refresh_device_options()
 
         form_panel = self._panel(parent, 0)
-        tk.Label(form_panel, text=self._tr("settings_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 8))
-        tk.Label(form_panel, textvariable=self.device_summary_var, bg=self.colors["soft_2"], fg=self.colors["accent_dark"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+        settings_subtitle = tk.Label(form_panel, text=self._tr("settings_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left")
+        settings_subtitle.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+        self._configure_responsive_wrap(settings_subtitle, padding=20, min_wrap=260, max_wrap=760)
+        device_summary_label = tk.Label(form_panel, textvariable=self.device_summary_var, bg=self.colors["soft_2"], fg=self.colors["accent_dark"], font=self.fonts["small"], anchor="w", justify="left")
+        device_summary_label.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 10))
+        self._configure_responsive_wrap(device_summary_label, padding=20, min_wrap=260, max_wrap=760)
         form = tk.Frame(form_panel, bg=self.colors["soft_2"])
         form.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 14))
         form.grid_columnconfigure(1, weight=1)
@@ -744,7 +952,7 @@ class OmniClipDesktopApp:
             right_tip="device",
         )
         self.device_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_device_options())
-        self._entry_pair_row(form, 3, self._tr("limit_label"), self.limit_var, self._tr("interval_label"), self.interval_var, left_tip="limit", right_tip="interval")
+        self._entry_row(form, 3, self._tr("interval_label"), self.interval_var, tooltip_key="interval")
 
         action_panel = self._panel(parent, 1, pady=(12, 0))
         action_row = tk.Frame(action_panel, bg=self.colors["soft_2"])
@@ -783,8 +991,12 @@ class OmniClipDesktopApp:
         parent.grid_columnconfigure(0, weight=1)
 
         button_panel = self._panel(parent, 0)
-        tk.Label(button_panel, text=self._tr("data_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 6))
-        tk.Label(button_panel, textvariable=self.current_workspace_var, bg=self.colors["soft_2"], fg=self.colors["accent_dark"], font=self.fonts["small"], anchor="w", justify="left", wraplength=390).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+        data_subtitle = tk.Label(button_panel, text=self._tr("data_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left")
+        data_subtitle.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 6))
+        self._configure_responsive_wrap(data_subtitle, padding=20, min_wrap=260, max_wrap=760)
+        workspace_label = tk.Label(button_panel, textvariable=self.current_workspace_var, bg=self.colors["soft_2"], fg=self.colors["accent_dark"], font=self.fonts["small"], anchor="w", justify="left")
+        workspace_label.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 10))
+        self._configure_responsive_wrap(workspace_label, padding=20, min_wrap=260, max_wrap=760)
         buttons = tk.Frame(button_panel, bg=self.colors["soft_2"])
         buttons.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 14))
         buttons.grid_columnconfigure((0, 1), weight=1)
@@ -815,9 +1027,9 @@ class OmniClipDesktopApp:
         self.results_host.grid_rowconfigure(0, weight=1)
 
         search_card = self._card(self.search_host, self._tr("search_title"), self._tr("search_subtitle"), 0)
-        tk.Label(search_card, text=self._tr("query_hint"), bg=self.colors["card"], fg=self.colors["accent_dark"], font=self.fonts["small"], anchor="w").grid(row=2, column=0, sticky="w", padx=16)
+        tk.Label(search_card, text=self._tr("query_hint"), bg=self.colors["card"], fg=self.colors["accent_dark"], font=self.fonts["small"], anchor="w").grid(row=1, column=0, columnspan=2, sticky="w", padx=16)
         query_row = tk.Frame(search_card, bg=self.colors["card"])
-        query_row.grid(row=3, column=0, sticky="ew", padx=16, pady=(10, 6))
+        query_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(10, 6))
         query_row.grid_columnconfigure(0, weight=1)
         entry = ttk.Entry(query_row, textvariable=self.query_var, style="Query.TEntry")
         entry.grid(row=0, column=0, sticky="ew")
@@ -834,36 +1046,60 @@ class OmniClipDesktopApp:
         self._attach_tooltip(copy_context_button, "copy_context")
 
         query_meta = tk.Frame(search_card, bg=self.colors["card"])
-        query_meta.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 14))
-        query_meta.grid_columnconfigure(3, weight=1)
+        query_meta.grid(row=3, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 14))
+        query_meta.grid_columnconfigure(4, weight=1)
         threshold_label = tk.Label(query_meta, text=self._tr("score_threshold_label"), bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
         threshold_label.grid(row=0, column=0, sticky="w")
         self._attach_tooltip(threshold_label, "score_threshold")
         threshold_entry = ttk.Entry(query_meta, textvariable=self.score_threshold_var, width=8, style="Field.TEntry")
         threshold_entry.grid(row=0, column=1, sticky="w", padx=(8, 14))
         self._attach_tooltip(threshold_entry, "score_threshold")
-        tk.Label(query_meta, textvariable=self.context_selection_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=0, column=3, sticky="w")
+        limit_label = tk.Label(query_meta, text=self._tr("limit_label"), bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        limit_label.grid(row=0, column=2, sticky="w")
+        self._attach_tooltip(limit_label, "limit")
+        limit_entry = ttk.Entry(query_meta, textvariable=self.limit_var, width=8, style="Field.TEntry")
+        limit_entry.grid(row=0, column=3, sticky="w", padx=(8, 14))
+        self._attach_tooltip(limit_entry, "limit")
 
         result_card = self._card(self.results_host, self._tr("results_title"), self._tr("results_subtitle"), 0)
         result_card.grid_rowconfigure(2, weight=1)
-        result_card.grid_columnconfigure(0, weight=1)
+        result_card.grid_columnconfigure(1, weight=1)
+
+        filter_buttons = tk.Frame(result_card, bg=self.colors["card"])
+        filter_buttons.grid(row=0, column=1, sticky="e", padx=(12, 16), pady=(10, 10))
+        block_button = ttk.Button(filter_buttons, text=self._tr("page_blocklist_button"), style="Secondary.TButton", command=self._open_page_blocklist_window)
+        block_button.grid(row=0, column=0, sticky="e")
+        self._attach_tooltip(block_button, "page_blocklist")
+        sensitive_button = ttk.Button(filter_buttons, text=self._tr("sensitive_filter_button"), style="Secondary.TButton", command=self._open_sensitive_filter_window)
+        sensitive_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self._attach_tooltip(sensitive_button, "sensitive_filter")
+
+        result_toolbar = tk.Frame(result_card, bg=self.colors["card"])
+        result_toolbar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 10))
+        result_toolbar.grid_columnconfigure(2, weight=1)
+        self.context_toggle_button = ttk.Button(result_toolbar, textvariable=self.context_toggle_var, style="Secondary.TButton", command=self._toggle_all_hit_selection)
+        self.context_toggle_button.grid(row=0, column=0, sticky="w")
+        self._attach_tooltip(self.context_toggle_button, "context_select_toggle")
+        tk.Label(result_toolbar, textvariable=self.page_blocklist_summary_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=0, column=1, sticky="w", padx=(12, 18))
+        tk.Label(result_toolbar, textvariable=self.context_selection_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=0, column=2, sticky="w")
 
         self.results_pane = ttk.Panedwindow(result_card, orient="vertical")
-        self.results_pane.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 14))
+        self.results_pane.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=16, pady=(0, 14))
 
         table_frame = tk.Frame(self.results_pane, bg=self.colors["card"])
         table_frame.grid_columnconfigure(0, weight=1)
         table_frame.grid_rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(table_frame, columns=("include", "title", "reason", "anchor", "score"), show="headings", style="App.Treeview")
-        for key, title, width in (
-            ("include", self._tr("col_include"), 76),
+        self.tree_columns = (
+            ("include", self._tr("col_include"), 100),
             ("title", self._tr("col_page"), 220),
             ("reason", self._tr("col_reason"), 220),
             ("anchor", self._tr("col_anchor"), 320),
             ("score", self._tr("col_score"), 90),
-        ):
-            self.tree.heading(key, text=title)
+        )
+        for key, title, width in self.tree_columns:
             self.tree.column(key, width=width, anchor="center" if key in {"include", "score"} else "w")
+        self._refresh_tree_headings()
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.tree.bind("<<TreeviewSelect>>", self._select_hit)
         self.tree.bind("<Button-1>", self._on_result_tree_click)
@@ -883,9 +1119,9 @@ class OmniClipDesktopApp:
         self.tabs.add(preview_tab, text=self._tr("tab_preview"))
         self.tabs.add(context_tab, text=self._tr("tab_context"))
         self.tabs.add(log_tab, text=self._tr("tab_log"))
-        self.preview_text = self._text(preview_tab)
-        self.context_text = self._text(context_tab)
-        self.log_text = self._text(log_tab)
+        self.preview_text = self._text(preview_tab, "preview")
+        self.context_text = self._text(context_tab, "context", top_builder=self._build_context_jump_controls)
+        self.log_text = self._text(log_tab, "log")
 
         self.results_pane.add(table_frame, weight=1)
         self.results_pane.add(tabs_host, weight=1)
@@ -966,17 +1202,210 @@ class OmniClipDesktopApp:
         right_entry.grid(row=row, column=3, sticky="ew", pady=(8, 0))
         self._attach_tooltip(right_entry, right_tip)
 
-    def _text(self, parent: tk.Widget) -> tk.Text:
+    def _text(self, parent: tk.Widget, panel_key: str, *, top_builder=None) -> tk.Text:
         frame = tk.Frame(parent, bg=self.colors["card"])
         frame.pack(fill="both", expand=True)
         frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(0, weight=1)
+
+        text_row = 0
+        if top_builder is not None:
+            header = tk.Frame(frame, bg=self.colors["card"])
+            header.grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=(12, 0))
+            header.grid_columnconfigure(0, weight=1)
+            top_builder(header)
+            text_row = 1
+
+        frame.grid_rowconfigure(text_row, weight=1)
         text_widget = tk.Text(frame, wrap="word", relief="flat", borderwidth=0, highlightthickness=0, background="#FFFFFF", foreground=self.colors["ink"], insertbackground=self.colors["ink"], font=("Segoe UI", 10), padx=14, pady=12)
-        text_widget.grid(row=0, column=0, sticky="nsew")
+        text_widget.grid(row=text_row, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=text_widget.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll.grid(row=text_row, column=1, sticky="ns")
         text_widget.configure(yscrollcommand=scroll.set, state="disabled")
+
+        search_var = tk.StringVar(value="")
+        search_status_var = tk.StringVar(value=self._tr("text_search_empty"))
+        footer = tk.Frame(frame, bg=self.colors["card"])
+        footer.grid(row=text_row + 1, column=0, columnspan=2, sticky="ew", padx=14, pady=(8, 12))
+        footer.grid_columnconfigure(0, weight=1)
+        status_label = tk.Label(footer, textvariable=search_status_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="e")
+        status_label.grid(row=0, column=1, sticky="e", padx=(0, 10))
+        search_entry = ttk.Entry(footer, textvariable=search_var, width=26, style="Field.TEntry")
+        search_entry.grid(row=0, column=2, sticky="e")
+        search_entry.bind("<Return>", lambda _event, key=panel_key: self._find_in_text_panel(key))
+        search_button = ttk.Button(footer, text=self._tr("text_search_button"), style="Secondary.TButton", command=lambda key=panel_key: self._find_in_text_panel(key))
+        search_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        next_button = ttk.Button(footer, text=self._tr("text_search_next"), style="Secondary.TButton", command=lambda key=panel_key: self._find_in_text_panel(key, advance=True))
+        next_button.grid(row=0, column=4, sticky="e", padx=(8, 0))
+
+        self._attach_tooltip(search_entry, "text_search_entry")
+        self._attach_tooltip(search_button, "text_search_button")
+        self._attach_tooltip(next_button, "text_search_next")
+
+        self.text_search_state[panel_key] = {
+            "text": text_widget,
+            "query_var": search_var,
+            "status_var": search_status_var,
+            "last_query": "",
+            "matches": [],
+            "index": -1,
+        }
         return text_widget
+
+    def _find_in_text_panel(self, panel_key: str, *, advance: bool = False) -> None:
+        state = self.text_search_state.get(panel_key)
+        if not state:
+            return
+        widget = state["text"]
+        query_var = state["query_var"]
+        status_var = state["status_var"]
+        query = str(query_var.get()).strip()
+
+        widget.configure(state="normal")
+        widget.tag_configure("search_match", background=self.colors["accent_soft"], foreground=self.colors["ink"])
+        widget.tag_configure("search_current", background="#FDE68A", foreground=self.colors["ink"])
+        widget.tag_remove("search_match", "1.0", "end")
+        widget.tag_remove("search_current", "1.0", "end")
+
+        if not query:
+            state["last_query"] = ""
+            state["matches"] = []
+            state["index"] = -1
+            status_var.set(self._tr("text_search_empty"))
+            widget.configure(state="disabled")
+            return
+
+        matches = state["matches"] if advance and state.get("last_query") == query else []
+        if not matches:
+            matches = []
+            start = "1.0"
+            while True:
+                found = widget.search(query, start, stopindex="end", nocase=True)
+                if not found:
+                    break
+                end = f"{found}+{len(query)}c"
+                widget.tag_add("search_match", found, end)
+                matches.append((found, end))
+                start = end
+            state["matches"] = matches
+            state["last_query"] = query
+            state["index"] = 0 if matches else -1
+        elif matches:
+            for found, end in matches:
+                widget.tag_add("search_match", found, end)
+            state["index"] = (int(state.get("index", -1)) + 1) % len(matches)
+
+        if matches:
+            current_index = int(state.get("index", 0))
+            found, end = matches[current_index]
+            widget.tag_add("search_current", found, end)
+            widget.mark_set("insert", found)
+            widget.see(found)
+            status_var.set(self._tr("text_search_status", index=current_index + 1, total=len(matches)))
+        else:
+            status_var.set(self._tr("text_search_none"))
+
+        widget.configure(state="disabled")
+
+    def _refresh_text_search_state(self, widget: tk.Text) -> None:
+        for panel_key, state in self.text_search_state.items():
+            if state.get("text") is not widget:
+                continue
+            state["last_query"] = ""
+            state["matches"] = []
+            state["index"] = -1
+            query = str(state["query_var"].get()).strip()
+            if query:
+                self._find_in_text_panel(panel_key)
+            else:
+                state["status_var"].set(self._tr("text_search_empty"))
+            return
+
+    def _build_context_jump_controls(self, parent: tk.Widget) -> None:
+        jump_wrap = tk.Frame(parent, bg=self.colors["card"])
+        jump_wrap.grid(row=0, column=1, sticky="ne")
+        self.context_jump_combo = ttk.Combobox(jump_wrap, textvariable=self.context_jump_var, state="readonly", width=42, style="Field.TCombobox")
+        self.context_jump_combo.grid(row=0, column=0, sticky="e")
+        self.context_jump_combo.bind("<<ComboboxSelected>>", self._jump_to_context_page)
+        self._attach_tooltip(self.context_jump_combo, "context_jump")
+        tk.Label(jump_wrap, textvariable=self.context_jump_summary_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="e").grid(row=1, column=0, sticky="e", pady=(6, 0))
+        self._refresh_context_jump_controls()
+
+    def _collect_context_sections(self, context_text: str) -> list[dict[str, object]]:
+        sections: list[dict[str, object]] = []
+        current: dict[str, object] | None = None
+        for line_no, line in enumerate((context_text or "").splitlines(), start=1):
+            page_match = _CONTEXT_PAGE_RE.match(line.strip())
+            if page_match:
+                if current is not None:
+                    sections.append(current)
+                current = {"title": page_match.group(1).strip(), "line": line_no, "fragments": 0}
+                continue
+            if current is not None and _CONTEXT_FRAGMENT_RE.match(line.strip()):
+                current["fragments"] = int(current["fragments"]) + 1
+        if current is not None:
+            sections.append(current)
+
+        seen_counts: dict[str, int] = {}
+        for section in sections:
+            title = str(section.get("title") or self._tr("none_value"))
+            fragments = int(section.get("fragments") or 0)
+            base = self._tr("context_jump_item", title=title, count=fragments)
+            seen_counts[base] = seen_counts.get(base, 0) + 1
+            display = base if seen_counts[base] == 1 else f"{base} [{seen_counts[base]}]"
+            section["display"] = display
+        return sections
+
+    def _refresh_context_jump_controls(self) -> None:
+        self.context_jump_options = self._collect_context_sections(self.current_context)
+        total_notes = len(self.context_jump_options)
+        total_fragments = sum(int(section.get("fragments") or 0) for section in self.context_jump_options)
+        self.context_jump_summary_var.set(self._tr("context_jump_summary", notes=total_notes, fragments=total_fragments) if total_notes else self._tr("context_jump_summary_empty"))
+        values = [str(section.get("display") or "") for section in self.context_jump_options]
+        if hasattr(self, "context_jump_combo"):
+            self.context_jump_combo.configure(values=values)
+        current_value = self.context_jump_var.get().strip()
+        if current_value not in values:
+            self.context_jump_var.set(values[0] if values else "")
+
+    def _jump_to_context_page(self, _event=None) -> None:
+        if not hasattr(self, "context_text"):
+            return
+        selected = self.context_jump_var.get().strip()
+        if not selected:
+            return
+        for section in self.context_jump_options:
+            if str(section.get("display")) != selected:
+                continue
+            line_no = int(section.get("line") or 1)
+            index = f"{line_no}.0"
+            self.context_text.see(index)
+            self.context_text.mark_set("insert", index)
+            return
+
+    def _configure_responsive_wrap(self, widget: tk.Widget, *, padding: int = 24, min_wrap: int = 220, max_wrap: int = 980) -> None:
+        try:
+            parent = widget.nametowidget(widget.winfo_parent())
+        except Exception:
+            return
+
+        def _update(_event=None) -> None:
+            try:
+                if not int(widget.winfo_exists()) or not int(parent.winfo_exists()):
+                    return
+                width = parent.winfo_width()
+            except Exception:
+                return
+            available = max(0, int(width) - padding)
+            wraplength = 0 if available < min_wrap else min(max_wrap, available)
+            try:
+                current = int(widget.cget("wraplength"))
+            except Exception:
+                current = -1
+            if current != wraplength:
+                widget.configure(wraplength=wraplength)
+
+        parent.bind("<Configure>", _update, add="+")
+        _update()
 
     def _attach_tooltip(self, widget: tk.Widget, key: str, **kwargs) -> None:
         tip_text = self._tip(key, **kwargs)
@@ -1023,6 +1452,9 @@ class OmniClipDesktopApp:
         self.current_report = None
         self.latest_preflight_snapshot = None
         self.context_view_text = ""
+        self.context_jump_var.set("")
+        self.context_jump_options = []
+        self.context_jump_summary_var.set(self._tr("context_jump_summary_empty"))
         self.resume_prompt_workspace_id = None
         self.files_var.set("0")
         self.chunks_var.set("0")
@@ -1310,10 +1742,12 @@ class OmniClipDesktopApp:
         self._refresh_state_chips()
         self._render_hits()
         self._set_text(self.preview_text, self._current_preview_text())
-        self._set_text(self.context_text, self.current_context or self.context_view_text or self._tr("context_empty"))
+        self._refresh_context_jump_controls()
+        self._set_text(self.context_text, self.current_context or self._tr("context_empty"))
         self._set_text(self.log_text, "\n".join(self.log_lines) if self.log_lines else self._tr("log_empty"))
         self._update_watch_button_state()
         self._update_context_selection_summary()
+        self._update_page_blocklist_summary()
 
     def _current_preview_text(self) -> str:
         if not self.current_hits:
@@ -1335,14 +1769,17 @@ class OmniClipDesktopApp:
             f"{self._tr('col_score')}：{hit.score:.1f}/100\n"
             f"{self._tr('col_reason')}：{hit.reason or self._tr('reason_fallback')}\n\n"
             f"{self._tr('preview_excerpt_label')}\n{hit.preview_text or self._tr('none_value')}\n\n"
-            f"{self._tr('preview_full_label')}\n{hit.rendered_text}"
+            f"{self._tr('preview_full_label')}\n{hit.display_text or hit.rendered_text}"
         )
 
-    def _render_hits(self) -> None:
+    def _render_hits(self, selected_chunk_id: str | None = None) -> None:
         if not hasattr(self, "tree"):
             return
+        if selected_chunk_id is None:
+            selected_chunk_id = self._selected_tree_chunk_id()
         for item in self.tree.get_children():
             self.tree.delete(item)
+        selected_index = 0
         for index, hit in enumerate(self.current_hits):
             include_value = '[x]' if hit.chunk_id in self.selected_chunk_ids else '[ ]'
             self.tree.insert(
@@ -1351,8 +1788,11 @@ class OmniClipDesktopApp:
                 iid=str(index),
                 values=(include_value, hit.title, hit.reason or self._tr('reason_fallback'), hit.anchor, f"{hit.score:.1f}"),
             )
+            if selected_chunk_id and hit.chunk_id == selected_chunk_id:
+                selected_index = index
+        self._refresh_tree_headings()
         if self.current_hits:
-            self.tree.selection_set("0")
+            self.tree.selection_set(str(selected_index))
 
     def _on_result_tree_click(self, event) -> str | None:
         if not hasattr(self, 'tree'):
@@ -1374,8 +1814,219 @@ class OmniClipDesktopApp:
             self.selected_chunk_ids.remove(hit.chunk_id)
         else:
             self.selected_chunk_ids.add(hit.chunk_id)
-        self._render_hits()
+        self._render_hits(selected_chunk_id=hit.chunk_id)
         self._rebuild_context_view()
+
+    def _toggle_all_hit_selection(self) -> None:
+        if not self.current_hits:
+            return
+        current_ids = {hit.chunk_id for hit in self.current_hits}
+        selected_ids = current_ids & self.selected_chunk_ids
+        if selected_ids and len(selected_ids) == len(current_ids):
+            self.selected_chunk_ids.difference_update(current_ids)
+        else:
+            self.selected_chunk_ids.update(current_ids)
+        self._render_hits(selected_chunk_id=self._selected_tree_chunk_id())
+        self._rebuild_context_view()
+
+    def _update_page_blocklist_summary(self) -> None:
+        rules = _deserialize_page_filter_rules(self.page_blocklist_rules_var.get())
+        enabled = sum(1 for is_enabled, _pattern in rules if is_enabled)
+        total = len(rules)
+        self.page_blocklist_summary_var.set(self._tr('page_blocklist_summary', enabled=enabled, total=total))
+
+    def _open_page_blocklist_window(self) -> None:
+        if self.page_blocklist_window is not None:
+            try:
+                if int(self.page_blocklist_window.winfo_exists()):
+                    self.page_blocklist_window.deiconify()
+                    self.page_blocklist_window.lift()
+                    self.page_blocklist_window.focus_force()
+                    return
+            except Exception:
+                self.page_blocklist_window = None
+
+        window = tk.Toplevel(self.root)
+        window.title(self._tr('page_blocklist_window_title'))
+        window.geometry('860x560')
+        window.minsize(760, 460)
+        window.configure(bg=self.colors['card'])
+        window.transient(self.root)
+        self.page_blocklist_window = window
+
+        def _on_close_window() -> None:
+            self.page_blocklist_window = None
+            window.destroy()
+
+        def _refresh_rows() -> None:
+            for index, row in enumerate(rule_rows, start=1):
+                row['frame'].grid(row=index, column=0, sticky='ew', pady=(8 if index == 1 else 6, 0))
+
+        def _add_row(enabled: bool = True, pattern: str = '') -> None:
+            row = tk.Frame(list_body, bg=self.colors['soft_2'])
+            row.grid_columnconfigure(1, weight=1)
+            enabled_var = tk.BooleanVar(value=enabled)
+            pattern_var = tk.StringVar(value=pattern)
+            check = ttk.Checkbutton(row, variable=enabled_var, style='Plain.TCheckbutton')
+            check.grid(row=0, column=0, sticky='w')
+            entry = ttk.Entry(row, textvariable=pattern_var, style='Field.TEntry')
+            entry.grid(row=0, column=1, sticky='ew', padx=(10, 10))
+            remove_button = ttk.Button(row, text=self._tr('page_blocklist_remove'), style='Secondary.TButton')
+            record = {'frame': row, 'enabled_var': enabled_var, 'pattern_var': pattern_var}
+            remove_button.configure(command=lambda item=record: _remove_row(item))
+            remove_button.grid(row=0, column=2, sticky='e')
+            self._attach_tooltip(remove_button, 'page_blocklist_remove')
+            rule_rows.append(record)
+            _refresh_rows()
+
+        def _remove_row(item) -> None:
+            if item not in rule_rows:
+                return
+            rule_rows.remove(item)
+            try:
+                item['frame'].destroy()
+            except Exception:
+                pass
+            _refresh_rows()
+
+        def _reset_defaults() -> None:
+            for row in list(rule_rows):
+                _remove_row(row)
+            for enabled, pattern in DEFAULT_PAGE_FILTER_RULES:
+                _add_row(enabled, pattern)
+
+        window.protocol('WM_DELETE_WINDOW', _on_close_window)
+        window.grid_columnconfigure(0, weight=1)
+        window.grid_rowconfigure(2, weight=1)
+
+        tk.Label(window, text=self._tr('page_blocklist_window_title'), bg=self.colors['card'], fg=self.colors['ink'], font=self.fonts['card_title'], anchor='w').grid(row=0, column=0, sticky='w', padx=18, pady=(18, 6))
+        tk.Label(window, text=self._tr('page_blocklist_window_body'), bg=self.colors['card'], fg=self.colors['muted'], font=self.fonts['small'], anchor='w', justify='left', wraplength=800).grid(row=1, column=0, sticky='new', padx=18)
+
+        list_wrap = tk.Frame(window, bg=self.colors['card'])
+        list_wrap.grid(row=2, column=0, sticky='nsew', padx=18, pady=(10, 14))
+        list_wrap.grid_columnconfigure(0, weight=1)
+        list_wrap.grid_rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(list_wrap, bg=self.colors['soft_2'], highlightthickness=0, borderwidth=0)
+        canvas.grid(row=0, column=0, sticky='nsew')
+        scroll = ttk.Scrollbar(list_wrap, orient='vertical', command=canvas.yview)
+        scroll.grid(row=0, column=1, sticky='ns')
+        canvas.configure(yscrollcommand=scroll.set)
+
+        list_body = tk.Frame(canvas, bg=self.colors['soft_2'])
+        list_body.grid_columnconfigure(0, weight=1)
+        window_id = canvas.create_window((0, 0), window=list_body, anchor='nw')
+        list_body.bind('<Configure>', lambda _event: canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>', lambda event: canvas.itemconfigure(window_id, width=event.width))
+
+        header = tk.Frame(list_body, bg=self.colors['soft_2'])
+        header.grid(row=0, column=0, sticky='ew')
+        header.grid_columnconfigure(1, weight=1)
+        tk.Label(header, text=self._tr('page_blocklist_enabled'), bg=self.colors['soft_2'], fg=self.colors['muted'], font=self.fonts['small'], anchor='w').grid(row=0, column=0, sticky='w')
+        tk.Label(header, text=self._tr('page_blocklist_regex'), bg=self.colors['soft_2'], fg=self.colors['muted'], font=self.fonts['small'], anchor='w').grid(row=0, column=1, sticky='w', padx=(10, 10))
+
+        rule_rows: list[dict[str, object]] = []
+        for enabled, pattern in _deserialize_page_filter_rules(self.page_blocklist_rules_var.get()):
+            _add_row(enabled, pattern)
+
+        action_row = tk.Frame(window, bg=self.colors['card'])
+        action_row.grid(row=3, column=0, sticky='ew', padx=18, pady=(0, 18))
+        action_row.grid_columnconfigure(2, weight=1)
+        add_button = ttk.Button(action_row, text=self._tr('page_blocklist_add'), style='Secondary.TButton', command=lambda: _add_row())
+        add_button.grid(row=0, column=0, sticky='w')
+        self._attach_tooltip(add_button, 'page_blocklist_add')
+        reset_button = ttk.Button(action_row, text=self._tr('page_blocklist_reset_defaults'), style='Secondary.TButton', command=_reset_defaults)
+        reset_button.grid(row=0, column=1, sticky='w', padx=(8, 0))
+        self._attach_tooltip(reset_button, 'page_blocklist_reset_defaults')
+        save_button = ttk.Button(action_row, text=self._tr('save_config'), style='Primary.TButton', command=lambda: self._save_page_blocklist_rules(rule_rows, _on_close_window))
+        save_button.grid(row=0, column=3, sticky='e')
+        self._attach_tooltip(save_button, 'save_filters')
+
+    def _save_page_blocklist_rules(self, rows, close_window) -> None:
+        serialized = _serialize_page_filter_rules([
+            (bool(row['enabled_var'].get()), str(row['pattern_var'].get()).strip())
+            for row in rows
+            if str(row['pattern_var'].get()).strip()
+        ])
+        self.page_blocklist_rules_var.set(serialized)
+        self._update_page_blocklist_summary()
+        rules = _deserialize_page_filter_rules(serialized)
+        enabled = sum(1 for is_enabled, _pattern in rules if is_enabled)
+        self.status_var.set(self._tr('status_page_blocklist_saved'))
+        self._append_log(self._tr('log_page_blocklist_saved', enabled=enabled, total=len(rules)))
+        close_window()
+        if self.query_var.get().strip() and not self.busy:
+            self._query(False)
+
+    def _open_sensitive_filter_window(self) -> None:
+        if self.sensitive_filter_window is not None:
+            try:
+                if int(self.sensitive_filter_window.winfo_exists()):
+                    self.sensitive_filter_window.deiconify()
+                    self.sensitive_filter_window.lift()
+                    self.sensitive_filter_window.focus_force()
+                    return
+            except Exception:
+                self.sensitive_filter_window = None
+
+        window = tk.Toplevel(self.root)
+        window.title(self._tr('sensitive_filter_window_title'))
+        window.geometry('780x460')
+        window.minsize(700, 420)
+        window.configure(bg=self.colors['card'])
+        window.transient(self.root)
+        self.sensitive_filter_window = window
+
+        local_core_var = tk.BooleanVar(value=self.rag_filter_core_var.get())
+        local_extended_var = tk.BooleanVar(value=self.rag_filter_extended_var.get())
+
+        def _on_close_window() -> None:
+            self.sensitive_filter_window = None
+            window.destroy()
+
+        def _save_sensitive_filters() -> None:
+            custom_rules = custom_text.get('1.0', 'end-1c').strip()
+            self.rag_filter_core_var.set(local_core_var.get())
+            self.rag_filter_extended_var.set(local_extended_var.get())
+            self.rag_filter_custom_rules_var.set(custom_rules)
+            self.status_var.set(self._tr('status_sensitive_filters_saved'))
+            self._append_log(self._tr('log_sensitive_filters_saved'))
+            _on_close_window()
+            if self.query_var.get().strip() and not self.busy:
+                self._query(False)
+
+        window.protocol('WM_DELETE_WINDOW', _on_close_window)
+        window.grid_columnconfigure(0, weight=1)
+        window.grid_rowconfigure(2, weight=1)
+
+        tk.Label(window, text=self._tr('sensitive_filter_window_title'), bg=self.colors['card'], fg=self.colors['ink'], font=self.fonts['card_title'], anchor='w').grid(row=0, column=0, sticky='w', padx=18, pady=(18, 6))
+        tk.Label(window, text=self._tr('sensitive_filter_window_body'), bg=self.colors['card'], fg=self.colors['muted'], font=self.fonts['small'], anchor='w', justify='left', wraplength=720).grid(row=1, column=0, sticky='new', padx=18)
+
+        body = tk.Frame(window, bg=self.colors['soft_2'], highlightbackground=self.colors['border'], highlightthickness=1)
+        body.grid(row=2, column=0, sticky='nsew', padx=18, pady=(10, 14))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(3, weight=1)
+
+        core_check = ttk.Checkbutton(body, text=self._tr('rag_filter_core_label'), variable=local_core_var, style='Plain.TCheckbutton')
+        core_check.grid(row=0, column=0, sticky='w', padx=16, pady=(16, 0))
+        self._attach_tooltip(core_check, 'rag_filter_core')
+        extended_check = ttk.Checkbutton(body, text=self._tr('rag_filter_extended_label'), variable=local_extended_var, style='Plain.TCheckbutton')
+        extended_check.grid(row=1, column=0, sticky='w', padx=16, pady=(8, 0))
+        self._attach_tooltip(extended_check, 'rag_filter_extended')
+        custom_label = tk.Label(body, text=self._tr('rag_filter_custom_label'), bg=self.colors['soft_2'], fg=self.colors['muted'], font=self.fonts['small'], anchor='w', justify='left', wraplength=640)
+        custom_label.grid(row=2, column=0, sticky='w', padx=16, pady=(12, 0))
+        custom_text = tk.Text(body, wrap='word', relief='flat', borderwidth=0, highlightbackground=self.colors['border'], highlightthickness=1, background='#FFFFFF', foreground=self.colors['ink'], insertbackground=self.colors['ink'], font=('Segoe UI', 10), height=8)
+        custom_text.grid(row=3, column=0, sticky='nsew', padx=16, pady=(6, 0))
+        custom_text.insert('1.0', self.rag_filter_custom_rules_var.get())
+        self._attach_tooltip(custom_text, 'rag_filter_custom_rules')
+
+        action_row = tk.Frame(window, bg=self.colors['card'])
+        action_row.grid(row=3, column=0, sticky='ew', padx=18, pady=(0, 18))
+        action_row.grid_columnconfigure(0, weight=1)
+        save_button = ttk.Button(action_row, text=self._tr('save_config'), style='Primary.TButton', command=_save_sensitive_filters)
+        save_button.grid(row=0, column=1, sticky='e')
+        self._attach_tooltip(save_button, 'save_filters')
+
     def _refresh_state_chips(self) -> None:
         self._refresh_workspace_summary()
         try:
@@ -1420,8 +2071,6 @@ class OmniClipDesktopApp:
         self._refresh_device_options()
         if self.current_report is not None:
             self.preflight_var.set(summarize_preflight(self.current_report, self.language_code))
-            if not self.current_context:
-                self.context_view_text = format_space_report(self.current_report, self.language_code)
         elif self.latest_preflight_snapshot is not None:
             self.preflight_var.set(
                 self._tr(
@@ -1484,11 +2133,16 @@ class OmniClipDesktopApp:
         self.model_var.set("BAAI/bge-m3")
         self.runtime_var.set("torch")
         self.device_var.set("auto")
-        self.limit_var.set("8")
+        self.limit_var.set("15")
         self.score_threshold_var.set("0")
         self.interval_var.set("2.0")
         self.local_only_var.set(False)
+        self.rag_filter_core_var.set(True)
+        self.rag_filter_extended_var.set(False)
+        self.rag_filter_custom_rules_var.set("")
+        self.page_blocklist_rules_var.set(_merge_page_filter_defaults(""))
         self.force_var.set(False)
+        self._update_page_blocklist_summary()
         self.polling_var.set(False)
         self._refresh_device_options()
         self.status_var.set(self._tr("status_recommended"))
@@ -1502,15 +2156,14 @@ class OmniClipDesktopApp:
         self.show_advanced_var.set(not self.show_advanced_var.get())
         self._render_ui()
 
-    def _open_help(self) -> None:
+    def _open_help_and_updates(self) -> None:
+        if not messagebox.askyesno(self._tr("help_updates_confirm_title"), self._tr("help_updates_confirm_body"), parent=self.root):
+            return
         self._open_url(REPO_URL)
-
-    def _open_updates(self) -> None:
-        self._open_url(RELEASES_URL)
 
     def _open_url(self, url: str) -> None:
         if not webbrowser.open(url):
-            messagebox.showwarning(self._tr("help"), self._tr("help_failed"), parent=self.root)
+            messagebox.showwarning(self._tr("help_updates"), self._tr("help_failed"), parent=self.root)
 
     def _choose_vault(self) -> None:
         selected = filedialog.askdirectory(title=self._tr("vault_label"), initialdir=self.vault_var.get().strip() or str(Path.home()))
@@ -1549,10 +2202,15 @@ class OmniClipDesktopApp:
         acceleration = detect_acceleration()
         if (config.vector_device or '').strip().lower() in {'', 'cpu'} and acceleration.get('cuda_available'):
             self.device_var.set('auto')
-        self.limit_var.set(str(config.query_limit))
+        self.limit_var.set(str(config.query_limit or 15))
         self.score_threshold_var.set(str(config.query_score_threshold))
         self.interval_var.set(str(config.poll_interval_seconds))
         self.local_only_var.set(config.vector_local_files_only)
+        self.rag_filter_core_var.set(config.rag_filter_core_enabled)
+        self.rag_filter_extended_var.set(config.rag_filter_extended_enabled)
+        self.rag_filter_custom_rules_var.set(config.rag_filter_custom_rules)
+        self.page_blocklist_rules_var.set(_merge_page_filter_defaults(config.page_blocklist_rules))
+        self._update_page_blocklist_summary()
         self.quick_start_expanded_var.set(config.ui_quick_start_expanded)
         self.ui_window_geometry = config.ui_window_geometry or self.ui_window_geometry
         self.ui_main_sash = self._coerce_layout_value(config.ui_main_sash, self.ui_main_sash)
@@ -1578,7 +2236,7 @@ class OmniClipDesktopApp:
         else:
             vault = normalize_vault_path(vault)
         paths = ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()), vault or None)
-        limit = int(self.limit_var.get().strip() or "8")
+        limit = int(self.limit_var.get().strip() or "15")
         interval = float(self.interval_var.get().strip() or "2.0")
         score_threshold = float(self.score_threshold_var.get().strip() or "0")
         if limit <= 0 or interval <= 0 or score_threshold < 0:
@@ -1595,6 +2253,10 @@ class OmniClipDesktopApp:
             vector_runtime=self.runtime_var.get().strip() or "torch",
             vector_device=self.device_var.get().strip() or "auto",
             vector_local_files_only=self.local_only_var.get(),
+            rag_filter_core_enabled=self.rag_filter_core_var.get(),
+            rag_filter_extended_enabled=self.rag_filter_extended_var.get(),
+            rag_filter_custom_rules=self.rag_filter_custom_rules_var.get().strip(),
+            page_blocklist_rules=self.page_blocklist_rules_var.get().strip(),
             ui_language=self.language_code,
             ui_quick_start_expanded=self.quick_start_expanded_var.get(),
             ui_window_geometry=self.ui_window_geometry,
@@ -1964,6 +2626,14 @@ class OmniClipDesktopApp:
                 self._start_rebuild(resume=True)
                 return
             self._discard_pending_rebuild(config, paths)
+        if int(self.chunks_var.get() or "0") > 0:
+            should_rebuild = messagebox.askyesno(
+                self._tr("rebuild_confirm_existing_title"),
+                self._tr("rebuild_confirm_existing_body"),
+                parent=self.root,
+            )
+            if not should_rebuild:
+                return
         self._start_rebuild(resume=False)
 
     def _refresh(self) -> None:
@@ -2062,22 +2732,20 @@ class OmniClipDesktopApp:
     def _after_preflight(self, payload) -> None:
         report = payload["report"]
         self.current_report = report
-        self.context_view_text = format_space_report(report, self.language_code)
+        self.context_view_text = ""
         self.preflight_var.set(summarize_preflight(report, self.language_code))
-        self._set_text(self.context_text, self.context_view_text)
-        self.tabs.select(1)
         self._apply_status(payload.get("status"))
         self.status_var.set(self._tr("status_preflight_done"))
         self._append_log(self._tr("log_preflight_done"))
+        self._append_log(format_space_report(report, self.language_code))
+        self._show_query_workspace(2)
 
     def _after_bootstrap(self, payload) -> None:
         report = payload.get("report")
         if report is not None:
             self.current_report = report
-            self.context_view_text = format_space_report(report, self.language_code)
             self.preflight_var.set(summarize_preflight(report, self.language_code))
-            self._set_text(self.context_text, self.context_view_text)
-            self.tabs.select(1)
+            self._append_log(format_space_report(report, self.language_code))
         if payload.get("blocked"):
             self.status_var.set(self._tr("bootstrap_blocked_title"))
             self._append_log(self._tr("log_bootstrap_blocked"))
@@ -2129,14 +2797,16 @@ class OmniClipDesktopApp:
         self.current_query_text = query
         self.current_hits = hits
         self.selected_chunk_ids = {hit.chunk_id for hit in hits}
-        self._render_hits()
+        self.result_sort_column = None
+        self.result_sort_reverse = False
+        selected_chunk_id = hits[0].chunk_id if hits else None
+        self._render_hits(selected_chunk_id=selected_chunk_id)
         self._rebuild_context_view()
         if hits:
-            self.tree.selection_set("0")
             self._show_hit(0)
         else:
             self._set_text(self.preview_text, self._tr("no_results"))
-        self.tabs.select(1)
+        self._show_query_workspace(1)
         self.result_var.set(self._tr("query_hits", count=len(hits)))
         self.status_var.set(self._tr("status_query_copied") if copied else self._tr("status_query_done"))
         self._append_log(self._tr("log_query_done", query=query, count=len(hits)))
@@ -2197,7 +2867,7 @@ class OmniClipDesktopApp:
                 f"{self._tr('col_score')}：{hit.score:.1f}/100\n"
                 f"{self._tr('col_reason')}：{hit.reason or self._tr('reason_fallback')}\n\n"
                 f"{self._tr('preview_excerpt_label')}\n{hit.preview_text or self._tr('none_value')}\n\n"
-                f"{self._tr('preview_full_label')}\n{hit.rendered_text}"
+                f"{self._tr('preview_full_label')}\n{hit.display_text or hit.rendered_text}"
             ),
         )
 
@@ -2260,6 +2930,7 @@ class OmniClipDesktopApp:
         widget.delete("1.0", "end")
         widget.insert("1.0", text_value)
         widget.configure(state="disabled")
+        self._refresh_text_search_state(widget)
 
     def _update_watch_button_state(self) -> None:
         if not hasattr(self, "watch_button"):
@@ -2298,7 +2969,7 @@ class OmniClipDesktopApp:
                 self._stop_task_feedback()
                 self.status_var.set(self._tr("status_failed", label=label))
                 self._append_log(message)
-                self.tabs.select(2)
+                self._show_query_workspace(2)
                 messagebox.showerror(label, message, parent=self.root)
             elif kind == "error":
                 _, label_key, label, tb = item
@@ -2306,7 +2977,7 @@ class OmniClipDesktopApp:
                 self._stop_task_feedback()
                 self.status_var.set(self._tr("status_failed", label=label))
                 self._append_log(tb.strip())
-                self.tabs.select(2)
+                self._show_query_workspace(2)
                 messagebox.showerror(label, self._friendly_task_error(label_key, label, tb), parent=self.root)
             elif kind == "progress":
                 _, payload = item
@@ -2330,7 +3001,7 @@ class OmniClipDesktopApp:
                 self.status_var.set(self._tr("status_watch_error"))
                 self._append_log(self._tr("log_watch_error"))
                 self._append_log(tb.strip())
-                self.tabs.select(2)
+                self._show_query_workspace(2)
                 messagebox.showerror(self._tr("watch_start_failed_title"), "\n".join([line.strip() for line in tb.splitlines() if line.strip()][-6:]), parent=self.root)
             elif kind == "watch-stopped":
                 _, mode = item
@@ -2360,6 +3031,12 @@ class OmniClipDesktopApp:
             except Exception:
                 pass
             self.layout_after_id = None
+        if self.capture_after_id is not None:
+            try:
+                self.root.after_cancel(self.capture_after_id)
+            except Exception:
+                pass
+            self.capture_after_id = None
         self._capture_layout_state()
         try:
             config, paths = self._config(False)

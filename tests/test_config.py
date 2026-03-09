@@ -58,19 +58,21 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse((legacy_workspace / 'cache').exists())
         self.assertFalse((legacy_workspace / 'logs').exists())
 
-    def test_falls_back_when_default_root_is_not_writable(self) -> None:
+    def test_falls_back_to_local_appdata_when_default_root_is_not_writable(self) -> None:
         blocked = Path('blocked_root')
+        local_base = ROOT / '.tmp' / 'local_appdata_env'
+        fallback_candidate = local_base / config_module.APP_NAME
         original = config_module._create_data_paths
 
         def side_effect(root: Path, vault_path=None):
             if root == blocked:
                 raise PermissionError('denied')
-            if root.name == 'local_appdata':
+            if root == fallback_candidate:
                 return original(FALLBACK_ROOT.resolve(), vault_path=vault_path)
             return original(root, vault_path=vault_path)
 
         with patch.object(config_module, 'default_data_root', return_value=blocked), \
-             patch.dict(config_module.os.environ, {'LOCALAPPDATA': ''}, clear=False), \
+             patch.dict(config_module.os.environ, {'LOCALAPPDATA': str(local_base)}, clear=False), \
              patch.object(config_module, '_create_data_paths', side_effect=side_effect):
             paths = config_module.ensure_data_paths()
 

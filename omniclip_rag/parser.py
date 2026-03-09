@@ -47,12 +47,24 @@ def parse_markdown_file(vault_root: Path, absolute_path: Path) -> ParsedFile:
 
 def _detect_kind(path: Path, text: str) -> str:
     lowered = path.as_posix().lower()
-    if "/pages/" in lowered or "/journals/" in lowered:
-        if any(marker in text for marker in ("id::", "{{embed", "((", "alias::", "file::")):
-            return "logseq"
-    has_bullets = any(BULLET_RE.match(line.expandtabs(4)) for line in text.splitlines())
+    expanded_lines = [line.expandtabs(4) for line in text.splitlines() if line.strip()]
+    has_bullets = any(BULLET_RE.match(line) for line in expanded_lines)
+    has_headings = any(HEADING_RE.match(line) for line in expanded_lines)
     has_logseq_markers = any(marker in text for marker in ("id::", "{{embed", "((", "alias::", "file::"))
-    return "logseq" if has_bullets and has_logseq_markers else "markdown"
+    property_count = sum(1 for line in expanded_lines if PROPERTY_RE.match(line))
+    bullet_count = sum(1 for line in expanded_lines if BULLET_RE.match(line))
+    heading_count = sum(1 for line in expanded_lines if HEADING_RE.match(line))
+    plain_count = len(expanded_lines) - bullet_count - heading_count - property_count
+    outline_like = has_bullets and (
+        has_logseq_markers
+        or property_count > 0
+        or (not has_headings and bullet_count >= max(plain_count, 1))
+    )
+
+    if "/pages/" in lowered or "/journals/" in lowered:
+        if outline_like:
+            return "logseq"
+    return "logseq" if outline_like else "markdown"
 
 
 def _parse_logseq(vault_root: Path, absolute_path: Path, relative_path: str, text: str) -> ParsedFile:
@@ -116,6 +128,10 @@ def _parse_logseq(vault_root: Path, absolute_path: Path, relative_path: str, tex
                 current.line_end = line_number
                 continue
 
+    for node in reversed(nodes):
+        if node.parent is not None:
+            node.parent.line_end = max(node.parent.line_end, node.line_end)
+
     chunks = [_logseq_node_to_chunk(relative_path, title, node) for node in nodes]
     if not chunks:
         chunks.append(
@@ -124,10 +140,12 @@ def _parse_logseq(vault_root: Path, absolute_path: Path, relative_path: str, tex
                 source_path=relative_path,
                 kind="page_stub",
                 block_id=None,
+                parent_chunk_id=None,
                 title=title,
                 anchor=title,
                 raw_text="",
                 position=0,
+                depth=0,
             )
         )
     return ParsedFile(
@@ -160,17 +178,23 @@ def _logseq_node_to_chunk(relative_path: str, page_title: str, node: _LogseqNode
         refs.append(("embed", target))
     for target in BLOCK_REF_RE.findall(raw_text):
         refs.append(("block_ref", target))
+    depth = max(len(lineage) - 1, 0)
+    parent_chunk_id = None
+    if node.parent is not None:
+        parent_chunk_id = _chunk_id(relative_path, "logseq_block", node.parent.position, node.parent.raw_title, node.parent.block_id)
     return ChunkRecord(
         chunk_id=_chunk_id(relative_path, "logseq_block", node.position, node.raw_title, node.block_id),
         source_path=relative_path,
         kind="logseq_block",
         block_id=node.block_id,
+        parent_chunk_id=parent_chunk_id,
         title=page_title,
         anchor=anchor,
         raw_text=raw_text,
         properties=node.properties,
         refs=refs,
         position=node.position,
+        depth=depth,
         line_start=node.line_start,
         line_end=node.line_end,
     )
@@ -191,10 +215,12 @@ def _parse_standard_markdown(vault_root: Path, absolute_path: Path, relative_pat
                     source_path=relative_path,
                     kind="page_stub",
                     block_id=None,
+                    parent_chunk_id=None,
                     title=title,
                     anchor=title,
                     raw_text="",
                     position=0,
+                    depth=0,
                 )
             ],
         )
@@ -208,7 +234,7 @@ def _parse_standard_markdown(vault_root: Path, absolute_path: Path, relative_pat
 
     def flush(line_end: int) -> None:
         nonlocal body_lines, section_line_start, section_heading
-        body = "\n".join(body_lines).strip()
+        body = "\n".join(body_lines).strip("\n")
         anchor = " > ".join([item for _, item in heading_stack]) if heading_stack else title
         if not body and not heading_stack and not sections:
             anchor = title
@@ -225,11 +251,13 @@ def _parse_standard_markdown(vault_root: Path, absolute_path: Path, relative_pat
                     source_path=relative_path,
                     kind="md_section",
                     block_id=None,
+                    parent_chunk_id=None,
                     title=title,
                     anchor=anchor,
                     raw_text=body,
                     refs=refs,
                     position=position,
+                    depth=max(len(heading_stack) - 1, 0),
                     line_start=section_line_start,
                     line_end=max(section_line_start, line_end),
                 )
@@ -248,7 +276,7 @@ def _parse_standard_markdown(vault_root: Path, absolute_path: Path, relative_pat
             section_heading = heading
             section_line_start = line_number
             continue
-        body_lines.append(raw_line.strip())
+        body_lines.append(raw_line)
 
     flush(max(1, len(lines)))
     if not sections:
@@ -258,10 +286,12 @@ def _parse_standard_markdown(vault_root: Path, absolute_path: Path, relative_pat
                 source_path=relative_path,
                 kind="page_stub",
                 block_id=None,
+                parent_chunk_id=None,
                 title=title,
                 anchor=title,
                 raw_text="",
                 position=0,
+                depth=0,
             )
         )
     return ParsedFile(
@@ -287,4 +317,3 @@ def _clean_inline_markup(text: str) -> str:
     cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
-

@@ -46,12 +46,14 @@ class MetadataStore:
                 source_path TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 block_id TEXT,
+                parent_chunk_id TEXT,
                 title TEXT NOT NULL,
                 anchor TEXT NOT NULL,
                 raw_text TEXT NOT NULL,
                 rendered_text TEXT NOT NULL DEFAULT '',
                 properties_json TEXT NOT NULL,
                 position INTEGER NOT NULL,
+                depth INTEGER NOT NULL DEFAULT 0,
                 line_start INTEGER NOT NULL,
                 line_end INTEGER NOT NULL,
                 FOREIGN KEY(source_path) REFERENCES files(source_path) ON DELETE CASCADE
@@ -113,6 +115,17 @@ class MetadataStore:
             );
             """
         )
+        self.connection.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(chunks)").fetchall()
+        }
+        if 'parent_chunk_id' not in columns:
+            self.connection.execute("ALTER TABLE chunks ADD COLUMN parent_chunk_id TEXT")
+        if 'depth' not in columns:
+            self.connection.execute("ALTER TABLE chunks ADD COLUMN depth INTEGER NOT NULL DEFAULT 0")
         self.connection.commit()
 
     def reset_all(self) -> None:
@@ -208,22 +221,24 @@ class MetadataStore:
             self.connection.execute(
                 """
                 INSERT INTO chunks (
-                    chunk_id, source_path, kind, block_id, title, anchor,
+                    chunk_id, source_path, kind, block_id, parent_chunk_id, title, anchor,
                     raw_text, rendered_text, properties_json,
-                    position, line_start, line_end
+                    position, depth, line_start, line_end
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
                 """,
                 (
                     chunk.chunk_id,
                     chunk.source_path,
                     chunk.kind,
                     chunk.block_id,
+                    chunk.parent_chunk_id,
                     chunk.title,
                     chunk.anchor,
                     chunk.raw_text,
                     json.dumps(chunk.properties, ensure_ascii=False),
                     chunk.position,
+                    chunk.depth,
                     chunk.line_start,
                     chunk.line_end,
                 ),
@@ -346,6 +361,38 @@ class MetadataStore:
         ).fetchall()
         return {row["block_id"]: row for row in rows if row["block_id"]}
 
+    def fetch_chunk_lookup(self, chunk_ids: Iterable[str] | None = None) -> dict[str, sqlite3.Row]:
+        query = """
+            SELECT chunks.*, files.page_properties_json
+            FROM chunks
+            JOIN files ON files.source_path = chunks.source_path
+        """
+        params: list[str] = []
+        if chunk_ids is not None:
+            values = [item for item in chunk_ids if item]
+            if not values:
+                return {}
+            placeholders = ",".join("?" for _ in values)
+            query += f" WHERE chunks.chunk_id IN ({placeholders})"
+            params.extend(values)
+        rows = self.connection.execute(query, params).fetchall()
+        return {row["chunk_id"]: row for row in rows}
+
+    def fetch_rows_by_chunk_ids(self, chunk_ids: Iterable[str]) -> list[sqlite3.Row]:
+        values = [item for item in chunk_ids if item]
+        if not values:
+            return []
+        placeholders = ",".join("?" for _ in values)
+        return self.connection.execute(
+            f"""
+            SELECT chunks.*, files.page_properties_json, NULL AS fts_rank, 0 AS like_hits
+            FROM chunks
+            JOIN files ON files.source_path = chunks.source_path
+            WHERE chunks.chunk_id IN ({placeholders})
+            """,
+            values,
+        ).fetchall()
+
     def update_rendered_chunks(self, payloads: list[tuple[str, str]]) -> None:
         if not payloads:
             return
@@ -467,15 +514,13 @@ class MetadataStore:
             return self.connection.execute(
                 """
                 SELECT
-                    chunks.chunk_id,
-                    chunks.title,
-                    chunks.anchor,
-                    chunks.source_path,
-                    chunks.rendered_text,
+                    chunks.*,
+                    files.page_properties_json,
                     bm25(chunks_fts, 8.0, 4.0, 1.0) AS fts_rank,
                     0 AS like_hits
                 FROM chunks_fts
                 JOIN chunks ON chunks.chunk_id = chunks_fts.chunk_id
+                JOIN files ON files.source_path = chunks.source_path
                 WHERE chunks_fts MATCH ?
                 ORDER BY fts_rank
                 LIMIT ?
@@ -493,20 +538,18 @@ class MetadataStore:
         return self.connection.execute(
             """
             SELECT
-                chunk_id,
-                title,
-                anchor,
-                source_path,
-                rendered_text,
+                chunks.*,
+                files.page_properties_json,
                 NULL AS fts_rank,
                 (
-                    CASE WHEN title LIKE ? THEN 3 ELSE 0 END +
-                    CASE WHEN anchor LIKE ? THEN 2 ELSE 0 END +
-                    CASE WHEN rendered_text LIKE ? THEN 1 ELSE 0 END
+                    CASE WHEN chunks.title LIKE ? THEN 3 ELSE 0 END +
+                    CASE WHEN chunks.anchor LIKE ? THEN 2 ELSE 0 END +
+                    CASE WHEN chunks.rendered_text LIKE ? THEN 1 ELSE 0 END
                 ) AS like_hits
             FROM chunks
-            WHERE title LIKE ? OR anchor LIKE ? OR rendered_text LIKE ?
-            ORDER BY like_hits DESC, source_path, position
+            JOIN files ON files.source_path = chunks.source_path
+            WHERE chunks.title LIKE ? OR chunks.anchor LIKE ? OR chunks.rendered_text LIKE ?
+            ORDER BY like_hits DESC, chunks.source_path, chunks.position
             LIMIT ?
             """,
             (like, like, like, like, like, like, limit),
@@ -517,19 +560,39 @@ class MetadataStore:
             """
             SELECT
                 ? AS chunk_id,
+                ? AS source_path,
+                ? AS kind,
+                ? AS block_id,
+                ? AS parent_chunk_id,
                 ? AS title,
                 ? AS anchor,
-                ? AS source_path,
+                ? AS raw_text,
                 ? AS rendered_text,
+                ? AS properties_json,
+                ? AS position,
+                ? AS depth,
+                ? AS line_start,
+                ? AS line_end,
+                ? AS page_properties_json,
                 ? AS fts_rank,
                 ? AS like_hits
             """,
             (
                 payload.get("chunk_id"),
+                payload.get("source_path"),
+                payload.get("kind"),
+                payload.get("block_id"),
+                payload.get("parent_chunk_id"),
                 payload.get("title"),
                 payload.get("anchor"),
-                payload.get("source_path"),
+                payload.get("raw_text"),
                 payload.get("rendered_text"),
+                payload.get("properties_json"),
+                payload.get("position"),
+                payload.get("depth"),
+                payload.get("line_start"),
+                payload.get("line_end"),
+                payload.get("page_properties_json"),
                 payload.get("fts_rank"),
                 payload.get("like_hits"),
             ),

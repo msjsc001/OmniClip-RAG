@@ -15,7 +15,7 @@ from .clipboard import copy_text
 from .config import AppConfig, DataPaths
 from .errors import BuildCancelledError
 from .models import SearchHit, SpaceEstimate
-from .parser import BLOCK_REF_RE, EMBED_RE, PAGE_REF_RE
+from .parser import BLOCK_REF_RE, BULLET_RE, EMBED_RE, PAGE_REF_RE, PROPERTY_RE
 from .preflight import estimate_storage_for_vault
 from .storage import MetadataStore
 from .timing import append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
@@ -42,6 +42,22 @@ MAX_EXPANDED_LENGTH = 480
 WATCH_DEBOUNCE_SECONDS = 0.8
 REBUILD_STATE_VERSION = 1
 REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS = 0.25
+SENSITIVE_PLACEHOLDER = '[被RAG过滤/Filtered by RAG]'
+LOGSEQ_HIDDEN_PROPERTIES = {'id', 'collapsed'}
+LABELED_SECRET_PATTERNS = [
+    re.compile(r'(?i)(?P<label>密码|password|passwd|pwd)(?P<sep>\s*[:：=]\s*)(?P<secret>[^\s`]+)'),
+    re.compile(r'(?i)(?P<label>api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|private[_ -]?key|secret|token|2fa|otp|私钥|密钥|令牌)(?P<sep>\s*[:：=]\s*)(?P<secret>[^\s`]+)'),
+]
+RAW_SECRET_PATTERNS = [
+    re.compile(r'\bsk-[A-Za-z0-9_-]{8,}\b'),
+    re.compile(r'\bAIza[0-9A-Za-z_-]{20,}\b'),
+    re.compile(r'(?i)\bbearer\s+[A-Za-z0-9._-]{10,}\b'),
+]
+EXTENDED_REDACTION_PATTERNS = [
+    re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'),
+    re.compile(r'(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)'),
+    re.compile(r'(?<!\d)\d{17}[\dXx](?!\d)'),
+]
 
 
 class OmniClipService:
@@ -320,74 +336,118 @@ class OmniClipService:
         copy_result: bool = False,
         score_threshold: float | None = None,
     ) -> tuple[list[SearchHit], str]:
-        limit = limit or self.config.query_limit
-        candidate_limit = max(limit * 8, 24)
-        storage_candidates = self.store.search_candidates(query_text, candidate_limit)
-        vector_candidates = {item.chunk_id: item.score for item in self.vector_index.search(query_text, self.config.vector_candidate_limit)}
+        limit = max(int(limit or self.config.query_limit or 0), 1)
+        candidate_limit = _candidate_limit_for_query(query_text, limit)
+        page_block_patterns = _compile_page_blocklist_patterns(getattr(self.config, 'page_blocklist_rules', ''))
+        storage_candidates = _filter_candidate_rows_by_page_blocklist(self.store.search_candidates(query_text, candidate_limit), page_block_patterns)
+        vector_candidates = {}
+        if _should_use_vector_search(query_text):
+            vector_candidates = {item.chunk_id: item.score for item in self.vector_index.search(query_text, max(self.config.vector_candidate_limit, candidate_limit))}
+        candidate_rows = _filter_candidate_rows_by_page_blocklist(self._merge_candidate_rows(storage_candidates, vector_candidates), page_block_patterns)
 
-        if storage_candidates:
-            hits = self._rank_candidates(query_text, storage_candidates, vector_candidates)
+        if candidate_rows:
+            hits = self._rank_candidates(query_text, candidate_rows, vector_candidates)
         else:
-            rows = self.store.fetch_all_rendered_chunks()
+            rows = _filter_candidate_rows_by_page_blocklist(self.store.fetch_all_rendered_chunks(), page_block_patterns)
             hits = self._rank_candidates(query_text, rows, vector_candidates)
 
         effective_threshold = self.config.query_score_threshold if score_threshold is None else float(score_threshold or 0.0)
         filtered_hits = [hit for hit in hits if hit.score >= max(effective_threshold, 0.0)]
-        sliced_hits = filtered_hits[:limit]
-        context_pack = self.compose_context_pack_text(query_text, sliced_hits)
+        finalized_hits = self._finalize_query_hits(query_text, filtered_hits, limit)
+        context_pack = self.compose_context_pack_text(query_text, finalized_hits)
         if copy_result:
             copy_text(context_pack)
         export_name = f"context_{int(time.time())}.md"
         (self.paths.exports_dir / export_name).write_text(context_pack, encoding='utf-8')
-        return sliced_hits, context_pack
+        return finalized_hits, context_pack
+
+    def _merge_candidate_rows(self, storage_candidates, vector_candidates: dict[str, float]):
+        candidate_map = {row['chunk_id']: row for row in storage_candidates}
+        missing_vector_ids = [chunk_id for chunk_id in vector_candidates if chunk_id not in candidate_map]
+        if missing_vector_ids:
+            for row in self.store.fetch_rows_by_chunk_ids(missing_vector_ids):
+                candidate_map[row['chunk_id']] = row
+        return list(candidate_map.values())
+
+    def _hydrate_display_hits(self, query_text: str, hits: list[SearchHit]) -> None:
+        if not hits:
+            return
+        block_lookup = self.store.fetch_block_lookup()
+        chunk_lookup = self.store.fetch_chunk_lookup()
+        file_cache: dict[str, list[str]] = {}
+        for hit in hits:
+            row = chunk_lookup.get(hit.chunk_id)
+            display_text = ''
+            if row is not None:
+                display_text = _build_display_text(self.config.vault_dir, row, block_lookup, chunk_lookup, file_cache, self.config)
+            hit.display_text = display_text.strip() or _apply_output_redaction(_normalize_markup(hit.rendered_text), self.config)
+            hit.preview_text = _build_preview_text(query_text, hit.display_text or hit.rendered_text)
+
+    def _finalize_query_hits(self, query_text: str, hits: list[SearchHit], limit: int) -> list[SearchHit]:
+        if not hits or limit <= 0:
+            return []
+        hydrated_pool: list[SearchHit] = []
+        step = _hydration_pool_size(query_text, limit)
+        offset = 0
+        selected: list[SearchHit] = []
+        while offset < len(hits):
+            batch = hits[offset: offset + step]
+            self._hydrate_display_hits(query_text, batch)
+            hydrated_pool.extend(batch)
+            selected = _select_query_hits(hydrated_pool, limit)
+            offset += len(batch)
+            if len(selected) >= limit or offset >= len(hits):
+                break
+        return selected[:limit]
 
     @staticmethod
     def compose_context_pack_text(query_text: str, hits: list[SearchHit]) -> str:
-        pages: list[str] = []
-        seen_pages: set[str] = set()
+        lines = ['# RAG结果']
+        if query_text.strip():
+            lines.extend(['', f'搜索词：{query_text.strip()}'])
+
+        if not hits:
+            lines.extend(['', '未找到足够相关的笔记片段。'])
+            return '\n'.join(lines).strip() + '\n'
+
+        grouped: dict[tuple[str, str], list[SearchHit]] = {}
         for hit in hits:
-            if hit.title in seen_pages:
-                continue
-            seen_pages.add(hit.title)
-            pages.append(hit.title)
-        lines = [
-            '# OmniClip Context Pack',
-            '',
-            f'User question / 用户问题: {query_text}',
-            '',
-            '## Relevant pages / 相关页面',
-        ]
-        if pages:
-            for index, page in enumerate(pages, start=1):
-                lines.append(f'{index}. {page}')
-        else:
-            lines.append('1. 当前未命中高置信内容 / No high-confidence hit yet')
-        lines.extend(['', '## Selected evidence / 已选片段'])
-        if hits:
-            for index, hit in enumerate(hits, start=1):
-                lines.append(f'### {index}. {hit.title}')
-                lines.append(f'- Relevance / 相关性：{hit.score:.1f}/100')
-                if hit.reason:
-                    lines.append(f'- Why / 命中原因：{hit.reason}')
-                lines.append(f'- Source / 来源：{hit.source_path}')
-                lines.append(f'- Semantic path / 语义路径：{hit.anchor}')
-                if hit.preview_text:
-                    lines.append(f'- Preview / 节选：{hit.preview_text}')
-                lines.append('- Full chunk / 完整片段：')
-                lines.append(hit.rendered_text)
+            key = (hit.title, hit.source_path)
+            grouped.setdefault(key, []).append(hit)
+
+        total_groups = len(grouped)
+        for page_index, ((title, _source_path), page_hits) in enumerate(grouped.items()):
+            lines.extend(['', f'# 笔记名：{title}'])
+            selected_fragments: list[str] = []
+            for hit in page_hits:
+                fragment = (hit.display_text or hit.rendered_text).strip()
+                if not fragment or fragment in {'-', '- '}:
+                    continue
+                skip_fragment = False
+                for index, existing in enumerate(selected_fragments):
+                    if fragment == existing or fragment in existing:
+                        skip_fragment = True
+                        break
+                    if existing in fragment:
+                        selected_fragments[index] = fragment
+                        skip_fragment = True
+                        break
+                if not skip_fragment:
+                    selected_fragments.append(fragment)
+
+            deduped_fragments: list[str] = []
+            for fragment in selected_fragments:
+                if any(fragment != other and _fragment_is_covered(fragment, other) for other in selected_fragments):
+                    continue
+                deduped_fragments.append(fragment)
+
+            for fragment_index, fragment in enumerate(deduped_fragments, start=1):
+                lines.append(f'笔记片段{fragment_index}：')
+                lines.append(fragment)
                 lines.append('')
-        else:
-            lines.append('- 没有找到足够相关的内容 / Not enough relevant content was found.')
-            lines.append('')
-        lines.extend(
-            [
-                '## Usage protocol / 使用协议',
-                '[系统级防幻觉与逆向检索指令]',
-                '你只能基于以上本地笔记片段回答，不能虚构我未提供的本地概念。',
-                '如果上下文不足，你必须停止发散，并明确输出：',
-                '【本地上下文不足：请在 OmniClip 中检索关键词："关键词1", "关键词2"】',
-            ]
-        )
+            if page_index < total_groups - 1:
+                lines.extend(['---', ''])
+
         return '\n'.join(lines).strip() + '\n'
 
     def compose_context_pack(self, query_text: str, hits: list[SearchHit]) -> str:
@@ -507,6 +567,8 @@ class OmniClipService:
             if len(_tokenize_query(query_text)) > 1 and coverage < 0.45:
                 raw_score -= 12.0
             score = _normalize_score(raw_score)
+            if lexical <= 0 and fts_score <= 0 and like_score <= 0 and vector_candidates.get(row['chunk_id'], 0.0) > 0:
+                score = max(score, _semantic_only_score(vector_candidates.get(row['chunk_id'], 0.0)))
             if score <= 0:
                 continue
             hits.append(
@@ -517,6 +579,7 @@ class OmniClipService:
                     source_path=row['source_path'],
                     rendered_text=row['rendered_text'],
                     chunk_id=row['chunk_id'],
+                    display_text='',
                     preview_text=_build_preview_text(query_text, row['rendered_text']),
                     reason=_build_hit_reason(
                         query_text,
@@ -811,7 +874,6 @@ class _VaultEventHandler(FileSystemEventHandler):
 
 
 def _render_row(row, block_lookup) -> str:
-    page_properties = json.loads(row['page_properties_json'] or '{}')
     chunk_properties = json.loads(row['properties_json'] or '{}')
     raw_text = row['raw_text'] or ''
     block_id = row['block_id']
@@ -820,12 +882,10 @@ def _render_row(row, block_lookup) -> str:
     expanded = _normalize_markup(expanded)
 
     sections = [row['title']]
-    if page_properties:
-        sections.append('页面属性: ' + _format_properties(page_properties))
     if row['anchor'] and row['anchor'] != row['title']:
-        sections.append('语义路径: ' + row['anchor'])
+        sections.append(row['anchor'])
     if chunk_properties:
-        sections.append('块属性: ' + _format_properties(chunk_properties))
+        sections.append(_format_properties(chunk_properties))
     if expanded:
         sections.append(expanded)
     return '\n'.join(section.strip() for section in sections if section and section.strip())
@@ -985,6 +1045,173 @@ def _is_short_query(query_text: str) -> bool:
     return len(terms) <= 1 and len(stripped) <= 4
 
 
+def _should_use_vector_search(query_text: str) -> bool:
+    stripped = query_text.strip()
+    if not stripped:
+        return False
+    if len(stripped) <= 1:
+        return False
+    return True
+
+
+def _candidate_limit_for_query(query_text: str, limit: int) -> int:
+    base = max(int(limit or 0), 1)
+    stripped = query_text.strip()
+    if not stripped:
+        return max(base * 8, 64)
+    if len(stripped) <= 1:
+        return max(base * 24, 240)
+    if _is_short_query(query_text):
+        return max(base * 16, 160)
+    return max(base * 10, 96)
+
+
+def _hydration_pool_size(query_text: str, limit: int) -> int:
+    base = max(int(limit or 0), 1)
+    stripped = query_text.strip()
+    if len(stripped) <= 1:
+        return max(base * 8, 48)
+    if _is_short_query(query_text):
+        return max(base * 6, 36)
+    return max(base * 4, 24)
+
+
+def _compile_page_blocklist_patterns(raw_rules: str) -> list[re.Pattern[str]]:
+    patterns: list[re.Pattern[str]] = []
+    for raw_line in (raw_rules or '').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        enabled = True
+        rule = line
+        if '\t' in line:
+            flag, rest = line.split('\t', 1)
+            if flag in {'0', '1'}:
+                enabled = flag == '1'
+                rule = rest.strip()
+        if not enabled or not rule:
+            continue
+        try:
+            patterns.append(re.compile(rule, re.IGNORECASE))
+        except re.error:
+            continue
+    return patterns
+
+
+def _page_matches_blocklist(title: str, source_path: str, patterns: list[re.Pattern[str]]) -> bool:
+    if not patterns:
+        return False
+    title_text = str(title or '')
+    source_text = str(source_path or '')
+    return any(pattern.search(title_text) or pattern.search(source_text) for pattern in patterns)
+
+
+def _filter_candidate_rows_by_page_blocklist(rows, patterns: list[re.Pattern[str]]):
+    if not patterns:
+        return list(rows)
+    return [row for row in rows if not _page_matches_blocklist(row['title'], row['source_path'], patterns)]
+
+
+def _normalize_fragment_key(fragment: str) -> str:
+    return '\n'.join(line.rstrip() for line in fragment.splitlines() if line.strip())
+
+
+def _anchor_parts(anchor: str) -> list[str]:
+    return [part.strip() for part in str(anchor or '').split(' > ') if part.strip()]
+
+
+def _hit_is_descendant_of(hit: SearchHit, other: SearchHit) -> bool:
+    if hit.source_path != other.source_path:
+        return False
+    hit_parts = _anchor_parts(hit.anchor)
+    other_parts = _anchor_parts(other.anchor)
+    return len(hit_parts) > len(other_parts) and hit_parts[: len(other_parts)] == other_parts
+
+
+def _dedupe_query_hits(hits: list[SearchHit]) -> list[SearchHit]:
+    deduped: list[SearchHit] = []
+    fragment_keys: set[str] = set()
+    for hit in hits:
+        fragment = (hit.display_text or hit.rendered_text).strip()
+        if not fragment or fragment in {'-', '- '}:
+            continue
+        fragment_key = _normalize_fragment_key(fragment)
+        if fragment_key and fragment_key in fragment_keys:
+            continue
+        skip_hit = False
+        replace_index = -1
+        for index, existing in enumerate(deduped):
+            existing_fragment = (existing.display_text or existing.rendered_text).strip()
+            if not existing_fragment:
+                continue
+            if existing.source_path != hit.source_path:
+                continue
+            if hit.anchor == existing.anchor:
+                skip_hit = True
+                break
+            if _fragment_is_covered(fragment, existing_fragment):
+                if _hit_is_descendant_of(hit, existing) or fragment_key == _normalize_fragment_key(existing_fragment):
+                    skip_hit = True
+                    break
+            if _fragment_is_covered(existing_fragment, fragment):
+                if _hit_is_descendant_of(existing, hit) or _normalize_fragment_key(existing_fragment) == fragment_key:
+                    replace_index = index
+                    break
+            if _hit_is_descendant_of(hit, existing):
+                skip_hit = True
+                break
+            if _hit_is_descendant_of(existing, hit):
+                replace_index = index
+                break
+        if skip_hit:
+            continue
+        if replace_index >= 0:
+            deduped[replace_index] = hit
+            fragment_keys = {
+                _normalize_fragment_key((item.display_text or item.rendered_text).strip())
+                for item in deduped
+                if (item.display_text or item.rendered_text).strip()
+            }
+            continue
+        deduped.append(hit)
+        if fragment_key:
+            fragment_keys.add(fragment_key)
+    return deduped
+
+
+def _diversify_hits(hits: list[SearchHit], limit: int) -> list[SearchHit]:
+    remaining = list(hits)
+    selected: list[SearchHit] = []
+    page_counts: dict[str, int] = {}
+    while remaining and len(selected) < limit:
+        best_index = 0
+        best_score = float('-inf')
+        for index, hit in enumerate(remaining):
+            adjusted = hit.score - page_counts.get(hit.source_path, 0) * 8.0
+            if adjusted > best_score:
+                best_index = index
+                best_score = adjusted
+        chosen = remaining.pop(best_index)
+        selected.append(chosen)
+        page_counts[chosen.source_path] = page_counts.get(chosen.source_path, 0) + 1
+    return selected
+
+
+def _select_query_hits(hits: list[SearchHit], limit: int) -> list[SearchHit]:
+    if limit <= 0:
+        return []
+    return _diversify_hits(_dedupe_query_hits(hits), limit)
+
+
+def _semantic_only_score(vector_similarity: float) -> float:
+    similarity = max(float(vector_similarity or 0.0), 0.0)
+    if similarity <= 0.0:
+        return 0.0
+    if similarity <= 0.15:
+        return min(10.0 + similarity * 12.0, 12.0)
+    return min(12.0 + (similarity - 0.15) * 60.0, 40.0)
+
+
 def _build_hit_reason(
     query_text: str,
     title: str,
@@ -1017,11 +1244,7 @@ def _build_hit_reason(
 
 
 def _preview_source_text(rendered_text: str) -> str:
-    lines = [line.strip() for line in rendered_text.splitlines() if line.strip()]
-    filtered = [line for line in lines if not line.startswith('页面属性:') and not line.startswith('块属性:')]
-    if len(filtered) > 1:
-        filtered = filtered[1:]
-    return ' '.join(filtered) if filtered else re.sub(r'\s+', ' ', rendered_text).strip()
+    return ' '.join(line.strip() for line in rendered_text.splitlines() if line.strip())
 
 
 def _build_preview_text(query_text: str, rendered_text: str, limit: int = 220) -> str:
@@ -1040,6 +1263,280 @@ def _build_preview_text(query_text: str, rendered_text: str, limit: int = 220) -
     if end < len(source):
         snippet = snippet.rstrip() + '…'
     return snippet
+
+
+def _build_display_text(vault_dir: Path, row, block_lookup, chunk_lookup, file_cache: dict[str, list[str]], config: AppConfig) -> str:
+    if row['kind'] == 'logseq_block':
+        visited = {row['block_id']} if row['block_id'] else set()
+        lines = _build_logseq_tree_lines(vault_dir, row, block_lookup, chunk_lookup, file_cache, config, visited, include_ancestors=True)
+    elif row['kind'] == 'md_section':
+        source_lines = _load_source_range(vault_dir, row['source_path'], row['line_start'], row['line_end'], file_cache)
+        lines = _render_source_lines(vault_dir, source_lines, block_lookup, chunk_lookup, file_cache, config, set())
+    else:
+        fallback = _apply_output_redaction(_normalize_markup(row['rendered_text'] or row['title']), config).strip()
+        return fallback
+    cleaned = _trim_blank_lines(lines)
+    return '\n'.join(cleaned).strip()
+
+
+def _build_logseq_tree_lines(
+    vault_dir: Path,
+    row,
+    block_lookup,
+    chunk_lookup,
+    file_cache: dict[str, list[str]],
+    config: AppConfig,
+    visited: set[str],
+    *,
+    include_ancestors: bool,
+) -> list[str]:
+    subtree_lines = _load_source_range(vault_dir, row['source_path'], row['line_start'], row['line_end'], file_cache)
+    rendered = _render_source_lines(vault_dir, subtree_lines, block_lookup, chunk_lookup, file_cache, config, visited)
+    if not include_ancestors:
+        return rendered
+    ancestors = _collect_ancestor_lines(vault_dir, row, chunk_lookup, block_lookup, file_cache, config, visited)
+    return ancestors + rendered
+
+
+def _collect_ancestor_lines(vault_dir: Path, row, chunk_lookup, block_lookup, file_cache: dict[str, list[str]], config: AppConfig, visited: set[str]) -> list[str]:
+    parent_chunk_id = row['parent_chunk_id']
+    if parent_chunk_id:
+        chain = []
+        seen: set[str] = set()
+        current = parent_chunk_id
+        while current and current not in seen:
+            seen.add(current)
+            parent = chunk_lookup.get(current)
+            if parent is None:
+                break
+            chain.append(parent)
+            current = parent['parent_chunk_id']
+        chain.reverse()
+        lines: list[str] = []
+        for parent in chain:
+            source_line = _load_source_line(vault_dir, parent['source_path'], parent['line_start'], file_cache)
+            rendered = _render_source_lines(vault_dir, [source_line], block_lookup, chunk_lookup, file_cache, config, visited)
+            if rendered:
+                lines.append(rendered[0])
+        return lines
+
+    parts = [part.strip() for part in str(row['anchor'] or '').split(' > ') if part.strip()]
+    return [f"{'  ' * index}- {part}" for index, part in enumerate(parts[:-1])]
+
+
+def _render_source_lines(
+    vault_dir: Path,
+    lines: list[str],
+    block_lookup,
+    chunk_lookup,
+    file_cache: dict[str, list[str]],
+    config: AppConfig,
+    visited: set[str],
+) -> list[str]:
+    rendered: list[str] = []
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if not line.strip():
+            rendered.append('')
+            continue
+
+        expanded = line.expandtabs(4)
+        property_match = PROPERTY_RE.match(expanded)
+        if property_match and _should_skip_property(property_match.group('key').strip()):
+            continue
+
+        bullet_match = BULLET_RE.match(expanded)
+        if bullet_match:
+            indent = bullet_match.group('indent')
+            value = bullet_match.group('value').strip()
+            embed_target = _match_embed_only(value)
+            if embed_target:
+                embed_lines = _render_embedded_block(vault_dir, embed_target, block_lookup, chunk_lookup, file_cache, config, visited)
+                if embed_lines:
+                    rendered.extend(_indent_lines(_normalize_indentation(embed_lines), len(indent)))
+                continue
+            block_target = _match_block_ref_only(value)
+            if block_target:
+                replacement = _resolve_block_ref_inline(vault_dir, block_target, block_lookup, chunk_lookup, file_cache, config, visited)
+                rendered.append(f"{indent}- {replacement}".rstrip())
+                continue
+            processed_value = _replace_inline_refs(vault_dir, value, block_lookup, chunk_lookup, file_cache, config, visited)
+            rendered.append(f"{indent}- {_apply_output_redaction(processed_value, config)}".rstrip())
+            continue
+
+        if property_match:
+            indent = property_match.group('indent')
+            key = property_match.group('key').strip()
+            value = property_match.group('value').strip()
+            processed_value = _replace_inline_refs(vault_dir, value, block_lookup, chunk_lookup, file_cache, config, visited)
+            rendered.append(f"{indent}{key}:: {_apply_output_redaction(processed_value, config)}".rstrip())
+            continue
+
+        embed_target = _match_embed_only(line.strip())
+        if embed_target:
+            rendered.extend(_render_embedded_block(vault_dir, embed_target, block_lookup, chunk_lookup, file_cache, config, visited))
+            continue
+
+        processed_line = _replace_inline_refs(vault_dir, line, block_lookup, chunk_lookup, file_cache, config, visited)
+        rendered.append(_apply_output_redaction(processed_line, config).rstrip())
+
+    return _trim_blank_lines(rendered)
+
+
+def _render_embedded_block(vault_dir: Path, block_id: str, block_lookup, chunk_lookup, file_cache: dict[str, list[str]], config: AppConfig, visited: set[str]) -> list[str]:
+    if block_id in visited:
+        return [f'- [循环引用]']
+    target = block_lookup.get(block_id)
+    if target is None:
+        return [f'- [缺失引用]']
+    next_visited = set(visited)
+    next_visited.add(block_id)
+    return _build_logseq_tree_lines(vault_dir, target, block_lookup, chunk_lookup, file_cache, config, next_visited, include_ancestors=True)
+
+
+def _replace_inline_refs(vault_dir: Path, text: str, block_lookup, chunk_lookup, file_cache: dict[str, list[str]], config: AppConfig, visited: set[str]) -> str:
+    replaced = PAGE_REF_RE.sub(r'\1', text)
+    replaced = EMBED_RE.sub(lambda match: _resolve_block_ref_inline(vault_dir, match.group(1), block_lookup, chunk_lookup, file_cache, config, visited), replaced)
+    replaced = BLOCK_REF_RE.sub(lambda match: _resolve_block_ref_inline(vault_dir, match.group(1), block_lookup, chunk_lookup, file_cache, config, visited), replaced)
+    return replaced
+
+
+def _resolve_block_ref_inline(vault_dir: Path, block_id: str, block_lookup, chunk_lookup, file_cache: dict[str, list[str]], config: AppConfig, visited: set[str]) -> str:
+    if block_id in visited:
+        return '[循环引用]'
+    target = block_lookup.get(block_id)
+    if target is None:
+        return '[缺失引用]'
+    next_visited = set(visited)
+    next_visited.add(block_id)
+    source_line = _load_source_line(vault_dir, target['source_path'], target['line_start'], file_cache)
+    expanded = source_line.expandtabs(4)
+    bullet_match = BULLET_RE.match(expanded)
+    property_match = PROPERTY_RE.match(expanded)
+    if bullet_match:
+        candidate = bullet_match.group('value').strip()
+    elif property_match:
+        candidate = property_match.group('value').strip()
+    else:
+        candidate = source_line.strip()
+    candidate = PAGE_REF_RE.sub(r'\1', candidate)
+    candidate = EMBED_RE.sub(lambda match: _resolve_block_ref_inline(vault_dir, match.group(1), block_lookup, chunk_lookup, file_cache, config, next_visited), candidate)
+    candidate = BLOCK_REF_RE.sub(lambda match: _resolve_block_ref_inline(vault_dir, match.group(1), block_lookup, chunk_lookup, file_cache, config, next_visited), candidate)
+    return _apply_output_redaction(candidate, config).strip() or _normalize_markup(target['anchor'] or target['title'])
+
+
+def _match_embed_only(text: str) -> str | None:
+    match = EMBED_RE.fullmatch(text.strip())
+    return match.group(1) if match else None
+
+
+def _match_block_ref_only(text: str) -> str | None:
+    match = BLOCK_REF_RE.fullmatch(text.strip())
+    return match.group(1) if match else None
+
+
+def _should_skip_property(key: str) -> bool:
+    return key.strip().lower() in LOGSEQ_HIDDEN_PROPERTIES
+
+
+def _load_source_lines(vault_dir: Path, source_path: str, file_cache: dict[str, list[str]]) -> list[str]:
+    cached = file_cache.get(source_path)
+    if cached is not None:
+        return cached
+    absolute_path = (vault_dir / source_path).resolve()
+    try:
+        lines = absolute_path.read_text(encoding='utf-8', errors='ignore').splitlines()
+    except OSError:
+        lines = []
+    file_cache[source_path] = lines
+    return lines
+
+
+def _load_source_line(vault_dir: Path, source_path: str, line_number: int, file_cache: dict[str, list[str]]) -> str:
+    lines = _load_source_lines(vault_dir, source_path, file_cache)
+    index = max(line_number - 1, 0)
+    if index >= len(lines):
+        return ''
+    return lines[index]
+
+
+def _load_source_range(vault_dir: Path, source_path: str, line_start: int, line_end: int, file_cache: dict[str, list[str]]) -> list[str]:
+    lines = _load_source_lines(vault_dir, source_path, file_cache)
+    start = max(line_start - 1, 0)
+    end = max(line_end, line_start)
+    return lines[start:end]
+
+
+def _normalize_indentation(lines: list[str]) -> list[str]:
+    expanded = [line.expandtabs(4).rstrip() for line in lines]
+    indents = [len(line) - len(line.lstrip(' ')) for line in expanded if line.strip()]
+    if not indents:
+        return expanded
+    base_indent = min(indents)
+    normalized: list[str] = []
+    for line in expanded:
+        if not line.strip():
+            normalized.append('')
+            continue
+        normalized.append(line[base_indent:])
+    return normalized
+
+
+def _indent_lines(lines: list[str], indent: int) -> list[str]:
+    prefix = ' ' * max(indent, 0)
+    return [f'{prefix}{line}' if line else '' for line in lines]
+
+
+def _trim_blank_lines(lines: list[str]) -> list[str]:
+    trimmed = list(lines)
+    while trimmed and not trimmed[0].strip():
+        trimmed.pop(0)
+    while trimmed and not trimmed[-1].strip():
+        trimmed.pop()
+    return trimmed
+
+
+def _apply_output_redaction(text: str, config: AppConfig) -> str:
+    redacted = text
+    if getattr(config, 'rag_filter_core_enabled', True):
+        for pattern in LABELED_SECRET_PATTERNS:
+            redacted = pattern.sub(lambda match: f"{match.group('label')}{match.group('sep')}{SENSITIVE_PLACEHOLDER}", redacted)
+        for pattern in RAW_SECRET_PATTERNS:
+            redacted = pattern.sub(SENSITIVE_PLACEHOLDER, redacted)
+    if getattr(config, 'rag_filter_extended_enabled', False):
+        for pattern in EXTENDED_REDACTION_PATTERNS:
+            redacted = pattern.sub(SENSITIVE_PLACEHOLDER, redacted)
+    custom_rules = getattr(config, 'rag_filter_custom_rules', '') or ''
+    for raw_rule in re.split(r'[\n,]+', custom_rules):
+        rule = raw_rule.strip()
+        if not rule:
+            continue
+        if len(rule) >= 2 and rule.startswith('/') and rule.endswith('/'):
+            try:
+                redacted = re.sub(rule[1:-1], SENSITIVE_PLACEHOLDER, redacted)
+            except re.error:
+                continue
+            continue
+        redacted = redacted.replace(rule, SENSITIVE_PLACEHOLDER)
+    return redacted
+
+
+def _fragment_is_covered(fragment: str, other: str) -> bool:
+    fragment_lines = [line.rstrip() for line in fragment.splitlines() if line.strip()]
+    other_lines = [line.rstrip() for line in other.splitlines() if line.strip()]
+    if not fragment_lines or len(fragment_lines) > len(other_lines):
+        return False
+    start = 0
+    for line in fragment_lines:
+        matched = False
+        for index in range(start, len(other_lines)):
+            if other_lines[index] == line:
+                start = index + 1
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
 
 
 def _diff_snapshot(previous: dict[str, tuple[float, int]], current: dict[str, tuple[float, int]]) -> tuple[list[str], list[str]]:

@@ -27,6 +27,8 @@ dist_smoke/
 /exports/
 /config.json
 local_appdata/
+/shared/
+/workspaces/
 *.sqlite3
 *.db
 *.db-wal

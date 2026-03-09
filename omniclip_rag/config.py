@@ -45,7 +45,7 @@ class AppConfig:
             "__pycache__",
         ]
     )
-    query_limit: int = 8
+    query_limit: int = 15
     query_score_threshold: float = 0.0
     poll_interval_seconds: float = 2.0
     vector_backend: str = "disabled"
@@ -55,12 +55,16 @@ class AppConfig:
     vector_runtime: str = "torch"
     vector_batch_size: int = 16
     vector_local_files_only: bool = False
+    rag_filter_core_enabled: bool = True
+    rag_filter_extended_enabled: bool = False
+    rag_filter_custom_rules: str = ""
+    page_blocklist_rules: str = ""
     ui_language: str = field(default_factory=detect_system_language)
-    ui_quick_start_expanded: bool = False
+    ui_quick_start_expanded: bool = True
     ui_window_geometry: str = ''
-    ui_main_sash: int = 500
-    ui_right_sash: int = 180
-    ui_results_sash: int = 230
+    ui_main_sash: int = 900
+    ui_right_sash: int = 280
+    ui_results_sash: int = 300
 
     @property
     def vault_dir(self) -> Path:
@@ -107,7 +111,6 @@ def ensure_data_paths(custom_root: str | None = None, vault_path: str | Path | N
     local_appdata = os.environ.get("LOCALAPPDATA")
     if local_appdata:
         candidates.append(Path(local_appdata) / APP_NAME)
-    candidates.append(Path.cwd() / "local_appdata")
 
     last_error: OSError | None = None
     seen: set[str] = set()

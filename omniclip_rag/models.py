@@ -10,12 +10,14 @@ class ChunkRecord:
     source_path: str
     kind: str
     block_id: str | None
+    parent_chunk_id: str | None
     title: str
     anchor: str
     raw_text: str
     properties: dict[str, str] = field(default_factory=dict)
     refs: list[tuple[str, str]] = field(default_factory=list)
     position: int = 0
+    depth: int = 0
     line_start: int = 1
     line_end: int = 1
 
@@ -42,6 +44,7 @@ class SearchHit:
     source_path: str
     rendered_text: str
     chunk_id: str
+    display_text: str = ""
     preview_text: str = ""
     reason: str = ""
 

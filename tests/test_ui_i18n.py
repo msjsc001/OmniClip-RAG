@@ -1,7 +1,7 @@
 import unittest
 
 from omniclip_rag.config import AppConfig
-from omniclip_rag.ui_i18n import language_code_from_label, language_label, normalize_language, text
+from omniclip_rag.ui_i18n import language_code_from_label, language_label, normalize_language, text, tooltip
 
 
 class UiI18nTests(unittest.TestCase):
@@ -20,6 +20,15 @@ class UiI18nTests(unittest.TestCase):
     def test_app_config_has_ui_language_default(self) -> None:
         config = AppConfig(vault_path='.', data_root='.')
         self.assertIn(config.ui_language, {'zh-CN', 'en'})
+
+    def test_page_filter_texts_exist(self) -> None:
+        self.assertEqual(text('zh-CN', 'page_blocklist_button'), '过滤页面标题')
+        self.assertEqual(text('en', 'page_blocklist_button'), 'Filter page titles')
+        self.assertEqual(text('zh-CN', 'help_updates'), '帮助与更新')
+        self.assertIn('{enabled}/{total}', text('zh-CN', 'page_blocklist_summary'))
+        self.assertEqual(text('zh-CN', 'main_tab_query'), '查询')
+        self.assertEqual(text('en', 'main_tab_config'), 'Config')
+        self.assertIn('单字查询', tooltip('zh-CN', 'query'))
 
 
 if __name__ == '__main__':

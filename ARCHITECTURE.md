@@ -1,8 +1,8 @@
 # Architecture Notes
 
-## Release Boundary For V0.1.6
+## Release Boundary For V0.1.7
 
-`V0.1.6` is not trying to ship a giant all-in-one AI platform.
+`V0.1.7` is not trying to ship a giant all-in-one AI platform.
 
 Its delivery goal is narrower and much more deliberate:
 
@@ -91,11 +91,11 @@ The GUI-required watch contract now includes:
 
 Why: a desktop app must let the user manage background listeners safely and explicitly.
 
-### 6. User data defaults to `%APPDATA%`, but the app must recover when that path is blocked
+### 6. User data must stay out of the program directory
 
-The app still prefers `%APPDATA%\OmniClip RAG`, but now falls back to a writable directory automatically when needed.
+The app prefers `%APPDATA%\OmniClip RAG` and only falls back to `%LOCALAPPDATA%\OmniClip RAG` when needed. It must not write user data, indexes, logs, or exports into the program directory or repository working tree.
 
-Why: the storage convention is correct, but the product cannot assume every runtime environment has working permissions there.
+Why: the storage convention is correct, and it also prevents personal data, test indexes, or exported context packs from leaking into source-controlled paths.
 
 ### 7. Hugging Face state is fully localized
 
@@ -140,7 +140,7 @@ Current validation includes:
 - successful GUI startup and shutdown,
 - successful Windows EXE packaging.
 
-## Intentional Tradeoffs In V0.1.6
+## Intentional Tradeoffs In V0.1.7
 
 ### 1. `torch` is the stable default runtime
 
@@ -178,11 +178,15 @@ Current UX rules:
 
 - the first screen must explain the first three actions in plain language,
 - recommended defaults must already be filled in,
-- advanced options must stay hidden until explicitly expanded,
+- first-run critical controls should be visible without requiring the user to hunt through collapsed sections,
+- the desktop shell should expose only two top-level tabs: Query for retrieval work and Config for start/settings/data flows,
 - missing prerequisites such as local models must surface as clear prompts instead of silent stalls,
 - model-download prompts must also provide a manual mirror fallback and the exact local directory for users who need to download files themselves,
 - hover tooltips must explain settings and buttons without forcing the user to open external docs,
-- the left-side workspace area must stay usable on common horizontal displays by using tabbed sections and per-tab scrolling instead of one long stacked form,
+- the configuration side should stay tabbed and scrollable inside the Config tab, while the Query tab keeps the dominant workspace for search, sorting, details, filtering, and full-context review,
+- page-title filtering and sensitive-content redaction belong to the Query workspace because users need to judge and tune them while looking at live hits, not buried in configuration pages,
+- every large text panel should support in-place find so users can inspect long snippet, context, and log outputs without launching a second search,
+- the full-context view should expose quick page-level jump and counts so large context packs stay navigable after export shaping,
 - switching the UI language must also relocalize live status summaries, preflight text, and other runtime labels instead of only translating static widgets.
 
 Why: a local-first desktop tool fails its job if the user has to reverse-engineer the interface before they can trust it.
@@ -414,3 +418,26 @@ Current acceleration-reporting rule:
 
 Why: users reasonably assume “nvcc works” means the app should already use the GPU. The product must explain the missing app-local runtime boundary explicitly.
 
+## 2026-03-09 RAG Output Contract Refresh
+
+### Decisions
+- Retrieval remains chunk-first, but clipboard export is now source-faithful evidence, not the internal search text.
+- Query ranking now merges lexical candidates and vector-only candidates before scoring, so semantic hits are no longer dropped whenever FTS/LIKE produced any result.
+- Context packs group by note title and emit `笔记片段A/B/...` blocks with the original Markdown shape preserved as much as possible.
+- Logseq block refs `((uuid))` are resolved to readable text; embeds `{{embed ((uuid))}}` replay the embedded block tree with its source ancestry and children instead of leaking UUIDs.
+- The fixed tail prompt/protocol was removed from the default export path. Retrieval data and prompt templates are now separate concerns.
+- Clipboard export applies configurable redaction before output. Core secret redaction is enabled by default; extended privacy redaction and custom rules are opt-in.
+
+### Why
+- Whole-page export caused lost-in-the-middle failures, token waste, and accidental leakage of unrelated secrets.
+- The previous pipeline embedded and ranked one representation, then exported a different and much noisier representation, which made the product feel worse than plain keyword search.
+- Users trust the tool when the exported snippet visibly matches the source note they remember writing.
+
+### Implementation Notes
+- `parser.py` now persists parent chunk linkage and subtree line ranges so the service can replay original Markdown from disk.
+- `service.py` still builds normalized `rendered_text` for FTS/vector search, but query hydration now reopens the source file and renders `display_text` for export/preview.
+- Preview panes should show the same `display_text` that the clipboard receives, with `rendered_text` reserved for ranking/index internals.
+- Bullet-heavy Markdown files without `id:: UUID` should still be treated as outline notes when their structure is predominantly list-based; otherwise whole-page fallback destroys RAG precision.
+- Single-character queries should bias toward lexical retrieval and skip vector recall, because semantic embeddings at that length create more noise than value.
+- The visible `0-100` relevance score is an engineered fusion score, not a probability. It combines lexical/title/path/body hits, FTS rank, LIKE hits, vector similarity, and length/coverage penalties.
+- Page-filter rules are persisted as enabled/disabled regex entries so noisy page patterns can be saved once, toggled later, and still stay out of query results, snippet details, and full-context export when enabled.

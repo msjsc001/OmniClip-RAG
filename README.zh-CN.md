@@ -1,6 +1,6 @@
 # 方寸引 / OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.6-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.7-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#首次使用建议)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#核心定位)
@@ -37,13 +37,14 @@
 - 可控暴露面
 - 不把整库直接交给 AI
 
-## V0.1.6 重点更新
+## V0.1.7 重点更新
 
-这一轮继续保持轻量发布包路线，同时把打包版运行时链路补齐：
+这一轮把方寸引进一步收紧成“证据块优先”的本地检索层：
 
-- 修复了 `InstallRuntime.ps1` 的依赖安装顺序，避免先装好的 CUDA 版 `torch` 又被后续依赖覆盖成 CPU 版。
-- 补上了打包版运行时引导元数据和启动时的路径恢复，让 EXE 更稳定地识别外部 `runtime/`。
-- 构建脚本现在会保留本地 `runtime/` 目录，并在文档里进一步明确：GitHub 源码推送仍然不会提交大型运行时或构建产物。
+- 上下文导出不再走整页灌输，而是按“笔记名 + 编号片段”输出，尽量保持原始 Markdown 结构。
+- 补上了 `((UUID))`、`{{embed}}` 的可读文本还原，以及可配置的敏感内容脱敏；命中后统一显示为 `[被RAG过滤/Filtered by RAG]`。
+- 检索侧改成词法候选与语义候选先合并再统一打分，并对单字短查询默认禁用向量召回，减少日志类噪声。
+- UI 重新整理为“查询 / 配置”两大页签，补上结果排序、页面标题过滤、文本内查找、完整上下文跳转统计和重建确认。
 
 ## 当前能力
 
@@ -56,6 +57,8 @@
 - 空间与时间预检查：在真正建库前先估算磁盘占用和首轮耗时
 - 全量建库可恢复、可暂停
 - 上下文包导出：给任意 AI 使用
+- 单字短查询保护：像 `鞋` 这种单字检索默认只走关键词索引，不让向量语义把日志噪声提前捞上来
+- 相关性分数：展示为 `0-100` 的工程分，综合标题/路径/正文命中、FTS、LIKE、语义相似以及去噪惩罚
 
 ## 架构一览
 
@@ -75,23 +78,20 @@ flowchart LR
 桌面版：
 
 ```powershell
-.\scripts
-un_gui.ps1
+.\scripts\run_gui.ps1
 ```
 
 打包 EXE：
 
 ```powershell
-.\scriptsuild_exe.ps1
+.\scripts\build_exe.ps1
 ```
 
 CLI 仍然保留，用于调试和自动化：
 
 ```powershell
-.\scripts
-un.ps1 status
-.\scripts
-un.ps1 query "你的问题"
+.\scripts\run.ps1 status
+.\scripts\run.ps1 query "你的问题"
 ```
 
 ## 首次使用建议
@@ -107,7 +107,7 @@ un.ps1 query "你的问题"
 ## 数据目录
 
 默认数据目录位于 `%APPDATA%\OmniClip RAG`。
-如果当前环境对这个目录没有写权限，程序会自动回退到可写目录，避免直接启动失败。
+如果这个目录不可写，程序只会继续尝试 `%LOCALAPPDATA%\OmniClip RAG`，不会再回退到程序目录或当前工作目录，避免把个人数据、测试索引或导出结果混进 Git 仓库。
 
 当前目录结构：
 
@@ -144,7 +144,7 @@ OmniClip RAG/
 
 ## 当前版本说明
 
-- 版本：`V0.1.6`
+- 版本：`V0.1.7`
 - 主交付形态：桌面 GUI
 - 当前稳定主线：`torch + bge-m3`
 
@@ -187,6 +187,7 @@ tests/
 - [更新日志](CHANGELOG.md)
 - [空间预检说明](STORAGE_PRECHECK.md)
 - [运行时安装说明](RUNTIME_SETUP.md)
+- [v0.1.7 发布说明](releases/RELEASE_NOTES_v0.1.7.md)
 - [v0.1.6 发布说明](releases/RELEASE_NOTES_v0.1.6.md)
 - [v0.1.4 发布说明](releases/RELEASE_NOTES_v0.1.4.md)
 - [v0.1.3 发布说明](releases/RELEASE_NOTES_v0.1.3.md)

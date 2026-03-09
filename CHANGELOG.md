@@ -1,5 +1,28 @@
-
 # Changelog
+
+## V0.1.7 - 2026-03-09
+
+### Added
+
+- Added [RELEASE_NOTES_v0.1.7](releases/RELEASE_NOTES_v0.1.7.md) for the chunk-first retrieval and desktop workflow refresh.
+- Added source-faithful context export that groups results by note title and emits numbered Markdown snippets instead of whole-page dumps.
+- Added configurable page-title regex filtering, sensitive-content redaction controls, per-panel text search, and page-jump statistics for full-context review.
+- Added rebuild confirmation when an existing index is already present.
+
+### Changed
+
+- Changed hybrid retrieval so lexical candidates and vector-only candidates are merged before final scoring instead of letting lexical rows suppress semantic-only recall.
+- Changed the visible relevance score into a better-calibrated `0-100` engineering score that reflects lexical hits, FTS, LIKE, vector similarity, and anti-noise penalties.
+- Changed the desktop shell to a two-tab `Query / Config` layout with sortable result columns, stronger layout persistence, and tighter header/config spacing.
+- Changed single-character query handling so one-character searches stay lexical-only by default.
+- Changed full-context export labels from `笔记片段A/B/...` to numbered fragments.
+
+### Fixed
+
+- Fixed whole-page fallback for list-heavy Markdown files so outline notes are exported as focused evidence blocks instead of noisy page dumps.
+- Fixed Logseq block refs and embeds so UUIDs are resolved back to readable text in previews and exported context.
+- Fixed exported context leakage risk by masking high-risk secrets and keeping user data out of the repository/program directory.
+- Fixed responsive helper-text wrapping so the top green guidance text no longer oscillates while the window resizes.
 
 ## V0.1.6 - 2026-03-08
 
