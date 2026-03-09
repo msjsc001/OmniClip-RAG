@@ -4,6 +4,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#首次使用建议)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#核心定位)
+[![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases)
 [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md)
 [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
