@@ -20,6 +20,12 @@
 
 > 后续时间允许的话：1. 我会考虑逐步兼容到更多非 MD 格式笔记软件的 db 库；2. 推出 API 或 MCP，让需要的 AI 自行调用会更方便。理论上，如果你把与 AI 的聊天内容或任意文本持续保存到笔记库下，它也会逐渐变成一个无限扩展的语义记忆索引库。
 
+
+<img alt="image" src="https://github.com/user-attachments/assets/9c4bd9b4-9288-4177-a475-580dc1efab0f" />
+<img alt="1773049995954" src="https://github.com/user-attachments/assets/44a5b251-2ffd-46a6-9cc0-0b429cd40eb7" />
+<img alt="image" src="https://github.com/user-attachments/assets/d75af49d-54c2-403b-ba9a-476b6f637fcb" />
+<img alt="image" src="https://github.com/user-attachments/assets/b9952b8f-4535-4d2b-843e-a23fca5c41ca" />
+
 ## 核心定位
 
 方寸引适合这样的工作流：
