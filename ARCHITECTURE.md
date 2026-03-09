@@ -1,8 +1,8 @@
 # Architecture Notes
 
-## Release Boundary For V0.1.7
+## Release Boundary For V0.1.8
 
-`V0.1.7` is not trying to ship a giant all-in-one AI platform.
+`V0.1.8` is not trying to ship a giant all-in-one AI platform.
 
 Its delivery goal is narrower and much more deliberate:
 
@@ -140,7 +140,7 @@ Current validation includes:
 - successful GUI startup and shutdown,
 - successful Windows EXE packaging.
 
-## Intentional Tradeoffs In V0.1.7
+## Intentional Tradeoffs In V0.1.8
 
 ### 1. `torch` is the stable default runtime
 
@@ -423,7 +423,7 @@ Why: users reasonably assume “nvcc works” means the app should already use t
 ### Decisions
 - Retrieval remains chunk-first, but clipboard export is now source-faithful evidence, not the internal search text.
 - Query ranking now merges lexical candidates and vector-only candidates before scoring, so semantic hits are no longer dropped whenever FTS/LIKE produced any result.
-- Context packs group by note title and emit `笔记片段A/B/...` blocks with the original Markdown shape preserved as much as possible.
+- Context packs group by note title and emit `笔记片段1/2/...` blocks with the original Markdown shape preserved as much as possible.
 - Logseq block refs `((uuid))` are resolved to readable text; embeds `{{embed ((uuid))}}` replay the embedded block tree with its source ancestry and children instead of leaking UUIDs.
 - The fixed tail prompt/protocol was removed from the default export path. Retrieval data and prompt templates are now separate concerns.
 - Clipboard export applies configurable redaction before output. Core secret redaction is enabled by default; extended privacy redaction and custom rules are opt-in.
@@ -441,3 +441,27 @@ Why: users reasonably assume “nvcc works” means the app should already use t
 - Single-character queries should bias toward lexical retrieval and skip vector recall, because semantic embeddings at that length create more noise than value.
 - The visible `0-100` relevance score is an engineered fusion score, not a probability. It combines lexical/title/path/body hits, FTS rank, LIKE hits, vector similarity, and length/coverage penalties.
 - Page-filter rules are persisted as enabled/disabled regex entries so noisy page patterns can be saved once, toggled later, and still stay out of query results, snippet details, and full-context export when enabled.
+
+## 2026-03-09 Hot Watch Hardening
+
+### Decisions
+- Incremental reindex is no longer allowed to delete old SQLite rows before the changed file has been parsed successfully.
+- Watch mode now treats filesystem events as hints only; the real source of truth is `current vault snapshot` vs `indexed manifest` diffing.
+- Changed files must pass a stability window before reindex; missing files must pass a delete-confirmation window before they are removed from the index.
+- When the vault root becomes temporarily unavailable, watch mode must enter an offline guard state and freeze destructive updates instead of interpreting the vault as empty.
+- SQLite remains authoritative during watch updates; vector writes may lag and are tracked as dirty state for later repair.
+- Watch recovery state lives in `watch_state.json` under the per-vault workspace state directory, not in the program directory.
+
+### Why
+- Editors, sync tools, and encrypted drives routinely produce short windows where a file is half-written, locked, renamed, or temporarily invisible.
+- The previous `delete first, parse later` flow could destroy still-valid index data during those transient states.
+- Power loss or process crashes during watch updates should degrade to a repairable state, not leave the user guessing whether the index is trustworthy.
+
+### Implementation Notes
+- `service.py` now parses changed files first, preserves old index rows on parse/read failure, and only swaps a file after successful parse.
+- Watch polling and watchdog paths both run through the same stability buffer so the product behavior stays consistent across backends.
+- The watch buffer tracks two clocks: a stable-write timer for changed paths and a grace timer for missing paths.
+- `watch_state.json` tracks `dirty_paths`, `dirty_vector_paths`, `dirty_vector_chunk_ids`, and whether the vault is currently offline.
+- Render refreshes and vector writes are recoverable: failed render/vector work is left marked dirty and replayed later instead of forcing an all-or-nothing crash.
+- GUI activity logs must surface vault-offline, vault-recovered, repair, and retry events so watch behavior is auditable in normal desktop use.
+

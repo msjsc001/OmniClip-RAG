@@ -6,6 +6,7 @@ import re
 import shutil
 import threading
 import time
+import tempfile
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -40,6 +41,10 @@ QUERY_TERM_RE = re.compile(r"[\w\u4e00-\u9fff-]+", re.UNICODE)
 MAX_RENDER_DEPTH = 4
 MAX_EXPANDED_LENGTH = 480
 WATCH_DEBOUNCE_SECONDS = 0.8
+WATCH_STABLE_FILE_SECONDS = 1.2
+WATCH_DELETE_CONFIRM_SECONDS = 3.0
+WATCH_REPAIR_INTERVAL_SECONDS = 20.0
+WATCH_STATE_VERSION = 1
 REBUILD_STATE_VERSION = 1
 REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS = 0.25
 SENSITIVE_PLACEHOLDER = '[被RAG过滤/Filtered by RAG]'
@@ -67,6 +72,7 @@ class OmniClipService:
         self.store = MetadataStore(paths.sqlite_file)
         self.vector_index = create_vector_index(config, paths)
         self._rebuild_state_file = self.paths.state_dir / 'rebuild_state.json'
+        self._watch_state_file = self.paths.state_dir / 'watch_state.json'
         self._build_history_file = build_history_file(self.paths.state_dir)
 
     def close(self) -> None:
@@ -289,45 +295,105 @@ class OmniClipService:
             total_seconds=max(time.time() - rebuild_started_at, 0.0),
         )
         self._clear_rebuild_state()
+        self._clear_watch_state()
         return stats
 
-    def reindex_paths(self, changed_relative_paths: list[str], deleted_relative_paths: list[str]) -> dict[str, int]:
+    def reindex_paths(self, changed_relative_paths: list[str], deleted_relative_paths: list[str]) -> dict[str, object]:
         from .parser import parse_markdown_file
 
-        impacted_paths = set(deleted_relative_paths)
-        impacted_paths.update(changed_relative_paths)
-        impacted_block_ids = self.store.get_block_ids_for_paths(impacted_paths)
-        impacted_chunk_ids = self.store.get_chunk_ids_for_paths(impacted_paths)
-        dependent_paths = self.store.get_transitive_dependent_paths(impacted_block_ids)
-
-        if impacted_paths:
-            self.store.delete_files(impacted_paths)
-        if impacted_chunk_ids:
-            self.vector_index.delete(impacted_chunk_ids)
-
-        new_block_ids: set[str] = set()
-        readable_changed_paths: list[str] = []
-        duplicate_block_ids = 0
-        for relative_path in changed_relative_paths:
+        changed_paths = sorted({item for item in changed_relative_paths if item})
+        deleted_paths = sorted({item for item in deleted_relative_paths if item})
+        parsed_by_path = {}
+        skipped_changed_paths: list[str] = []
+        for relative_path in changed_paths:
             absolute_path = self.config.vault_dir / relative_path
             if not absolute_path.exists():
                 continue
             try:
-                parsed = parse_markdown_file(self.config.vault_dir, absolute_path)
-            except OSError:
-                continue
+                parsed_by_path[relative_path] = parse_markdown_file(self.config.vault_dir, absolute_path)
+            except (OSError, UnicodeError):
+                skipped_changed_paths.append(relative_path)
+
+        replaced_paths = sorted(parsed_by_path)
+        mutated_paths = sorted(set(deleted_paths) | set(replaced_paths))
+        previous_block_ids = self.store.get_block_ids_for_paths(mutated_paths)
+        previous_chunk_ids = self.store.get_chunk_ids_for_paths(mutated_paths)
+        dependent_paths = self.store.get_transitive_dependent_paths(previous_block_ids) if previous_block_ids else set()
+
+        if deleted_paths:
+            self.store.delete_files(deleted_paths)
+
+        duplicate_block_ids = 0
+        new_block_ids: set[str] = set()
+        for relative_path in replaced_paths:
+            parsed = parsed_by_path[relative_path]
             duplicate_block_ids += len(self.store.replace_file(parsed))
-            readable_changed_paths.append(relative_path)
             new_block_ids.update(chunk.block_id for chunk in parsed.chunks if chunk.block_id)
 
-        affected_paths = set(impacted_paths) | dependent_paths | set(readable_changed_paths)
+        affected_paths = set(replaced_paths) | dependent_paths
         if new_block_ids:
             affected_paths |= self.store.get_transitive_dependent_paths(new_block_ids)
-        if affected_paths:
-            affected_list = sorted(affected_paths)
+        affected_list = sorted(affected_paths)
+        if affected_list:
+            self._update_watch_state(add_paths=affected_list)
             self._refresh_rendered(affected_list)
-            self.vector_index.upsert(self.store.fetch_vector_documents(affected_list))
-        return {**self.store.stats(), 'duplicate_block_ids': duplicate_block_ids}
+            self._update_watch_state(remove_paths=affected_list)
+
+        vector_error = self._sync_vector_documents(affected_paths=affected_list, deleted_chunk_ids=previous_chunk_ids)
+        stats: dict[str, object] = {**self.store.stats(), 'duplicate_block_ids': duplicate_block_ids}
+        if skipped_changed_paths:
+            stats['skipped_changed_paths'] = skipped_changed_paths
+        if vector_error:
+            stats['vector_dirty'] = 1
+            stats['vector_error'] = vector_error
+        return stats
+
+    def _sync_vector_documents(self, *, affected_paths: list[str], deleted_chunk_ids: list[str]) -> str | None:
+        vector_paths = sorted({item for item in affected_paths if item})
+        vector_chunk_ids = sorted({item for item in deleted_chunk_ids if item})
+        if not vector_paths and not vector_chunk_ids:
+            return None
+        self._update_watch_state(add_vector_paths=vector_paths, add_vector_chunk_ids=vector_chunk_ids)
+        try:
+            if vector_chunk_ids:
+                self.vector_index.delete(vector_chunk_ids)
+            if vector_paths:
+                self.vector_index.upsert(self.store.fetch_vector_documents(vector_paths))
+        except Exception as exc:
+            return str(exc)
+        self._update_watch_state(remove_vector_paths=vector_paths, remove_vector_chunk_ids=vector_chunk_ids)
+        return None
+
+    def _repair_watch_state(self, current_snapshot: dict[str, tuple[float, int]]) -> list[dict[str, object]]:
+        state = self._read_watch_state()
+        if state is None:
+            return []
+
+        repaired_paths = sorted(path for path in state.get('dirty_paths', []) if path in current_snapshot)
+        repaired_vector_paths = sorted(path for path in state.get('dirty_vector_paths', []) if path in current_snapshot)
+        repaired_vector_chunk_ids = sorted({item for item in state.get('dirty_vector_chunk_ids', []) if item})
+        if repaired_paths:
+            self._refresh_rendered(repaired_paths)
+            self._update_watch_state(remove_paths=repaired_paths)
+        if repaired_vector_chunk_ids or repaired_vector_paths:
+            if repaired_vector_chunk_ids:
+                self.vector_index.delete(repaired_vector_chunk_ids)
+            if repaired_vector_paths:
+                self.vector_index.upsert(self.store.fetch_vector_documents(repaired_vector_paths))
+            self._update_watch_state(
+                remove_vector_paths=repaired_vector_paths,
+                remove_vector_chunk_ids=repaired_vector_chunk_ids,
+            )
+        if not repaired_paths and not repaired_vector_paths and not repaired_vector_chunk_ids:
+            return []
+        return [
+            {
+                'kind': 'repair',
+                'paths': len(repaired_paths),
+                'vector_paths': len(repaired_vector_paths),
+                'vector_chunk_ids': len(repaired_vector_chunk_ids),
+            }
+        ]
 
     def query(
         self,
@@ -514,6 +580,7 @@ class OmniClipService:
         self.vector_index.reset()
         self.store.reset_all()
         self._clear_rebuild_state()
+        self._clear_watch_state()
 
     def open_data_dir(self) -> None:
         import os as _os
@@ -543,6 +610,7 @@ class OmniClipService:
             if self.paths.sqlite_file.exists():
                 self.paths.sqlite_file.unlink()
             self._clear_rebuild_state()
+            self._clear_watch_state()
             self.store = MetadataStore(self.paths.sqlite_file)
         if clear_logs:
             _clear_directory(self.paths.logs_dir)
@@ -601,14 +669,7 @@ class OmniClipService:
         stop_event: threading.Event,
         on_update: Callable[[dict[str, object]], None] | None,
     ) -> None:
-        previous = self._snapshot()
-        while not stop_event.wait(interval):
-            current = self._snapshot()
-            changed, deleted = _diff_snapshot(previous, current)
-            if changed or deleted:
-                stats = self.reindex_paths(changed, deleted)
-                _emit_watch_update(on_update, 'polling', changed, deleted, stats)
-            previous = current
+        self._watch_loop('polling', interval, stop_event, on_update)
 
     def _watch_with_watchdog(
         self,
@@ -621,21 +682,165 @@ class OmniClipService:
         observer.schedule(handler, str(self.config.vault_dir), recursive=True)
         observer.start()
         try:
-            while not stop_event.wait(interval):
-                changed, deleted = handler.pop_due_changes(WATCH_DEBOUNCE_SECONDS)
-                if changed or deleted:
-                    stats = self.reindex_paths(changed, deleted)
-                    _emit_watch_update(on_update, 'watchdog', changed, deleted, stats)
+            self._watch_loop(
+                'watchdog',
+                interval,
+                stop_event,
+                on_update,
+                event_provider=lambda: handler.pop_due_changes(WATCH_DEBOUNCE_SECONDS),
+            )
         finally:
             observer.stop()
             observer.join(timeout=5)
 
+    def _watch_loop(
+        self,
+        mode: str,
+        interval: float,
+        stop_event: threading.Event,
+        on_update: Callable[[dict[str, object]], None] | None,
+        event_provider: Callable[[], tuple[list[str], list[str]]] | None = None,
+    ) -> None:
+        previous_snapshot, offline_reason = self._snapshot_safe()
+        buffer = _LiveWatchBuffer(WATCH_STABLE_FILE_SECONDS, WATCH_DELETE_CONFIRM_SECONDS)
+        last_repair_at = 0.0
+
+        if previous_snapshot is None:
+            previous_snapshot = self.store.fetch_file_manifest()
+            self._update_watch_state(vault_offline=True, offline_reason=offline_reason or '')
+            _emit_watch_update(
+                on_update,
+                mode,
+                [],
+                [],
+                self.store.stats(),
+                events=[{'kind': 'vault_offline', 'reason': offline_reason or ''}],
+                note_only=True,
+            )
+        else:
+            self._update_watch_state(vault_offline=False, offline_reason='')
+            reconcile_changed, reconcile_deleted = _diff_snapshot(self.store.fetch_file_manifest(), previous_snapshot)
+            buffer.record(reconcile_changed, reconcile_deleted, previous_snapshot)
+            try:
+                repair_events = self._repair_watch_state(previous_snapshot)
+            except Exception as exc:
+                repair_events = [{'kind': 'batch_retry', 'changed': [], 'deleted': [], 'error': str(exc)}]
+            if repair_events:
+                _emit_watch_update(on_update, mode, [], [], self.store.stats(), events=repair_events, note_only=True)
+            last_repair_at = time.time()
+
+        while not stop_event.wait(interval):
+            now = time.time()
+            current_snapshot, offline_reason = self._snapshot_safe()
+            if current_snapshot is None:
+                watch_state = self._read_watch_state() or {}
+                if not watch_state.get('vault_offline'):
+                    self._update_watch_state(vault_offline=True, offline_reason=offline_reason or '')
+                    _emit_watch_update(
+                        on_update,
+                        mode,
+                        [],
+                        [],
+                        self.store.stats(),
+                        events=[{'kind': 'vault_offline', 'reason': offline_reason or ''}],
+                        note_only=True,
+                    )
+                continue
+
+            events: list[dict[str, object]] = []
+            watch_state = self._read_watch_state() or {}
+            if watch_state.get('vault_offline'):
+                self._update_watch_state(vault_offline=False, offline_reason='')
+                events.append({'kind': 'vault_recovered'})
+
+            hinted_changed, hinted_deleted = event_provider() if event_provider is not None else ([], [])
+            changed, deleted = _diff_snapshot(previous_snapshot, current_snapshot)
+            reconcile_changed, reconcile_deleted = _diff_snapshot(self.store.fetch_file_manifest(), current_snapshot)
+            buffer.record(
+                _merge_relative_paths(changed, hinted_changed, reconcile_changed),
+                _merge_relative_paths(deleted, hinted_deleted, reconcile_deleted),
+                current_snapshot,
+                now,
+            )
+
+            if last_repair_at <= 0.0 or (now - last_repair_at) >= WATCH_REPAIR_INTERVAL_SECONDS:
+                try:
+                    events.extend(self._repair_watch_state(current_snapshot))
+                except Exception as exc:
+                    events.append({'kind': 'batch_retry', 'changed': [], 'deleted': [], 'error': str(exc)})
+                last_repair_at = now
+
+            ready_changed, ready_deleted = buffer.pop_ready(current_snapshot, now)
+            if ready_changed or ready_deleted:
+                try:
+                    stats = self.reindex_paths(ready_changed, ready_deleted)
+                except Exception as exc:
+                    buffer.requeue(ready_changed, ready_deleted, current_snapshot, now)
+                    events.append(
+                        {
+                            'kind': 'batch_retry',
+                            'changed': ready_changed[:5],
+                            'deleted': ready_deleted[:5],
+                            'error': str(exc),
+                        }
+                    )
+                    _emit_watch_update(on_update, mode, [], [], self.store.stats(), events=events, note_only=True)
+                else:
+                    skipped_changed = [
+                        item
+                        for item in stats.get('skipped_changed_paths', [])
+                        if isinstance(item, str) and item in current_snapshot
+                    ]
+                    if skipped_changed:
+                        buffer.requeue(skipped_changed, [], current_snapshot, now)
+                    _emit_watch_update(on_update, mode, ready_changed, ready_deleted, stats, events=events)
+            elif events:
+                _emit_watch_update(on_update, mode, [], [], self.store.stats(), events=events, note_only=True)
+
+            previous_snapshot = current_snapshot
+
     def _snapshot(self) -> dict[str, tuple[float, int]]:
+        snapshot, _ = self._snapshot_safe()
+        return snapshot or {}
+
+    def _snapshot_safe(self) -> tuple[dict[str, tuple[float, int]] | None, str | None]:
+        if not self.config.vault_path:
+            return {}, None
+        vault_dir = self.config.vault_dir
+        try:
+            if not vault_dir.exists():
+                return None, f'vault missing: {vault_dir}'
+            if not vault_dir.is_dir():
+                return None, f'vault not directory: {vault_dir}'
+        except OSError as exc:
+            return None, str(exc)
+
         snapshot: dict[str, tuple[float, int]] = {}
-        for path in self.scan_vault():
-            stat = path.stat()
-            snapshot[path.relative_to(self.config.vault_dir).as_posix()] = (stat.st_mtime, stat.st_size)
-        return snapshot
+        errors: list[str] = []
+        ignore = set(self.config.ignore_dirs)
+
+        def onerror(exc: OSError) -> None:
+            errors.append(str(exc))
+
+        try:
+            for root, dirnames, filenames in os.walk(vault_dir, topdown=True, onerror=onerror):
+                dirnames[:] = [name for name in dirnames if name not in ignore]
+                current_root = Path(root)
+                for filename in filenames:
+                    if not filename.lower().endswith('.md'):
+                        continue
+                    absolute_path = (current_root / filename).resolve()
+                    try:
+                        stat = absolute_path.stat()
+                    except OSError as exc:
+                        errors.append(f'{absolute_path}: {exc}')
+                        continue
+                    snapshot[absolute_path.relative_to(vault_dir).as_posix()] = (stat.st_mtime, stat.st_size)
+        except OSError as exc:
+            return None, str(exc)
+        if errors:
+            return None, errors[0]
+        return snapshot, None
 
     def _refresh_rendered(
         self,
@@ -803,8 +1008,92 @@ class OmniClipService:
             return None
 
     def _write_rebuild_state(self, state: dict[str, object]) -> None:
-        self._rebuild_state_file.parent.mkdir(parents=True, exist_ok=True)
-        self._rebuild_state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+        _write_json_atomic(self._rebuild_state_file, state)
+
+    def _default_watch_state(self) -> dict[str, object]:
+        return {
+            'version': WATCH_STATE_VERSION,
+            'vault_path': str(self.config.vault_dir),
+            'updated_at': _utc_now(),
+            'vault_offline': False,
+            'vault_offline_reason': '',
+            'dirty_paths': [],
+            'dirty_vector_paths': [],
+            'dirty_vector_chunk_ids': [],
+        }
+
+    def _read_watch_state(self) -> dict[str, object] | None:
+        if not self._watch_state_file.exists():
+            return None
+        try:
+            state = json.loads(self._watch_state_file.read_text(encoding='utf-8'))
+        except Exception:
+            return None
+        if int(state.get('version', 0) or 0) != WATCH_STATE_VERSION:
+            return None
+        if state.get('vault_path') != str(self.config.vault_dir):
+            return None
+        return state
+
+    def _write_watch_state(self, state: dict[str, object]) -> None:
+        normalized = self._default_watch_state()
+        normalized.update(state)
+        normalized['updated_at'] = _utc_now()
+        normalized['dirty_paths'] = _merge_relative_paths(normalized.get('dirty_paths', []))
+        normalized['dirty_vector_paths'] = _merge_relative_paths(normalized.get('dirty_vector_paths', []))
+        normalized['dirty_vector_chunk_ids'] = sorted({item for item in normalized.get('dirty_vector_chunk_ids', []) if item})
+        normalized['vault_offline'] = bool(normalized.get('vault_offline'))
+        normalized['vault_offline_reason'] = str(normalized.get('vault_offline_reason') or '')
+        if (
+            not normalized['vault_offline']
+            and not normalized['dirty_paths']
+            and not normalized['dirty_vector_paths']
+            and not normalized['dirty_vector_chunk_ids']
+        ):
+            self._clear_watch_state()
+            return
+        _write_json_atomic(self._watch_state_file, normalized)
+
+    def _clear_watch_state(self) -> None:
+        if self._watch_state_file.exists():
+            try:
+                self._watch_state_file.unlink()
+            except OSError:
+                pass
+
+    def _update_watch_state(
+        self,
+        *,
+        add_paths: list[str] | None = None,
+        remove_paths: list[str] | None = None,
+        add_vector_paths: list[str] | None = None,
+        remove_vector_paths: list[str] | None = None,
+        add_vector_chunk_ids: list[str] | None = None,
+        remove_vector_chunk_ids: list[str] | None = None,
+        vault_offline: bool | None = None,
+        offline_reason: str | None = None,
+    ) -> None:
+        state = self._read_watch_state() or self._default_watch_state()
+        dirty_paths = set(state.get('dirty_paths', []))
+        dirty_paths.update(item for item in add_paths or [] if item)
+        dirty_paths.difference_update(item for item in remove_paths or [] if item)
+        state['dirty_paths'] = sorted(dirty_paths)
+
+        dirty_vector_paths = set(state.get('dirty_vector_paths', []))
+        dirty_vector_paths.update(item for item in add_vector_paths or [] if item)
+        dirty_vector_paths.difference_update(item for item in remove_vector_paths or [] if item)
+        state['dirty_vector_paths'] = sorted(dirty_vector_paths)
+
+        dirty_vector_chunk_ids = set(state.get('dirty_vector_chunk_ids', []))
+        dirty_vector_chunk_ids.update(item for item in add_vector_chunk_ids or [] if item)
+        dirty_vector_chunk_ids.difference_update(item for item in remove_vector_chunk_ids or [] if item)
+        state['dirty_vector_chunk_ids'] = sorted(dirty_vector_chunk_ids)
+
+        if vault_offline is not None:
+            state['vault_offline'] = vault_offline
+        if offline_reason is not None:
+            state['vault_offline_reason'] = offline_reason
+        self._write_watch_state(state)
 
     def _clear_rebuild_state(self) -> None:
         if self._rebuild_state_file.exists():
@@ -812,6 +1101,88 @@ class OmniClipService:
                 self._rebuild_state_file.unlink()
             except OSError:
                 pass
+
+
+class _LiveWatchBuffer:
+    def __init__(self, stable_seconds: float, delete_confirm_seconds: float) -> None:
+        self.stable_seconds = max(float(stable_seconds), 0.0)
+        self.delete_confirm_seconds = max(float(delete_confirm_seconds), 0.0)
+        self._changed: dict[str, dict[str, object]] = {}
+        self._deleted: dict[str, float] = {}
+
+    def record(
+        self,
+        changed: list[str],
+        deleted: list[str],
+        snapshot: dict[str, tuple[float, int]],
+        now: float | None = None,
+    ) -> None:
+        recorded_at = time.time() if now is None else now
+        for relative_path in changed:
+            metadata = snapshot.get(relative_path)
+            if metadata is None:
+                self._deleted.setdefault(relative_path, recorded_at)
+                self._changed.pop(relative_path, None)
+                continue
+            existing = self._changed.get(relative_path)
+            if existing is None or existing.get('metadata') != metadata:
+                self._changed[relative_path] = {'first_seen': recorded_at, 'metadata': metadata}
+            self._deleted.pop(relative_path, None)
+        for relative_path in deleted:
+            if relative_path in snapshot:
+                continue
+            self._deleted.setdefault(relative_path, recorded_at)
+            self._changed.pop(relative_path, None)
+
+    def pop_ready(self, snapshot: dict[str, tuple[float, int]], now: float | None = None) -> tuple[list[str], list[str]]:
+        current_time = time.time() if now is None else now
+        ready_changed: list[str] = []
+        ready_deleted: list[str] = []
+
+        for relative_path, payload in list(self._changed.items()):
+            metadata = snapshot.get(relative_path)
+            if metadata is None:
+                self._deleted.setdefault(relative_path, float(payload.get('first_seen', current_time)))
+                self._changed.pop(relative_path, None)
+                continue
+            if payload.get('metadata') != metadata:
+                self._changed[relative_path] = {'first_seen': current_time, 'metadata': metadata}
+                continue
+            if current_time - float(payload.get('first_seen', current_time)) >= self.stable_seconds:
+                ready_changed.append(relative_path)
+                self._changed.pop(relative_path, None)
+
+        for relative_path, first_seen in list(self._deleted.items()):
+            if relative_path in snapshot:
+                self._deleted.pop(relative_path, None)
+                continue
+            if current_time - float(first_seen) >= self.delete_confirm_seconds:
+                ready_deleted.append(relative_path)
+                self._deleted.pop(relative_path, None)
+
+        ready_deleted_set = set(ready_deleted)
+        ready_changed = sorted(path for path in ready_changed if path not in ready_deleted_set)
+        return ready_changed, sorted(ready_deleted)
+
+    def requeue(
+        self,
+        changed: list[str],
+        deleted: list[str],
+        snapshot: dict[str, tuple[float, int]],
+        now: float | None = None,
+    ) -> None:
+        recorded_at = time.time() if now is None else now
+        for relative_path in changed:
+            metadata = snapshot.get(relative_path)
+            if metadata is None:
+                continue
+            self._changed[relative_path] = {'first_seen': recorded_at, 'metadata': metadata}
+            self._deleted.pop(relative_path, None)
+        for relative_path in deleted:
+            if relative_path in snapshot:
+                continue
+            self._deleted[relative_path] = recorded_at
+            self._changed.pop(relative_path, None)
 
 
 class _VaultEventHandler(FileSystemEventHandler):
@@ -1551,6 +1922,15 @@ def _diff_snapshot(previous: dict[str, tuple[float, int]], current: dict[str, tu
     return changed, deleted
 
 
+def _merge_relative_paths(*groups) -> list[str]:
+    merged: set[str] = set()
+    for group in groups:
+        for item in group or []:
+            if isinstance(item, str) and item:
+                merged.add(item)
+    return sorted(merged)
+
+
 def _clear_directory(directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     for item in directory.iterdir():
@@ -1582,10 +1962,52 @@ def _wait_for_worker_controls(pause_event: threading.Event | None, cancel_event:
         time.sleep(0.12)
 
 
-def _emit_watch_update(on_update: Callable[[dict[str, object]], None] | None, mode: str, changed: list[str], deleted: list[str], stats: dict[str, int]) -> None:
+def _emit_watch_update(
+    on_update: Callable[[dict[str, object]], None] | None,
+    mode: str,
+    changed: list[str],
+    deleted: list[str],
+    stats: dict[str, object],
+    *,
+    events: list[dict[str, object]] | None = None,
+    note_only: bool = False,
+) -> None:
     if on_update is None:
         return
-    on_update({'mode': mode, 'changed': changed, 'deleted': deleted, 'stats': stats})
+    on_update(
+        {
+            'mode': mode,
+            'changed': changed,
+            'deleted': deleted,
+            'stats': stats,
+            'events': events or [],
+            'note_only': note_only,
+        }
+    )
+
+
+def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_name = None
+    with tempfile.NamedTemporaryFile('w', delete=False, dir=path.parent, prefix=f'{path.name}.', suffix='.tmp', encoding='utf-8') as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.flush()
+        temp_name = handle.name
+    temp_path = Path(temp_name)
+    last_error: PermissionError | None = None
+    for _ in range(5):
+        try:
+            os.replace(temp_path, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.05)
+    try:
+        temp_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    if last_error is not None:
+        raise last_error
 
 
 def _emit_progress(on_progress: Callable[[dict[str, object]], None] | None, payload: dict[str, object]) -> None:

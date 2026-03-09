@@ -1,5 +1,27 @@
 # Changelog
 
+## V0.1.8 - 2026-03-09
+
+### Added
+
+- Added [RELEASE_NOTES_v0.1.8](releases/RELEASE_NOTES_v0.1.8.md) for the live-watch hardening release.
+- Added persisted `watch_state.json` tracking for offline guard state, dirty render paths, dirty vector paths, and dirty vector chunk ids.
+- Added desktop activity-log messages for vault offline, vault recovery, watch repair, and watch retry events.
+- Added regression coverage for parse-first reindexing, vector-dirty repair, and offline snapshot handling.
+
+### Changed
+
+- Changed incremental watch refresh to parse changed files before swapping index rows, so temporary read/parse failures keep the previous index intact.
+- Changed watch mode so watchdog and polling both run through the same `snapshot diff + stability window + delete confirmation` flow instead of trusting raw file events directly.
+- Changed watch recovery so SQLite stays authoritative while vector writes can lag behind and repair later.
+- Changed state-file writes to atomic replace with Windows-safe temporary files and retry logic.
+
+### Fixed
+
+- Fixed the risk of temporarily locked or half-written Markdown files wiping still-valid indexed content during hot updates.
+- Fixed vault drop/offline scenarios so an encrypted drive disappearing is no longer interpreted as mass deletion.
+- Fixed watch crash-recovery gaps by replaying dirty render/vector work from persisted workspace state.
+
 ## V0.1.7 - 2026-03-09
 
 ### Added

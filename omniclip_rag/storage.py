@@ -197,65 +197,71 @@ class MetadataStore:
         ).fetchone()
 
     def replace_file(self, parsed_file: ParsedFile) -> list[str]:
-        self.delete_files([parsed_file.relative_path])
         duplicate_block_ids = self._demote_duplicate_block_ids(parsed_file)
-        self.connection.execute(
-            """
-            INSERT INTO files (
-                source_path, kind, title, page_properties_json,
-                content_hash, mtime, size
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                parsed_file.relative_path,
-                parsed_file.kind,
-                parsed_file.title,
-                json.dumps(parsed_file.page_properties, ensure_ascii=False),
-                parsed_file.content_hash,
-                parsed_file.mtime,
-                parsed_file.size,
-            ),
-        )
-        for chunk in parsed_file.chunks:
+        with self.connection:
+            self._delete_files_tx([parsed_file.relative_path])
             self.connection.execute(
                 """
-                INSERT INTO chunks (
-                    chunk_id, source_path, kind, block_id, parent_chunk_id, title, anchor,
-                    raw_text, rendered_text, properties_json,
-                    position, depth, line_start, line_end
+                INSERT INTO files (
+                    source_path, kind, title, page_properties_json,
+                    content_hash, mtime, size
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    chunk.chunk_id,
-                    chunk.source_path,
-                    chunk.kind,
-                    chunk.block_id,
-                    chunk.parent_chunk_id,
-                    chunk.title,
-                    chunk.anchor,
-                    chunk.raw_text,
-                    json.dumps(chunk.properties, ensure_ascii=False),
-                    chunk.position,
-                    chunk.depth,
-                    chunk.line_start,
-                    chunk.line_end,
+                    parsed_file.relative_path,
+                    parsed_file.kind,
+                    parsed_file.title,
+                    json.dumps(parsed_file.page_properties, ensure_ascii=False),
+                    parsed_file.content_hash,
+                    parsed_file.mtime,
+                    parsed_file.size,
                 ),
             )
-            for ref_type, target in chunk.refs:
+            for chunk in parsed_file.chunks:
                 self.connection.execute(
                     """
-                    INSERT OR IGNORE INTO refs (source_chunk_id, target_block_id, ref_type)
-                    VALUES (?, ?, ?)
+                    INSERT INTO chunks (
+                        chunk_id, source_path, kind, block_id, parent_chunk_id, title, anchor,
+                        raw_text, rendered_text, properties_json,
+                        position, depth, line_start, line_end
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
                     """,
-                    (chunk.chunk_id, target, ref_type),
+                    (
+                        chunk.chunk_id,
+                        chunk.source_path,
+                        chunk.kind,
+                        chunk.block_id,
+                        chunk.parent_chunk_id,
+                        chunk.title,
+                        chunk.anchor,
+                        chunk.raw_text,
+                        json.dumps(chunk.properties, ensure_ascii=False),
+                        chunk.position,
+                        chunk.depth,
+                        chunk.line_start,
+                        chunk.line_end,
+                    ),
                 )
-        self.connection.commit()
+                for ref_type, target in chunk.refs:
+                    self.connection.execute(
+                        """
+                        INSERT OR IGNORE INTO refs (source_chunk_id, target_block_id, ref_type)
+                        VALUES (?, ?, ?)
+                        """,
+                        (chunk.chunk_id, target, ref_type),
+                    )
         return duplicate_block_ids
 
     def delete_files(self, relative_paths: Iterable[str]) -> None:
         paths = [item for item in relative_paths if item]
+        if not paths:
+            return
+        with self.connection:
+            self._delete_files_tx(paths)
+
+    def _delete_files_tx(self, paths: list[str]) -> None:
         if not paths:
             return
         placeholders = ",".join("?" for _ in paths)
@@ -274,7 +280,6 @@ class MetadataStore:
             f"DELETE FROM files WHERE source_path IN ({placeholders})",
             paths,
         )
-        self.connection.commit()
 
     def get_block_ids_for_paths(self, relative_paths: Iterable[str]) -> set[str]:
         paths = [item for item in relative_paths if item]
@@ -466,6 +471,19 @@ class MetadataStore:
         chunk_count = self.connection.execute("SELECT COUNT(*) AS count FROM chunks").fetchone()["count"]
         ref_count = self.connection.execute("SELECT COUNT(*) AS count FROM refs").fetchone()["count"]
         return {"files": file_count, "chunks": chunk_count, "refs": ref_count}
+
+    def fetch_file_manifest(self) -> dict[str, tuple[float, int]]:
+        rows = self.connection.execute(
+            """
+            SELECT source_path, mtime, size
+            FROM files
+            """
+        ).fetchall()
+        return {
+            row["source_path"]: (float(row["mtime"]), int(row["size"]))
+            for row in rows
+            if row["source_path"]
+        }
 
     # Why: 真实 Logseq 库里偶尔会出现被复制或冲突合并过的重复 id:: UUID。
     # 如果直接硬插入，整轮建库会因为唯一键崩掉。这里保住首个块的 block_id，

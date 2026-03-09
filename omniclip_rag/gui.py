@@ -25,7 +25,7 @@ from .ui_tooltip import ToolTip
 from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.1.7"
+APP_VERSION = "V0.1.8"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 _CONTEXT_PAGE_RE = re.compile(r'^# 笔记名：(.*)$')
 _CONTEXT_FRAGMENT_RE = re.compile(r'^笔记片段\d+：$')
@@ -2925,6 +2925,34 @@ class OmniClipDesktopApp:
             self._set_text(self.log_text, "\n".join(self.log_lines))
             self.log_text.see("end")
 
+    def _append_watch_events(self, events: list[dict[str, object]]) -> None:
+        for event in events:
+            kind = str(event.get("kind") or "").strip().lower()
+            if kind == "vault_offline":
+                self._append_log(self._tr("log_watch_vault_offline", reason=str(event.get("reason") or self._tr("none_value"))))
+            elif kind == "vault_recovered":
+                self._append_log(self._tr("log_watch_vault_recovered"))
+            elif kind == "repair":
+                self._append_log(
+                    self._tr(
+                        "log_watch_repaired",
+                        paths=int(event.get("paths", 0) or 0),
+                        vector_paths=int(event.get("vector_paths", 0) or 0),
+                        vector_chunk_ids=int(event.get("vector_chunk_ids", 0) or 0),
+                    )
+                )
+            elif kind == "batch_retry":
+                changed = ", ".join(event.get("changed", [])[:3]) or self._tr("none_value")
+                deleted = ", ".join(event.get("deleted", [])[:3]) or self._tr("none_value")
+                self._append_log(
+                    self._tr(
+                        "log_watch_batch_retry",
+                        changed=changed,
+                        deleted=deleted,
+                        error=str(event.get("error") or self._tr("none_value")),
+                    )
+                )
+
     def _set_text(self, widget: tk.Text, text_value: str) -> None:
         widget.configure(state="normal")
         widget.delete("1.0", "end")
@@ -2988,13 +3016,17 @@ class OmniClipDesktopApp:
                 self.files_var.set(str(stats.get("files", 0)))
                 self.chunks_var.set(str(stats.get("chunks", 0)))
                 self.refs_var.set(str(stats.get("refs", 0)))
-                self.status_var.set(self._tr("status_watch_update"))
-                changed = ", ".join(payload.get("changed", [])[:3]) or self._tr("none_value")
-                deleted = ", ".join(payload.get("deleted", [])[:3]) or self._tr("none_value")
-                self._append_log(self._tr("log_watch_update", changed=changed, deleted=deleted))
-                duplicate_count = int(stats.get("duplicate_block_ids", 0))
-                if duplicate_count:
-                    self._append_log(self._tr("log_duplicate_block_ids", count=duplicate_count))
+                events = payload.get("events", [])
+                if events:
+                    self._append_watch_events(events)
+                if not payload.get("note_only"):
+                    self.status_var.set(self._tr("status_watch_update"))
+                    changed = ", ".join(payload.get("changed", [])[:3]) or self._tr("none_value")
+                    deleted = ", ".join(payload.get("deleted", [])[:3]) or self._tr("none_value")
+                    self._append_log(self._tr("log_watch_update", changed=changed, deleted=deleted))
+                    duplicate_count = int(stats.get("duplicate_block_ids", 0) or 0)
+                    if duplicate_count:
+                        self._append_log(self._tr("log_duplicate_block_ids", count=duplicate_count))
                 self._refresh_state_chips()
             elif kind == "watch-error":
                 _, tb = item

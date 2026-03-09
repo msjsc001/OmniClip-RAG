@@ -1,6 +1,6 @@
 # OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.7-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.8-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#quick-start)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#core-positioning)
@@ -43,12 +43,12 @@ This naturally emphasizes:
 - controlled exposure
 - no blanket vault access for AI
 
-## What's New In v0.1.7
-This release turns OmniClip RAG into a much stricter evidence-first local retrieval tool:
-- Reworked context-pack export so results are grouped by note title and emitted as numbered source-faithful Markdown snippets instead of whole-page dumps.
-- Added UUID/block-embed resolution plus configurable sensitive-content redaction, so exported context stays readable while secrets are masked as [琚玆AG杩囨护/Filtered by RAG].
-- Tightened retrieval with merged lexical + vector candidate ranking, a lexical-only guard for single-character queries, and a more explainable 0-100 relevance score.
-- Reworked the desktop UI around Query and Config, added sortable result columns, page-title regex filters, per-panel find, context jump stats, and safer rebuild confirmation.
+## What's New In v0.1.8
+This release hardens live watch so local vault edge cases do not corrupt a still-valid index:
+- Reworked incremental watch refresh into a parse-first swap, so temporarily unreadable Markdown files keep the previous indexed content alive.
+- Unified polling and watchdog under the same snapshot-diff, file-stability, delete-confirmation, and manifest-reconcile flow.
+- Added offline guard handling for missing/unmounted vault roots plus persisted watch repair state for dirty render/vector work.
+- Surfaced watch offline / recovered / repaired / retry events in the desktop activity log.
 ## Current Capabilities
 
 - Desktop GUI: configuration, precheck, model bootstrap, indexing, search, live watch, selective cleanup
@@ -147,7 +147,7 @@ See [RUNTIME_SETUP.md](RUNTIME_SETUP.md) for the packaged runtime flow.
 
 ## Current Version
 
-- Version: `V0.1.7`
+- Version: `V0.1.8`
 - Main delivery form: desktop GUI
 - Current stable path: `torch + bge-m3`
 
@@ -190,6 +190,7 @@ The current tree has already been validated with:
 - [Changelog](CHANGELOG.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
 - [Runtime Setup](RUNTIME_SETUP.md)
+- [Release Notes v0.1.8](releases/RELEASE_NOTES_v0.1.8.md)
 - [Release Notes v0.1.7](releases/RELEASE_NOTES_v0.1.7.md)
 - [Release Notes v0.1.6](releases/RELEASE_NOTES_v0.1.6.md)
 - [Release Notes v0.1.4](releases/RELEASE_NOTES_v0.1.4.md)

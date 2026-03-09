@@ -48,6 +48,25 @@ class _InjectVectorIndex(_StubVectorIndex):
         return list(self.injected[:limit])
 
 
+class _FailingVectorIndex(_StubVectorIndex):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_upsert_once = True
+        self.deleted_batches: list[list[str]] = []
+        self.upsert_batches: list[list[str]] = []
+
+    def upsert(self, documents):
+        self.upsert_batches.append([item.get('chunk_id', '') for item in documents])
+        if self.fail_upsert_once:
+            self.fail_upsert_once = False
+            raise RuntimeError('vector busy')
+        return None
+
+    def delete(self, chunk_ids):
+        self.deleted_batches.append(list(chunk_ids))
+        return None
+
+
 class ServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         for path in (
@@ -72,6 +91,12 @@ class ServiceTests(unittest.TestCase):
             ROOT / ".tmp" / "dedupe_data_test",
             ROOT / ".tmp" / "page_block_vault_test",
             ROOT / ".tmp" / "page_block_data_test",
+            ROOT / ".tmp" / "reindex_locked_vault_test",
+            ROOT / ".tmp" / "reindex_locked_data_test",
+            ROOT / ".tmp" / "vector_dirty_vault_test",
+            ROOT / ".tmp" / "vector_dirty_data_test",
+            ROOT / ".tmp" / "snapshot_offline_vault_test",
+            ROOT / ".tmp" / "snapshot_offline_data_test",
         ):
             if path.exists():
                 shutil.rmtree(path)
@@ -286,6 +311,76 @@ class ServiceTests(unittest.TestCase):
             hits, _ = service.query("热更新查询验证", limit=3)
             self.assertTrue(hits)
             self.assertEqual(hits[0].anchor, "热更新查询验证")
+        finally:
+            service.close()
+
+
+    def test_reindex_keeps_previous_index_when_changed_file_is_temporarily_unreadable(self) -> None:
+        vault_copy = ROOT / '.tmp' / 'reindex_locked_vault_test'
+        data_root = ROOT / '.tmp' / 'reindex_locked_data_test'
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        target = vault_copy / 'page_a.md'
+        target.write_text('- 旧内容\n  id:: dddddddd-dddd-dddd-dddd-dddddddddddd\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        try:
+            service.rebuild_index()
+            target.write_text('- 新内容\n  id:: dddddddd-dddd-dddd-dddd-dddddddddddd\n', encoding='utf-8')
+            with patch('omniclip_rag.parser.parse_markdown_file', side_effect=PermissionError('locked')):
+                stats = service.reindex_paths(['page_a.md'], [])
+            old_hits, _ = service.query('旧内容', limit=3)
+            new_hits, _ = service.query('新内容', limit=3)
+            self.assertTrue(old_hits)
+            self.assertFalse(new_hits)
+            self.assertIn('page_a.md', stats.get('skipped_changed_paths', []))
+        finally:
+            service.close()
+
+    def test_reindex_marks_vector_state_dirty_then_repairs_it(self) -> None:
+        vault_copy = ROOT / '.tmp' / 'vector_dirty_vault_test'
+        data_root = ROOT / '.tmp' / 'vector_dirty_data_test'
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        target = vault_copy / 'page_a.md'
+        target.write_text('- 初始内容\n  id:: eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        try:
+            service.rebuild_index()
+            failing_vector = _FailingVectorIndex()
+            service.vector_index = failing_vector
+            target.write_text('- 更新内容\n  id:: eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee\n', encoding='utf-8')
+            stats = service.reindex_paths(['page_a.md'], [])
+            self.assertEqual(stats.get('vector_dirty'), 1)
+            self.assertIn('page_a.md', (service._read_watch_state() or {}).get('dirty_vector_paths', []))
+            hits, _ = service.query('更新内容', limit=3)
+            self.assertTrue(hits)
+            snapshot, _ = service._snapshot_safe()
+            repair_events = service._repair_watch_state(snapshot or {})
+            self.assertTrue(repair_events)
+            self.assertIsNone(service._read_watch_state())
+            self.assertGreaterEqual(len(failing_vector.upsert_batches), 2)
+        finally:
+            service.close()
+
+    def test_snapshot_safe_reports_vault_offline_instead_of_empty_snapshot(self) -> None:
+        vault_copy = ROOT / '.tmp' / 'snapshot_offline_vault_test'
+        data_root = ROOT / '.tmp' / 'snapshot_offline_data_test'
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        (vault_copy / 'page_a.md').write_text('- 初始内容\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        try:
+            service.rebuild_index()
+            shutil.rmtree(vault_copy)
+            snapshot, reason = service._snapshot_safe()
+            self.assertIsNone(snapshot)
+            self.assertIn('vault', (reason or '').lower())
         finally:
             service.close()
 

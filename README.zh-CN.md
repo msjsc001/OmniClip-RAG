@@ -1,6 +1,6 @@
 # 方寸引 / OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.7-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.8-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#首次使用建议)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#核心定位)
@@ -43,14 +43,14 @@
 - 可控暴露面
 - 不把整库直接交给 AI
 
-## V0.1.7 重点更新
+## V0.1.8 重点更新
 
-这一轮把方寸引进一步收紧成“证据块优先”的本地检索层：
+这一轮聚焦在“热监听加固”，目标是不让真实笔记库边界情况把已有索引 silently 做坏：
 
-- 上下文导出不再走整页灌输，而是按“笔记名 + 编号片段”输出，尽量保持原始 Markdown 结构。
-- 补上了 `((UUID))`、`{{embed}}` 的可读文本还原，以及可配置的敏感内容脱敏；命中后统一显示为 `[被RAG过滤/Filtered by RAG]`。
-- 检索侧改成词法候选与语义候选先合并再统一打分，并对单字短查询默认禁用向量召回，减少日志类噪声。
-- UI 重新整理为“查询 / 配置”两大页签，补上结果排序、页面标题过滤、文本内查找、完整上下文跳转统计和重建确认。
+- 热更新改成“先解析成功，再替换索引”，临时锁定、半写入、不可读的 Markdown 不会先把旧索引删掉。
+- `watchdog` 和轮询统一走“快照比对 + 文件稳定窗口 + 删除确认窗口 + 清单补偿”这条安全链路。
+- 加上了笔记库掉盘/offline 保护，以及 `watch_state.json` 驱动的脏渲染/脏向量补偿修复。
+- 活动日志现在会明确显示监听离线、恢复、补偿、重试这些事件。
 
 ## 当前能力
 
@@ -150,7 +150,7 @@ OmniClip RAG/
 
 ## 当前版本说明
 
-- 版本：`V0.1.7`
+- 版本：`V0.1.8`
 - 主交付形态：桌面 GUI
 - 当前稳定主线：`torch + bge-m3`
 
@@ -193,6 +193,7 @@ tests/
 - [更新日志](CHANGELOG.md)
 - [空间预检说明](STORAGE_PRECHECK.md)
 - [运行时安装说明](RUNTIME_SETUP.md)
+- [v0.1.8 发布说明](releases/RELEASE_NOTES_v0.1.8.md)
 - [v0.1.7 发布说明](releases/RELEASE_NOTES_v0.1.7.md)
 - [v0.1.6 发布说明](releases/RELEASE_NOTES_v0.1.6.md)
 - [v0.1.4 发布说明](releases/RELEASE_NOTES_v0.1.4.md)
