@@ -20,6 +20,12 @@ You search locally first, review the results, and then copy only the context you
 
 > Future direction, time permitting: 1. gradually support more non-Markdown note systems and database-backed note tools; 2. provide an API or MCP bridge so AIs that need it can call the retrieval layer directly. In practice, if you keep saving your AI chats or other text material back into your note vault, OmniClip RAG also becomes a kind of ever-growing semantic memory index for your own workflow.
 
+
+<img alt="image" src="https://github.com/user-attachments/assets/c094453e-1d80-4560-b866-7d410d4a57bf" />
+<img alt="image" src="https://github.com/user-attachments/assets/e537ebfc-53cf-44cc-8598-9019b2fcae02" />
+<img alt="image" src="https://github.com/user-attachments/assets/b622c336-73b8-4324-95eb-f9c8011c25c6" />
+<img alt="image" src="https://github.com/user-attachments/assets/d133f782-1864-427a-8773-ee9333cf6fdd" />
+
 ## Core Positioning
 
 OmniClip RAG fits a workflow like this:
