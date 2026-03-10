@@ -70,8 +70,10 @@ class _FakeTable:
         self.name = name
         self.schema = schema
         self.rows: list[dict[str, object]] = []
+        self.add_calls = 0
 
     def add(self, rows):
+        self.add_calls += 1
         for row in rows:
             self.rows.append(dict(row))
 
@@ -182,6 +184,31 @@ class VectorIndexTests(unittest.TestCase):
             index.reset()
             self.assertEqual(index.search("块嵌入", 2), [])
 
+    def test_lancedb_rebuild_accepts_iterable_stream(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "iterable_rebuild"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend="lancedb",
+            vector_batch_size=2,
+        )
+        with patch.dict(sys.modules, _fake_lancedb_modules()):
+            index = LanceDbVectorIndex(config, data_paths, embedder_factory=FakeEmbedder)
+            documents = (
+                {
+                    "chunk_id": f"stream-{index_id}",
+                    "source_path": f"pages/{index_id}.md",
+                    "title": f"T{index_id}",
+                    "anchor": f"A{index_id}",
+                    "rendered_text": f"内容 {index_id}",
+                }
+                for index_id in range(5)
+            )
+            index.rebuild(documents, total=5)
+            hits = index.search("内容 4", 2)
+            self.assertTrue(hits)
+            self.assertEqual(hits[0].chunk_id, "stream-4")
+
 
     def test_lancedb_rebuild_waits_while_paused_and_reports_progress(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "paused_rebuild"))
@@ -227,6 +254,9 @@ class VectorIndexTests(unittest.TestCase):
             self.assertTrue(progress)
             self.assertEqual(progress[-1]['current'], len(documents))
             self.assertEqual(progress[-1]['total'], len(documents))
+            self.assertIn('build_profile', progress[-1])
+            self.assertIn('encode_batch_size', progress[-1])
+            self.assertIn('write_batch_size', progress[-1])
 
     def test_lancedb_warmup_returns_dimension(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "warmup"))

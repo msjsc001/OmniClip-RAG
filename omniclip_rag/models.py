@@ -50,6 +50,56 @@ class SearchHit:
 
 
 @dataclass(slots=True)
+class QueryLimitRecommendation:
+    device: str
+    preferred: int
+    minimum: int
+    maximum: int
+    reason_code: str
+    samples: int = 0
+    elapsed_ms: int = 0
+
+
+@dataclass(slots=True)
+class RerankOutcome:
+    enabled: bool = False
+    applied: bool = False
+    model: str = ''
+    requested_device: str = 'cpu'
+    resolved_device: str = 'cpu'
+    candidate_count: int = 0
+    reranked_count: int = 0
+    batch_size: int = 0
+    elapsed_ms: int = 0
+    degraded_to_cpu: bool = False
+    oom_recovered: bool = False
+    skipped_reason: str = ''
+
+
+@dataclass(slots=True)
+class QueryInsights:
+    elapsed_ms: int = 0
+    hydrated_candidates: int = 0
+    selected_hits: int = 0
+    suppressed_duplicates: int = 0
+    suppressed_same_page: int = 0
+    page_diversity: int = 0
+    recommendation: QueryLimitRecommendation | None = None
+    reranker: RerankOutcome | None = None
+
+
+@dataclass(slots=True)
+class QueryResult:
+    hits: list[SearchHit]
+    context_text: str
+    insights: QueryInsights = field(default_factory=QueryInsights)
+
+    def __iter__(self):
+        yield self.hits
+        yield self.context_text
+
+
+@dataclass(slots=True)
 class SpaceEstimate:
     run_at: str
     vault_file_count: int

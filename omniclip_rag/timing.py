@@ -1,12 +1,113 @@
 from __future__ import annotations
 
 import json
+import time
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import AppConfig
 from .vector_index import resolve_vector_device
 
 HISTORY_LIMIT = 8
+
+
+@dataclass(slots=True)
+class _ProgressSample:
+    timestamp: float
+    current: int
+
+
+class BuildEtaTracker:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        history_entry: dict[str, object] | None,
+        vector_enabled: bool,
+        model_ready: bool,
+    ) -> None:
+        self.config = config
+        self.history_entry = history_entry
+        self.vector_enabled = vector_enabled
+        self.model_ready = model_ready
+        self._samples: dict[str, deque[_ProgressSample]] = {
+            'indexing': deque(maxlen=8),
+            'rendering': deque(maxlen=8),
+            'vectorizing': deque(maxlen=10),
+        }
+
+    def estimate(
+        self,
+        *,
+        stage: str,
+        current: int,
+        total: int,
+        elapsed_total: float,
+        stage_elapsed: float,
+        parsed_chunks: int = 0,
+        estimated_total_chunks: int = 0,
+        timestamp: float | None = None,
+    ) -> tuple[int, float]:
+        recent_rate = self._record_recent_rate(stage, current, timestamp or time.time())
+        return estimate_remaining_build_seconds(
+            self.config,
+            stage=stage,
+            current=current,
+            total=total,
+            elapsed_total=elapsed_total,
+            stage_elapsed=stage_elapsed,
+            parsed_chunks=parsed_chunks,
+            estimated_total_chunks=estimated_total_chunks,
+            history_entry=self.history_entry,
+            vector_enabled=self.vector_enabled,
+            model_ready=self.model_ready,
+            recent_observed_rate=recent_rate,
+        )
+
+    def recent_rate(self, stage: str) -> float | None:
+        samples = self._samples.get(stage)
+        if not samples or len(samples) < 2:
+            return None
+        latest = samples[-1]
+        earliest = None
+        for sample in samples:
+            if sample.current < latest.current:
+                earliest = sample
+                break
+        if earliest is None:
+            return None
+        delta_units = latest.current - earliest.current
+        delta_seconds = latest.timestamp - earliest.timestamp
+        if delta_units <= 0 or delta_seconds <= 0:
+            return None
+        return delta_seconds / delta_units
+
+    def _record_recent_rate(self, stage: str, current: int, timestamp: float) -> float | None:
+        samples = self._samples.get(stage)
+        if samples is None:
+            return None
+        current_value = max(int(current), 0)
+        moment = max(float(timestamp), 0.0)
+        if samples and current_value < samples[-1].current:
+            samples.clear()
+        if not samples or current_value != samples[-1].current or (moment - samples[-1].timestamp) >= 0.25:
+            samples.append(_ProgressSample(moment, current_value))
+        if len(samples) < 2:
+            return None
+        latest = samples[-1]
+        earliest = None
+        for sample in samples:
+            if sample.current < latest.current:
+                earliest = sample
+                break
+        if earliest is None:
+            return None
+        delta_units = latest.current - earliest.current
+        delta_seconds = latest.timestamp - earliest.timestamp
+        if delta_units <= 0 or delta_seconds <= 0:
+            return None
+        return delta_seconds / delta_units
 
 
 def build_history_file(state_dir: Path) -> Path:
@@ -95,6 +196,9 @@ def build_timing_profile(
         render_per_chunk = _clamp_rate(float(history_entry.get('rendering_seconds', 0.0) or 0.0) / chunks, render_per_chunk)
         if vector_enabled:
             vector_per_chunk = _clamp_rate(float(history_entry.get('vectorizing_seconds', 0.0) or 0.0) / chunks, vector_per_chunk)
+            tail_rate = float(history_entry.get('vector_tail_seconds_per_chunk', 0.0) or 0.0)
+            if tail_rate > 0:
+                vector_per_chunk = _clamp_rate(vector_per_chunk * 0.55 + tail_rate * 0.45, vector_per_chunk)
             vector_load_seconds = max(float(history_entry.get('vector_load_seconds', 0.0) or 0.0), vector_load_seconds * 0.5)
         history_based = True
 
@@ -145,6 +249,7 @@ def estimate_remaining_build_seconds(
     history_entry: dict[str, object] | None,
     vector_enabled: bool,
     model_ready: bool,
+    recent_observed_rate: float | None = None,
 ) -> tuple[int, float]:
     profile = build_timing_profile(
         config,
@@ -160,11 +265,12 @@ def estimate_remaining_build_seconds(
     stage_elapsed = max(float(stage_elapsed), 0.0)
     current = max(int(current), 0)
     total = max(int(total), 0)
+    progress_ratio = (current / total) if total > 0 else 0.0
     estimated_total_chunks = max(int(estimated_total_chunks or 0), int(parsed_chunks or 0), int(total if stage in {'rendering', 'vectorizing'} else 0))
 
     if stage == 'indexing':
         observed_rate = (stage_elapsed / current) if current > 0 else 0.0
-        parse_rate = _blend_rate(parse_rate, observed_rate)
+        parse_rate = _blend_stage_rate(parse_rate, observed_rate, recent_observed_rate, stage=stage, progress_ratio=progress_ratio)
         remaining = max(total - current, 0) * parse_rate
         remaining += estimated_total_chunks * render_rate
         remaining += estimated_total_chunks * vector_rate
@@ -172,14 +278,14 @@ def estimate_remaining_build_seconds(
             remaining += vector_load
     elif stage == 'rendering':
         observed_rate = (stage_elapsed / current) if current > 0 else 0.0
-        render_rate = _blend_rate(render_rate, observed_rate)
+        render_rate = _blend_stage_rate(render_rate, observed_rate, recent_observed_rate, stage=stage, progress_ratio=progress_ratio)
         remaining = max(total - current, 0) * render_rate
         remaining += max(total, estimated_total_chunks) * vector_rate
         if vector_enabled:
             remaining += vector_load
     elif stage == 'vectorizing':
         observed_rate = (stage_elapsed / current) if current > 0 else 0.0
-        vector_rate = _blend_rate(vector_rate, observed_rate)
+        vector_rate = _blend_stage_rate(vector_rate, observed_rate, recent_observed_rate, stage=stage, progress_ratio=progress_ratio)
         remaining = max(total - current, 0) * vector_rate
         if vector_enabled and current <= 0:
             remaining += vector_load
@@ -192,13 +298,47 @@ def estimate_remaining_build_seconds(
     return int(round(remaining)), percent
 
 
-def _blend_rate(default_rate: float, observed_rate: float) -> float:
-    if observed_rate <= 0:
-        return default_rate
-    lower = max(default_rate * 0.25, 0.001)
-    upper = max(default_rate * 4.0, lower)
-    observed = min(max(observed_rate, lower), upper)
-    return default_rate * 0.35 + observed * 0.65
+def _blend_stage_rate(
+    default_rate: float,
+    observed_rate: float,
+    recent_rate: float | None,
+    *,
+    stage: str,
+    progress_ratio: float,
+) -> float:
+    lower = max(default_rate * 0.2, 0.001)
+    upper_multiplier = 8.0 if stage == 'vectorizing' else 6.0
+    upper = max(default_rate * upper_multiplier, lower)
+
+    weighted_sum = default_rate * 0.2
+    total_weight = 0.2
+
+    if observed_rate > 0:
+        observed = min(max(observed_rate, lower), upper)
+        observed_weight = 0.3 if recent_rate and recent_rate > 0 else 0.65
+        weighted_sum += observed * observed_weight
+        total_weight += observed_weight
+    else:
+        observed = 0.0
+
+    if recent_rate and recent_rate > 0:
+        recent = min(max(recent_rate, lower), upper)
+        recent_weight = 0.5 if stage == 'vectorizing' else 0.35
+        weighted_sum += recent * recent_weight
+        total_weight += recent_weight
+    else:
+        recent = 0.0
+
+    blended = weighted_sum / max(total_weight, 1e-6)
+    blended = min(max(blended, lower), upper)
+
+    if stage == 'vectorizing' and progress_ratio >= 0.55:
+        tail_multiplier = 1.0 + min(((progress_ratio - 0.55) / 0.45) * 0.18, 0.18)
+        if recent > 0 and observed > 0 and recent > observed * 1.05:
+            tail_multiplier += min(((recent / observed) - 1.0) * 0.12, 0.12)
+        blended = min(blended * tail_multiplier, upper)
+
+    return blended
 
 
 def _clamp_rate(value: float, fallback: float) -> float:

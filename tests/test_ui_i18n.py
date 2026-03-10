@@ -29,6 +29,8 @@ class UiI18nTests(unittest.TestCase):
         self.assertEqual(text('zh-CN', 'main_tab_query'), '查询')
         self.assertEqual(text('en', 'main_tab_config'), 'Config')
         self.assertIn('单字查询', tooltip('zh-CN', 'query'))
+        self.assertIn('建议范围', text('zh-CN', 'query_limit_hint_ready', current=15, minimum=8, maximum=24, preferred=15, device='CPU', elapsed='520 毫秒', samples=3, reason='当前设置基本稳定'))
+        self.assertIn('candidate pool', tooltip('en', 'limit'))
 
 
 if __name__ == '__main__':

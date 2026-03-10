@@ -1,6 +1,6 @@
 # OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.8-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.9-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#quick-start)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#core-positioning)
@@ -43,12 +43,12 @@ This naturally emphasizes:
 - controlled exposure
 - no blanket vault access for AI
 
-## What's New In v0.1.8
-This release hardens live watch so local vault edge cases do not corrupt a still-valid index:
-- Reworked incremental watch refresh into a parse-first swap, so temporarily unreadable Markdown files keep the previous indexed content alive.
-- Unified polling and watchdog under the same snapshot-diff, file-stability, delete-confirmation, and manifest-reconcile flow.
-- Added offline guard handling for missing/unmounted vault roots plus persisted watch repair state for dirty render/vector work.
-- Surfaced watch offline / recovered / repaired / retry events in the desktop activity log.
+## What's New In v0.1.9
+This release focuses on retrieval quality and large-vault build realism:
+- Added backend-only retrieval policy, same-page novelty selection, optional reranker wiring, and AI-collaboration export shaping.
+- Added adaptive build-throughput control with `30% / 50% / 90%` hardware-peak profiles and safer encode/write batch tuning.
+- Reworked rebuild ETA so it learns from the current stage's recent throughput and previous vector tail-speed history instead of one blunt average.
+- Moved planning documents into `plans/` and kept this release source-only by default, without shipping a new EXE asset.
 ## Current Capabilities
 
 - Desktop GUI: configuration, precheck, model bootstrap, indexing, search, live watch, selective cleanup
@@ -147,7 +147,7 @@ See [RUNTIME_SETUP.md](RUNTIME_SETUP.md) for the packaged runtime flow.
 
 ## Current Version
 
-- Version: `V0.1.8`
+- Version: `V0.1.9`
 - Main delivery form: desktop GUI
 - Current stable path: `torch + bge-m3`
 
@@ -190,7 +190,7 @@ The current tree has already been validated with:
 - [Changelog](CHANGELOG.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
 - [Runtime Setup](RUNTIME_SETUP.md)
-- [Release Notes v0.1.8](releases/RELEASE_NOTES_v0.1.8.md)
+- [Release Notes v0.1.9](releases/RELEASE_NOTES_v0.1.9.md)
 - [Release Notes v0.1.7](releases/RELEASE_NOTES_v0.1.7.md)
 - [Release Notes v0.1.6](releases/RELEASE_NOTES_v0.1.6.md)
 - [Release Notes v0.1.4](releases/RELEASE_NOTES_v0.1.4.md)

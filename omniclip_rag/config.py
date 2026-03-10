@@ -54,7 +54,14 @@ class AppConfig:
     vector_device: str = "auto"
     vector_runtime: str = "torch"
     vector_batch_size: int = 16
+    build_resource_profile: str = "balanced"
     vector_local_files_only: bool = False
+    reranker_enabled: bool = False
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    reranker_batch_size_cpu: int = 4
+    reranker_batch_size_cuda: int = 8
+    reranker_max_chars: int = 1200
+    context_export_mode: str = "standard"
     rag_filter_core_enabled: bool = True
     rag_filter_extended_enabled: bool = False
     rag_filter_custom_rules: str = ""

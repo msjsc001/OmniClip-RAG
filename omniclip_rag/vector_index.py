@@ -7,9 +7,11 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Callable, Protocol
 
+from .build_control import BuildPerformanceController
 from .config import AppConfig, DataPaths
 from .errors import BuildCancelledError, RuntimeDependencyError
 
@@ -26,8 +28,9 @@ class Embedder(Protocol):
 class VectorIndex(Protocol):
     def rebuild(
         self,
-        documents: list[dict[str, str]],
+        documents: Iterable[dict[str, str]],
         *,
+        total: int | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
         pause_event: threading.Event | None = None,
         cancel_event: threading.Event | None = None,
@@ -57,8 +60,9 @@ _ACCELERATION_CACHE: dict[str, object] | None = None
 class NullVectorIndex:
     def rebuild(
         self,
-        documents: list[dict[str, str]],
+        documents: Iterable[dict[str, str]],
         *,
+        total: int | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
         pause_event: threading.Event | None = None,
         cancel_event: threading.Event | None = None,
@@ -112,39 +116,99 @@ class LanceDbVectorIndex:
 
     def rebuild(
         self,
-        documents: list[dict[str, str]],
+        documents: Iterable[dict[str, str]],
         *,
+        total: int | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
         pause_event: threading.Event | None = None,
         cancel_event: threading.Event | None = None,
     ) -> None:
         self.reset()
-        if not documents:
-            return
-        total = len(documents)
+        if total is None:
+            try:
+                total = len(documents)  # type: ignore[arg-type]
+            except TypeError:
+                total = 0
+        if total <= 0:
+            iterator = iter(documents)
+            try:
+                first_document = next(iterator)
+            except StopIteration:
+                return
+            documents = [first_document, *iterator]
+            total = len(documents)
         processed = 0
-        inner_batch_size = max(int(self.config.vector_batch_size or 16), 1)
         resolved_device = resolve_vector_device(self.config.vector_device)
-        batch_size = inner_batch_size * (2 if resolved_device == 'cuda' else 1)
+        controller = BuildPerformanceController(self.config, resolved_device)
+        iterator = iter(documents)
         table = None
+        pending_rows: list[dict[str, object]] = []
 
         _wait_for_controls(pause_event, cancel_event)
-        _emit_progress(on_progress, {"stage": "vectorizing", "current": 0, "total": total, "stage_status": "loading_model"})
+        _emit_progress(on_progress, {"stage": "vectorizing", "current": 0, "total": total, "stage_status": "loading_model", **controller.snapshot().to_progress_payload()})
         self._load_embedder()
 
-        for start in range(0, total, batch_size):
+        def flush_rows(force: bool = False) -> float:
+            nonlocal table, pending_rows
+            if not pending_rows:
+                return 0.0
+            write_target = max(controller.current_write_batch_size, 1)
+            if not force and len(pending_rows) < write_target:
+                return 0.0
+            flushed = 0
+            started = time.perf_counter()
+            while pending_rows and (force or flushed < write_target):
+                batch_rows = pending_rows[:write_target]
+                pending_rows = pending_rows[len(batch_rows):]
+                if not batch_rows:
+                    break
+                if table is None:
+                    self._ensure_table(len(batch_rows[0]["vector"]))
+                    table = self._table()
+                table.add(batch_rows)
+                flushed += len(batch_rows)
+                if not force:
+                    break
+            return max((time.perf_counter() - started) * 1000.0, 0.0)
+
+        while True:
             _wait_for_controls(pause_event, cancel_event)
-            batch = documents[start : start + batch_size]
-            rows = self._embed_documents(batch)
+            desired_batch = max(controller.current_encode_batch_size, 1)
+            batch: list[dict[str, str]] = []
+            for _ in range(desired_batch):
+                try:
+                    batch.append(next(iterator))
+                except StopIteration:
+                    break
+            if not batch:
+                break
+            encode_elapsed_ms = 0.0
+            while True:
+                started = time.perf_counter()
+                try:
+                    rows = self._embed_documents(batch, batch_size=min(len(batch), controller.current_encode_batch_size))
+                    encode_elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
+                    break
+                except RuntimeError as exc:
+                    if _is_oom_error(exc) and controller.current_encode_batch_size > controller.min_encode_batch_size:
+                        _clear_cuda_cache()
+                        tuning = controller.note_oom()
+                        _emit_progress(on_progress, {"stage": "vectorizing", "current": processed, "total": total, **tuning.to_progress_payload()})
+                        continue
+                    raise
             _wait_for_controls(pause_event, cancel_event)
             if not rows:
                 continue
-            if table is None:
-                self._ensure_table(len(rows[0]["vector"]))
-                table = self._table()
-            table.add(rows)
+            pending_rows.extend(rows)
+            write_elapsed_ms = flush_rows(force=False)
             processed += len(rows)
-            _emit_progress(on_progress, {"stage": "vectorizing", "current": processed, "total": total})
+            tuning = controller.observe(encode_elapsed_ms=encode_elapsed_ms, write_elapsed_ms=write_elapsed_ms)
+            _emit_progress(on_progress, {"stage": "vectorizing", "current": processed, "total": total, **tuning.to_progress_payload()})
+
+        write_elapsed_ms = flush_rows(force=True)
+        if write_elapsed_ms > 0:
+            tuning = controller.observe(encode_elapsed_ms=0.0, write_elapsed_ms=write_elapsed_ms)
+            _emit_progress(on_progress, {"stage": "vectorizing", "current": processed, "total": total, **tuning.to_progress_payload()})
 
     def upsert(self, documents: list[dict[str, str]]) -> None:
         if not documents:
@@ -157,8 +221,14 @@ class LanceDbVectorIndex:
     def delete(self, chunk_ids: list[str]) -> None:
         if not chunk_ids or not self._table_exists():
             return
-        quoted = ", ".join(f"'{self._escape(value)}'" for value in chunk_ids)
-        self._table().delete(f"chunk_id IN ({quoted})")
+        table = self._table()
+        batch_size = max(int(self.config.vector_batch_size or 16) * 16, 256)
+        for start in range(0, len(chunk_ids), batch_size):
+            batch = [value for value in chunk_ids[start : start + batch_size] if value]
+            if not batch:
+                continue
+            quoted = ", ".join(f"'{self._escape(value)}'" for value in batch)
+            table.delete(f"chunk_id IN ({quoted})")
 
     def search(self, query_text: str, limit: int) -> list[_VectorCandidate]:
         if not query_text.strip() or not self._table_exists():
@@ -225,16 +295,16 @@ class LanceDbVectorIndex:
     def _table(self):
         return self._db.open_table(self._table_name)
 
-    def _embed_documents(self, documents: list[dict[str, str]]) -> list[dict[str, object]]:
+    def _embed_documents(self, documents: list[dict[str, str]], *, batch_size: int | None = None) -> list[dict[str, object]]:
         texts = [item["rendered_text"] for item in documents]
-        vectors = self._encode(texts)
+        vectors = self._encode(texts, batch_size=batch_size)
         return [{**document, "vector": [float(value) for value in vector]} for document, vector in zip(documents, vectors, strict=True)]
 
-    def _encode(self, texts: list[str]):
+    def _encode(self, texts: list[str], *, batch_size: int | None = None):
         embedder = self._load_embedder()
         return embedder.encode(
             texts,
-            batch_size=self.config.vector_batch_size,
+            batch_size=batch_size or self.config.vector_batch_size,
             show_progress_bar=False,
             normalize_embeddings=True,
         )
@@ -557,6 +627,23 @@ def _configure_huggingface_environment(hf_home_dir: Path) -> None:
     hf_constants.HUGGINGFACE_ASSETS_CACHE = str(assets_dir)
     hf_constants.HF_XET_CACHE = str(xet_dir)
     hf_constants.HF_HUB_DISABLE_XET = True
+
+
+def _is_oom_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return 'out of memory' in message or 'cuda out of memory' in message
+
+
+def _clear_cuda_cache() -> None:
+    try:
+        import torch
+    except Exception:
+        return
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        return
 
 
 def _distance_to_score(distance: float) -> float:

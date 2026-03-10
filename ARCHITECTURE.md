@@ -367,6 +367,27 @@ Current acceleration UX rule:
 
 Why: performance hints are useful, but false promises about GPU acceleration create more confusion than a conservative capability report.
 
+
+## 2026-03-10 Query Runtime Shaping
+
+### Decisions
+- Same-page hit selection is no longer allowed to live in `gui.py` or as ad-hoc helpers inside the service layer. It now belongs to a dedicated query-runtime module.
+- `query_runtime.py` owns three post-retrieval responsibilities: duplicate suppression, same-page novelty selection, and query-limit recommendation.
+- Query-limit guidance is advisory, not automatic. The app may recommend a range based on live runtime history, but it must not silently rewrite the user's configured value.
+- The GUI only consumes structured `QueryResult -> QueryInsights -> QueryLimitRecommendation` payloads. It may render hints and tooltips, but it must not recalculate retrieval policy.
+
+### Why
+- Retrieval quality should be testable without spinning up the desktop UI.
+- Same-page de-duplication is the main lever for reducing user self-filtering cost, but it is also easy to overdo and accidentally hide complementary evidence.
+- Query-limit tuning depends on real runtime behavior, so the product should learn from elapsed time and candidate pressure instead of forcing users to brute-force the right number manually.
+
+### Implementation Notes
+- `models.py` now carries `QueryResult`, `QueryInsights`, and `QueryLimitRecommendation` so the service/UI contract stays explicit.
+- `service.py::query()` returns a structured result object and records lightweight runtime telemetry into `query_runtime.json` under the per-workspace state directory.
+- `query_runtime.py::select_query_hits()` keeps the strongest same-page evidence, suppresses obvious overlap, and preserves complementary fragments when they add new information instead of repeating the same branch.
+- `gui.py` now only renders the recommended range and the reason string; the actual novelty and recommendation logic stays backend-only.
+- The query-limit tooltip now explains both the current display semantics and that the same knob will become the reranker candidate-pool size once reranking is added later.
+
 ## Packaging Hygiene
 
 The repository should keep only one formal Windows desktop deliverable at a time:
@@ -465,3 +486,71 @@ Why: users reasonably assume “nvcc works” means the app should already use t
 - Render refreshes and vector writes are recoverable: failed render/vector work is left marked dirty and replayed later instead of forcing an all-or-nothing crash.
 - GUI activity logs must surface vault-offline, vault-recovered, repair, and retry events so watch behavior is auditable in normal desktop use.
 
+## 2026-03-10 Large-Vault Batch Safety
+
+### Decisions
+- SQLite writes that depend on `IN (...)` placeholders must always be batched against the runtime variable limit instead of assuming desktop-scale payload sizes.
+- Full rebuild rendering must flush rendered chunks in bounded batches; it may not accumulate the entire vault's rendered payload in memory before writing.
+- Full rebuild vectorization must consume rendered documents as a stream so vault size is no longer coupled to one giant in-memory list.
+- Incremental vector sync for large single pages must upsert/delete in bounded batches as well, because tens of thousands of chunks can come from one page.
+
+### Why
+- Large vaults can exceed SQLite's variable cap during `DELETE ... IN (...)` or `SELECT ... IN (...)`, which crashes the build near the end even if parsing succeeded.
+- Some real pages contain tens of thousands of blocks, so 'single page' does not mean 'small batch'.
+- The safe target is not 'works for today's vault' but 'still behaves predictably when vault/page counts are orders of magnitude larger'.
+
+### Implementation Notes
+- `storage.py` now resolves SQLite's live variable limit and batches all high-risk path/chunk/block-id queries and deletes.
+- `update_rendered_chunks()` rewrites FTS rows in batches inside one transaction instead of emitting one unbounded placeholder list.
+- `service.py::_refresh_rendered()` now streams rows and flushes rendered text every fixed batch instead of waiting for the full render pass to finish.
+- `vector_index.py::rebuild()` now accepts streamed iterables with an explicit `total`, and vector deletes are chunked to avoid oversized deletion predicates.
+
+
+
+
+## 2026-03-10 Build Throughput Control
+
+### Decisions
+- Full rebuild performance tuning is now backend-owned. The desktop UI exposes only a coarse peak target (`30% / 50% / 90%`), while the actual batch sizing and safety decisions live outside the window layer.
+- CPU, GPU, and memory must be coordinated together during vector rebuilds. The app is not allowed to blindly maximize one resource while starving the others or pushing the machine into avoidable instability.
+- The peak selector is a target envelope, not a literal hard cap. The controller aims for quiet / balanced / peak behavior but may back off aggressively on pressure or OOM.
+- Vector encode batch size and LanceDB write batch size are now separate tuning knobs. GPU-friendly encode sizing and storage-friendly write sizing are not forced to be identical.
+- Runtime safety wins over theoretical throughput. Any OOM or pressure event must degrade to a smaller batch or a safe fallback instead of crashing the rebuild.
+
+### Why
+- Large Logseq vaults can spend most of their rebuild time in the late vector stage while CPU and GPU both remain underutilized, which means the current bottleneck is orchestration rather than pure model speed.
+- A desktop app must let users trade off speed vs foreground usability without exposing dozens of low-level performance settings.
+- The app already targets very large vaults and huge single pages, so performance tuning must stay bounded, observable, and recoverable under real Windows desktop conditions.
+
+### Implementation Notes
+- `build_control.py` owns resource sampling and adaptive batch control. It samples Windows CPU and memory, queries NVIDIA usage through `nvidia-smi` when CUDA is active, and produces profile-aware tuning snapshots.
+- `vector_index.py::rebuild()` now keeps encode batching and write batching separate, buffers rows before LanceDB writes, and reports tuning snapshots in task progress payloads.
+- The controller currently adjusts three things: encode batch size, write batch size, and cooldown after OOM / pressure events.
+- `timing.py` now owns a `BuildEtaTracker` that keeps recent per-stage progress windows and blends them with static history instead of trusting one whole-run average.
+- Vector tail speed is now written into `build_history.json`, so the next build can start with a more realistic estimate for the expensive late vector stage.
+- The GUI only persists and renders the build peak profile plus live tuning summaries. It does not decide when to expand or shrink batches.
+- The first implementation intentionally stays single-process and conservative. It improves throughput by larger buffered writes and adaptive batch sizes, but it does not yet introduce a full producer/consumer pipeline.
+- Future performance work should focus on deeper pipeline overlap, more granular phase telemetry, and sustained late-stage LanceDB write optimization without breaking rebuild safety.
+
+## 2026-03-10 Retrieval Optimization Delivery
+
+### Decisions
+- Retrieval shaping is now split into three backend-only modules: `retrieval_policy.py`, `query_runtime.py`, and `reranker.py`. The GUI consumes results; it does not decide ranking strategy.
+- Mixed retrieval now starts from a typed `QueryProfile`, so single-character queries, concept queries, and natural-language queries no longer share one blunt retrieval path.
+- Same-page post-selection is novelty-based instead of page-penalty-based. The system suppresses obvious overlap but keeps complementary evidence from the same page.
+- Reranking is optional, manually bootstrapped, and failure-safe. It is an enhancement layer, not a prerequisite for querying.
+- AI collaboration export is a separate output mode, not a hard-coded tail prompt inside every context pack.
+
+### Why
+- The highest user cost was no longer "searching" but manually deciding which same-page fragments to keep.
+- Query quality improvements must remain testable without launching the desktop UI.
+- Optional heavy features such as a cross-encoder reranker must never destabilize the default local-first workflow.
+
+### Implementation Notes
+- `retrieval_policy.py` now owns query intent typing, candidate-pool sizing, lexical/semantic fusion, and hydration-pool sizing.
+- `query_runtime.py` now owns same-page novelty selection, duplicate suppression, and query-limit recommendation from runtime history.
+- `reranker.py` wraps `BAAI/bge-reranker-v2-m3` behind a replaceable interface, supports batching, truncation, CUDA OOM recovery, batch-size reduction, CPU fallback, and safe skip behavior.
+- `service.py::query()` now returns a structured `QueryResult` with `QueryInsights`, recommendation payloads, and optional reranker outcomes.
+- `gui.py` only renders recommendation hints, reranker settings, and export-mode controls; it does not recompute backend policy.
+- `query_runtime.json` stores lightweight runtime samples so the app can recommend a practical query-limit range without silently rewriting user settings.
+- `ai-collab` export mode appends a minimal collaboration note only when explicitly enabled.

@@ -21,7 +21,8 @@ class GuiTests(unittest.TestCase):
 
     def _build_app(self) -> OmniClipDesktopApp:
         TEST_DATA_ROOT.mkdir(parents=True, exist_ok=True)
-        with patch('omniclip_rag.gui.ensure_data_paths', side_effect=lambda custom_root=None, vault_path=None: __import__('omniclip_rag.config', fromlist=['ensure_data_paths']).ensure_data_paths(str(TEST_DATA_ROOT.resolve()), vault_path)):
+        with patch('omniclip_rag.gui.ensure_data_paths', side_effect=lambda custom_root=None, vault_path=None: __import__('omniclip_rag.config', fromlist=['ensure_data_paths']).ensure_data_paths(str(TEST_DATA_ROOT.resolve()), vault_path)), \
+             patch.object(OmniClipDesktopApp, '_load_initial_status', autospec=True, return_value=None):
             app = OmniClipDesktopApp()
         app.data_dir_var.set(str(TEST_DATA_ROOT.resolve()))
         app.backend_var.set('lancedb')
@@ -101,6 +102,24 @@ class GuiTests(unittest.TestCase):
         finally:
             app._on_close()
 
+    def test_config_carries_reranker_and_export_mode(self) -> None:
+        app = self._build_app()
+        try:
+            app.reranker_enabled_var.set(True)
+            app.reranker_model_var.set('BAAI/bge-reranker-v2-m3')
+            app.reranker_batch_cpu_var.set('3')
+            app.reranker_batch_cuda_var.set('6')
+            app.context_export_ai_collab_var.set(True)
+            app.build_resource_profile_var.set(app._build_profile_label('peak'))
+            config, _paths = app._config(True)
+            self.assertTrue(config.reranker_enabled)
+            self.assertEqual(config.reranker_batch_size_cpu, 3)
+            self.assertEqual(config.reranker_batch_size_cuda, 6)
+            self.assertEqual(config.context_export_mode, 'ai-collab')
+            self.assertEqual(config.build_resource_profile, 'peak')
+        finally:
+            app._on_close()
+
     def test_config_includes_page_blocklist_rules(self) -> None:
         app = self._build_app()
         try:
@@ -152,6 +171,28 @@ class GuiTests(unittest.TestCase):
             tabs = app.main_tabs.tabs()
             self.assertEqual(app.main_tabs.tab(tabs[0], 'text'), app._tr('main_tab_query'))
             self.assertEqual(app.main_tabs.tab(tabs[1], 'text'), app._tr('main_tab_config'))
+        finally:
+            app._on_close()
+
+    def test_apply_status_updates_query_limit_guidance(self) -> None:
+        app = self._build_app()
+        try:
+            app._apply_status({
+                'stats': {'files': 1, 'chunks': 2, 'refs': 0},
+                'query_limit_recommendation': {
+                    'device': 'cpu',
+                    'preferred': 15,
+                    'minimum': 8,
+                    'maximum': 24,
+                    'reason_code': 'steady',
+                    'samples': 3,
+                    'elapsed_ms': 520,
+                },
+            })
+            self.assertIn('8-24', app.query_limit_hint_var.get())
+            self.assertIn('15', app.query_limit_hint_var.get())
+            self.assertIsNotNone(app.limit_entry_tooltip)
+            self.assertIn('8-24', app.limit_entry_tooltip.text)
         finally:
             app._on_close()
 

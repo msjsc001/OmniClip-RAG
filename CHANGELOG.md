@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+## V0.1.9 - 2026-03-10
+
+### Added
+
+- Added backend-only retrieval-shaping modules for query profiling, runtime hit selection, optional reranking, and query-limit recommendation history.
+- Added optional `BAAI/bge-reranker-v2-m3` support with manual bootstrap, batching, truncation, CUDA OOM recovery, CPU fallback, and GUI settings.
+- Added an optional AI collaboration export mode that appends minimal retrieval guidance without forcing a fixed tail prompt into every context pack.
+- Added a build-performance controller with `30% / 50% / 90%` hardware-peak profiles, Windows CPU/GPU/memory sampling, adaptive encode/write batch sizing, and live rebuild tuning summaries in the desktop task panel.
+- Added a phase-aware rebuild ETA tracker that blends static history, current-stage recent throughput, and vector tail-rate history instead of trusting one linear average.
+
+### Changed
+
+- Changed large-vault rendering and vector rebuild paths to stream in bounded batches instead of materializing the whole rendered/vector document set at once.
+- Changed storage-layer `IN (...)` reads/deletes to honor SQLite variable limits dynamically, so huge vaults and huge single pages no longer fail near the end of indexing.
+- Changed mixed retrieval to run through typed query profiles so short terms, concept terms, and natural-language queries can use different fusion and candidate-pool strategies.
+- Changed same-page post-selection to novelty-based suppression instead of blunt same-page penalties, reducing duplicate evidence without discarding complementary fragments.
+- Changed query-limit guidance so it is derived from persisted runtime history and reranker state, while remaining advisory rather than auto-rewriting user settings.
+- Changed vector rebuild batching so CUDA encode size and LanceDB write size are tuned independently, with OOM-triggered shrink behavior and resource-aware expansion under headroom.
+- Changed rebuild ETA updates so indexing, rendering, and vectorizing now use their own recent windows, and vector ETA can learn from tail-speed history written by previous runs.
+
+### Fixed
+
+- Fixed `sqlite3.OperationalError: too many SQL variables` during late-stage render/FTS refresh on large vaults.
+- Fixed large single-page incremental updates so tens of thousands of chunks no longer build oversized vector delete/upsert batches.
+- Fixed the query-limit tooltip/runtime contract so GUI hints no longer depend on local recomputation or `__dict__` access against slots dataclasses.
+- Fixed reranker local-model readiness checks so a locally present cross-encoder can be used without being mistaken for a missing embedding cache.
+- Fixed AI collaboration export language fallback so Chinese retrieval sessions stay Chinese even on an English system locale.
+
 ## V0.1.8 - 2026-03-09
 
 ### Added

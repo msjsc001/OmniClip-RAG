@@ -22,6 +22,7 @@ class MetadataStore:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL;")
         self.connection.execute("PRAGMA foreign_keys=ON;")
+        self._variable_limit = self._resolve_variable_limit()
         self._initialize_schema()
 
     def close(self) -> None:
@@ -264,64 +265,68 @@ class MetadataStore:
     def _delete_files_tx(self, paths: list[str]) -> None:
         if not paths:
             return
-        placeholders = ",".join("?" for _ in paths)
-        chunk_rows = self.connection.execute(
-            f"SELECT chunk_id FROM chunks WHERE source_path IN ({placeholders})",
-            paths,
-        ).fetchall()
-        chunk_ids = [row["chunk_id"] for row in chunk_rows]
-        if chunk_ids:
-            fts_placeholders = ",".join("?" for _ in chunk_ids)
+        for batch in self._batched_values(paths):
+            placeholders = ",".join("?" for _ in batch)
             self.connection.execute(
-                f"DELETE FROM chunks_fts WHERE chunk_id IN ({fts_placeholders})",
-                chunk_ids,
+                f"DELETE FROM chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE source_path IN ({placeholders}))",
+                batch,
             )
-        self.connection.execute(
-            f"DELETE FROM files WHERE source_path IN ({placeholders})",
-            paths,
-        )
+            self.connection.execute(
+                f"DELETE FROM files WHERE source_path IN ({placeholders})",
+                batch,
+            )
 
     def get_block_ids_for_paths(self, relative_paths: Iterable[str]) -> set[str]:
         paths = [item for item in relative_paths if item]
         if not paths:
             return set()
-        placeholders = ",".join("?" for _ in paths)
-        rows = self.connection.execute(
-            f"""
-            SELECT block_id
-            FROM chunks
-            WHERE source_path IN ({placeholders}) AND block_id IS NOT NULL
-            """,
-            paths,
-        ).fetchall()
-        return {row["block_id"] for row in rows if row["block_id"]}
+        block_ids: set[str] = set()
+        for batch in self._batched_values(paths):
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.connection.execute(
+                f"""
+                SELECT block_id
+                FROM chunks
+                WHERE source_path IN ({placeholders}) AND block_id IS NOT NULL
+                """,
+                batch,
+            ).fetchall()
+            block_ids.update(row["block_id"] for row in rows if row["block_id"])
+        return block_ids
 
     def get_chunk_ids_for_paths(self, relative_paths: Iterable[str]) -> list[str]:
         paths = [item for item in relative_paths if item]
         if not paths:
             return []
-        placeholders = ",".join("?" for _ in paths)
-        rows = self.connection.execute(
-            f"SELECT chunk_id FROM chunks WHERE source_path IN ({placeholders})",
-            paths,
-        ).fetchall()
-        return [row["chunk_id"] for row in rows]
+        chunk_ids: list[str] = []
+        for batch in self._batched_values(paths):
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.connection.execute(
+                f"SELECT chunk_id FROM chunks WHERE source_path IN ({placeholders})",
+                batch,
+            ).fetchall()
+            chunk_ids.extend(row["chunk_id"] for row in rows)
+        return chunk_ids
 
     def get_transitive_dependent_paths(self, block_ids: set[str]) -> set[str]:
         frontier = set(block_ids)
         seen_ids = set(block_ids)
         paths: set[str] = set()
         while frontier:
-            placeholders = ",".join("?" for _ in frontier)
-            rows = self.connection.execute(
-                f"""
-                SELECT DISTINCT chunks.block_id, chunks.source_path
-                FROM refs
-                JOIN chunks ON chunks.chunk_id = refs.source_chunk_id
-                WHERE refs.target_block_id IN ({placeholders})
-                """,
-                list(frontier),
-            ).fetchall()
+            rows: list[sqlite3.Row] = []
+            for batch in self._batched_values(sorted(frontier)):
+                placeholders = ",".join("?" for _ in batch)
+                rows.extend(
+                    self.connection.execute(
+                        f"""
+                        SELECT DISTINCT chunks.block_id, chunks.source_path
+                        FROM refs
+                        JOIN chunks ON chunks.chunk_id = refs.source_chunk_id
+                        WHERE refs.target_block_id IN ({placeholders})
+                        """,
+                        batch,
+                    ).fetchall()
+                )
             next_frontier: set[str] = set()
             for row in rows:
                 paths.add(row["source_path"])
@@ -332,28 +337,57 @@ class MetadataStore:
             frontier = next_frontier
         return paths
 
-    def fetch_render_rows(self, source_paths: Iterable[str] | None = None) -> list[sqlite3.Row]:
+    def count_render_rows(self, source_paths: Iterable[str] | None = None) -> int:
         if source_paths is None:
-            query = """
-            SELECT chunks.*, files.page_properties_json
-            FROM chunks
-            JOIN files ON files.source_path = chunks.source_path
-            ORDER BY chunks.source_path, chunks.position
-            """
-            return self.connection.execute(query).fetchall()
+            return int(self.connection.execute("SELECT COUNT(*) AS count FROM chunks").fetchone()["count"])
+        paths = [item for item in source_paths if item]
+        if not paths:
+            return 0
+        total = 0
+        for batch in self._batched_values(sorted(paths)):
+            placeholders = ",".join("?" for _ in batch)
+            total += int(
+                self.connection.execute(
+                    f"SELECT COUNT(*) AS count FROM chunks WHERE source_path IN ({placeholders})",
+                    batch,
+                ).fetchone()["count"]
+            )
+        return total
+
+    def iter_render_rows(self, source_paths: Iterable[str] | None = None):
+        if source_paths is None:
+            cursor = self.connection.execute(
+                """
+                SELECT chunks.*, files.page_properties_json
+                FROM chunks
+                JOIN files ON files.source_path = chunks.source_path
+                ORDER BY chunks.source_path, chunks.position
+                """
+            )
+            for row in cursor:
+                yield row
+            return
 
         paths = [item for item in source_paths if item]
         if not paths:
-            return []
-        placeholders = ",".join("?" for _ in paths)
-        query = f"""
-        SELECT chunks.*, files.page_properties_json
-        FROM chunks
-        JOIN files ON files.source_path = chunks.source_path
-        WHERE chunks.source_path IN ({placeholders})
-        ORDER BY chunks.source_path, chunks.position
-        """
-        return self.connection.execute(query, paths).fetchall()
+            return
+        for batch in self._batched_values(sorted(paths)):
+            placeholders = ",".join("?" for _ in batch)
+            cursor = self.connection.execute(
+                f"""
+                SELECT chunks.*, files.page_properties_json
+                FROM chunks
+                JOIN files ON files.source_path = chunks.source_path
+                WHERE chunks.source_path IN ({placeholders})
+                ORDER BY chunks.source_path, chunks.position
+                """,
+                batch,
+            )
+            for row in cursor:
+                yield row
+
+    def fetch_render_rows(self, source_paths: Iterable[str] | None = None) -> list[sqlite3.Row]:
+        return list(self.iter_render_rows(source_paths))
 
     def fetch_block_lookup(self) -> dict[str, sqlite3.Row]:
         rows = self.connection.execute(
@@ -372,61 +406,73 @@ class MetadataStore:
             FROM chunks
             JOIN files ON files.source_path = chunks.source_path
         """
-        params: list[str] = []
         if chunk_ids is not None:
             values = [item for item in chunk_ids if item]
             if not values:
                 return {}
-            placeholders = ",".join("?" for _ in values)
-            query += f" WHERE chunks.chunk_id IN ({placeholders})"
-            params.extend(values)
-        rows = self.connection.execute(query, params).fetchall()
+            rows: list[sqlite3.Row] = []
+            for batch in self._batched_values(values):
+                placeholders = ",".join("?" for _ in batch)
+                rows.extend(
+                    self.connection.execute(
+                        query + f" WHERE chunks.chunk_id IN ({placeholders})",
+                        batch,
+                    ).fetchall()
+                )
+            return {row["chunk_id"]: row for row in rows}
+        rows = self.connection.execute(query).fetchall()
         return {row["chunk_id"]: row for row in rows}
 
     def fetch_rows_by_chunk_ids(self, chunk_ids: Iterable[str]) -> list[sqlite3.Row]:
         values = [item for item in chunk_ids if item]
         if not values:
             return []
-        placeholders = ",".join("?" for _ in values)
-        return self.connection.execute(
-            f"""
-            SELECT chunks.*, files.page_properties_json, NULL AS fts_rank, 0 AS like_hits
-            FROM chunks
-            JOIN files ON files.source_path = chunks.source_path
-            WHERE chunks.chunk_id IN ({placeholders})
-            """,
-            values,
-        ).fetchall()
+        rows: list[sqlite3.Row] = []
+        for batch in self._batched_values(values):
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(
+                self.connection.execute(
+                    f"""
+                    SELECT chunks.*, files.page_properties_json, NULL AS fts_rank, 0 AS like_hits
+                    FROM chunks
+                    JOIN files ON files.source_path = chunks.source_path
+                    WHERE chunks.chunk_id IN ({placeholders})
+                    """,
+                    batch,
+                ).fetchall()
+            )
+        return rows
 
     def update_rendered_chunks(self, payloads: list[tuple[str, str]]) -> None:
         if not payloads:
             return
-        chunk_ids = [chunk_id for chunk_id, _ in payloads]
-        placeholders = ",".join("?" for _ in chunk_ids)
-        self.connection.execute(
-            f"DELETE FROM chunks_fts WHERE chunk_id IN ({placeholders})",
-            chunk_ids,
-        )
-        self.connection.executemany(
-            "UPDATE chunks SET rendered_text = ? WHERE chunk_id = ?",
-            [(rendered, chunk_id) for chunk_id, rendered in payloads],
-        )
-        rows = self.connection.execute(
-            f"""
-            SELECT chunk_id, title, anchor, rendered_text
-            FROM chunks
-            WHERE chunk_id IN ({placeholders})
-            """,
-            chunk_ids,
-        ).fetchall()
-        self.connection.executemany(
-            """
-            INSERT INTO chunks_fts (chunk_id, title, anchor, rendered_text)
-            VALUES (?, ?, ?, ?)
-            """,
-            [(row["chunk_id"], row["title"], row["anchor"], row["rendered_text"]) for row in rows],
-        )
-        self.connection.commit()
+        with self.connection:
+            self.connection.executemany(
+                "UPDATE chunks SET rendered_text = ? WHERE chunk_id = ?",
+                [(rendered, chunk_id) for chunk_id, rendered in payloads],
+            )
+            chunk_ids = [chunk_id for chunk_id, _ in payloads if chunk_id]
+            for batch in self._batched_values(chunk_ids):
+                placeholders = ",".join("?" for _ in batch)
+                self.connection.execute(
+                    f"DELETE FROM chunks_fts WHERE chunk_id IN ({placeholders})",
+                    batch,
+                )
+                rows = self.connection.execute(
+                    f"""
+                    SELECT chunk_id, title, anchor, rendered_text
+                    FROM chunks
+                    WHERE chunk_id IN ({placeholders})
+                    """,
+                    batch,
+                ).fetchall()
+                self.connection.executemany(
+                    """
+                    INSERT INTO chunks_fts (chunk_id, title, anchor, rendered_text)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [(row["chunk_id"], row["title"], row["anchor"], row["rendered_text"]) for row in rows],
+                )
 
     def fetch_all_rendered_chunks(self) -> list[sqlite3.Row]:
         return self.connection.execute(
@@ -437,19 +483,37 @@ class MetadataStore:
             """
         ).fetchall()
 
-    def fetch_vector_documents(self, source_paths: Iterable[str] | None = None) -> list[dict[str, str]]:
-        rows = self.fetch_render_rows(source_paths)
-        return [
-            {
+    def count_vector_documents(self, source_paths: Iterable[str] | None = None) -> int:
+        if source_paths is None:
+            return int(self.connection.execute("SELECT COUNT(*) AS count FROM chunks WHERE rendered_text <> ''").fetchone()["count"])
+        paths = [item for item in source_paths if item]
+        if not paths:
+            return 0
+        total = 0
+        for batch in self._batched_values(sorted(paths)):
+            placeholders = ",".join("?" for _ in batch)
+            total += int(
+                self.connection.execute(
+                    f"SELECT COUNT(*) AS count FROM chunks WHERE source_path IN ({placeholders}) AND rendered_text <> ''",
+                    batch,
+                ).fetchone()["count"]
+            )
+        return total
+
+    def iter_vector_documents(self, source_paths: Iterable[str] | None = None):
+        for row in self.iter_render_rows(source_paths):
+            if not row["rendered_text"]:
+                continue
+            yield {
                 "chunk_id": row["chunk_id"],
                 "source_path": row["source_path"],
                 "title": row["title"],
                 "anchor": row["anchor"],
                 "rendered_text": row["rendered_text"],
             }
-            for row in rows
-            if row["rendered_text"]
-        ]
+
+    def fetch_vector_documents(self, source_paths: Iterable[str] | None = None) -> list[dict[str, str]]:
+        return list(self.iter_vector_documents(source_paths))
 
     def search_candidates(self, query_text: str, limit: int) -> list[sqlite3.Row]:
         candidate_map: dict[str, dict[str, object]] = {}
@@ -513,12 +577,15 @@ class MetadataStore:
         unique_ids = sorted({item for item in block_ids if item})
         if not unique_ids:
             return set()
-        placeholders = ','.join('?' for _ in unique_ids)
-        rows = self.connection.execute(
-            f'SELECT block_id FROM chunks WHERE block_id IN ({placeholders})',
-            unique_ids,
-        ).fetchall()
-        return {row['block_id'] for row in rows if row['block_id']}
+        existing_ids: set[str] = set()
+        for batch in self._batched_values(unique_ids):
+            placeholders = ','.join('?' for _ in batch)
+            rows = self.connection.execute(
+                f'SELECT block_id FROM chunks WHERE block_id IN ({placeholders})',
+                batch,
+            ).fetchall()
+            existing_ids.update(row['block_id'] for row in rows if row['block_id'])
+        return existing_ids
 
     def _fallback_chunk_id(self, source_path: str, kind: str, position: int, block_id: str) -> str:
         digest = hashlib.sha1(f'{source_path}|{kind}|{position}|{block_id}'.encode('utf-8')).hexdigest()[:20]
@@ -616,6 +683,29 @@ class MetadataStore:
             ),
         )
         return cursor.fetchone()
+
+    def _resolve_variable_limit(self) -> int:
+        if hasattr(self.connection, 'getlimit') and hasattr(sqlite3, 'SQLITE_LIMIT_VARIABLE_NUMBER'):
+            try:
+                limit = int(self.connection.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER))
+            except Exception:
+                limit = 0
+            if limit > 32:
+                return max(limit - 8, 128)
+        return 900
+
+    def _batched_values(self, values: Iterable[str]):
+        batch: list[str] = []
+        for value in values:
+            if not value:
+                continue
+            batch.append(value)
+            if len(batch) >= self._variable_limit:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
 
 
 def _build_fts_query(query_text: str) -> str | None:

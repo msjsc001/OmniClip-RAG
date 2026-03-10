@@ -1,6 +1,6 @@
 # 方寸引 / OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.8-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.9-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#首次使用建议)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#核心定位)
@@ -43,14 +43,14 @@
 - 可控暴露面
 - 不把整库直接交给 AI
 
-## V0.1.8 重点更新
+## V0.1.9 重点更新
 
-这一轮聚焦在“热监听加固”，目标是不让真实笔记库边界情况把已有索引 silently 做坏：
+这一轮聚焦在“检索结果更省筛选、建库和 ETA 更像真实机器表现”：
 
-- 热更新改成“先解析成功，再替换索引”，临时锁定、半写入、不可读的 Markdown 不会先把旧索引删掉。
-- `watchdog` 和轮询统一走“快照比对 + 文件稳定窗口 + 删除确认窗口 + 清单补偿”这条安全链路。
-- 加上了笔记库掉盘/offline 保护，以及 `watch_state.json` 驱动的脏渲染/脏向量补偿修复。
-- 活动日志现在会明确显示监听离线、恢复、补偿、重试这些事件。
+- 检索侧补齐了后端独立的检索策略、同页新信息增益选择、可选 reranker 接入和 AI 协作导出。
+- 建库侧加入了 `30% / 50% / 90%` 的硬件峰值档位，以及编码批次 / 写库批次的自适应调节。
+- 剩余时间估算改成会参考当前阶段最近吞吐和过往向量尾段历史，不再只信一个线性平均值。
+- 计划文档已统一整理到 `plans/` 目录，本次发布默认为源码更新，不附带新的 EXE 资产。
 
 ## 当前能力
 
@@ -150,7 +150,7 @@ OmniClip RAG/
 
 ## 当前版本说明
 
-- 版本：`V0.1.8`
+- 版本：`V0.1.9`
 - 主交付形态：桌面 GUI
 - 当前稳定主线：`torch + bge-m3`
 
@@ -193,7 +193,7 @@ tests/
 - [更新日志](CHANGELOG.md)
 - [空间预检说明](STORAGE_PRECHECK.md)
 - [运行时安装说明](RUNTIME_SETUP.md)
-- [v0.1.8 发布说明](releases/RELEASE_NOTES_v0.1.8.md)
+- [v0.1.9 发布说明](releases/RELEASE_NOTES_v0.1.9.md)
 - [v0.1.7 发布说明](releases/RELEASE_NOTES_v0.1.7.md)
 - [v0.1.6 发布说明](releases/RELEASE_NOTES_v0.1.6.md)
 - [v0.1.4 发布说明](releases/RELEASE_NOTES_v0.1.4.md)

@@ -20,7 +20,7 @@ class _StubVectorIndex:
     def __init__(self) -> None:
         self.reset_called = False
 
-    def rebuild(self, documents, *, on_progress=None, pause_event=None, cancel_event=None):
+    def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None):
         return None
 
     def upsert(self, documents):
@@ -268,6 +268,24 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("手机笔记", {hit.title for hit in hits})
             self.assertIn("鞋底胶综合硬度不如木片", context)
             self.assertEqual(sum(1 for hit in hits if hit.title == "手机笔记" and hit.anchor.startswith("鞋子记录")), 2)
+        finally:
+            service.close()
+
+    def test_ai_collaboration_export_mode_adds_guidance_without_changing_hits(self) -> None:
+        vault_copy = ROOT / '.tmp' / 'ai_collab_vault_test'
+        data_root = ROOT / '.tmp' / 'ai_collab_data_test'
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        (vault_copy / '手机笔记.md').write_text('- 鞋子记录\n  - 棕色鞋\n    - 20260219 9000步\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root), context_export_mode='ai-collab')
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        try:
+            service.rebuild_index()
+            result = service.query('鞋', limit=3)
+            self.assertTrue(result.hits)
+            self.assertIn('AI协作模式', result.context_text)
+            self.assertIn('检索关键词', result.context_text)
         finally:
             service.close()
 

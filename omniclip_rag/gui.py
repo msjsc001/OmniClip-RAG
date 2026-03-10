@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from dataclasses import asdict
 import locale
 import re
 import queue
@@ -17,15 +18,17 @@ from tkinter import filedialog, messagebox, ttk
 from .clipboard import copy_text
 from .config import AppConfig, default_data_root, ensure_data_paths, load_config, normalize_vault_path, save_config
 from .errors import BuildCancelledError, RuntimeDependencyError
+from .build_control import format_resource_sample, normalize_build_resource_profile, ResourceSample
 from .formatting import format_bytes, format_duration, format_space_report, summarize_preflight
 from .preflight import estimate_model_cache_bytes
 from .service import WATCHDOG_AVAILABLE, OmniClipService
 from .ui_i18n import language_code_from_label, language_label, normalize_language, text, tooltip
 from .ui_tooltip import ToolTip
+from .reranker import is_local_reranker_ready
 from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.1.8"
+APP_VERSION = "V0.1.9"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 _CONTEXT_PAGE_RE = re.compile(r'^# 笔记名：(.*)$')
 _CONTEXT_FRAGMENT_RE = re.compile(r'^笔记片段\d+：$')
@@ -122,6 +125,9 @@ class OmniClipDesktopApp:
         self.header_icon: tk.PhotoImage | None = None
         self.page_blocklist_window: tk.Toplevel | None = None
         self.sensitive_filter_window: tk.Toplevel | None = None
+        self.limit_label_tooltip: ToolTip | None = None
+        self.limit_entry_tooltip: ToolTip | None = None
+        self.query_limit_recommendation: dict[str, object] | None = None
 
         self._init_style()
         self._init_vars()
@@ -208,10 +214,13 @@ class OmniClipDesktopApp:
         self.model_var = tk.StringVar(value="BAAI/bge-m3")
         self.runtime_var = tk.StringVar(value="torch")
         self.device_var = tk.StringVar(value="auto")
+        self.device_var.trace_add('write', lambda *_args: self._refresh_query_limit_guidance())
         self.device_summary_var = tk.StringVar(value="")
         self.limit_var = tk.StringVar(value="15")
+        self.limit_var.trace_add('write', lambda *_args: self._refresh_query_limit_guidance())
         self.score_threshold_var = tk.StringVar(value="0")
         self.interval_var = tk.StringVar(value="2.0")
+        self.build_resource_profile_var = tk.StringVar(value=self._build_profile_label('balanced'))
         self.query_var = tk.StringVar()
         self.context_selection_var = tk.StringVar(value="")
         self.context_toggle_var = tk.StringVar(value=self._tr("context_select_all"))
@@ -219,6 +228,13 @@ class OmniClipDesktopApp:
         self.result_sort_reverse = False
         self.local_only_var = tk.BooleanVar(value=False)
         self.rag_filter_core_var = tk.BooleanVar(value=True)
+        self.reranker_enabled_var = tk.BooleanVar(value=False)
+        self.reranker_model_var = tk.StringVar(value='BAAI/bge-reranker-v2-m3')
+        self.reranker_batch_cpu_var = tk.StringVar(value='4')
+        self.reranker_batch_cuda_var = tk.StringVar(value='8')
+        self.context_export_ai_collab_var = tk.BooleanVar(value=False)
+        self.context_export_ai_collab_var.trace_add('write', lambda *_args: self._rebuild_context_view())
+        self.reranker_enabled_var.trace_add('write', lambda *_args: self._refresh_query_limit_guidance())
         self.rag_filter_extended_var = tk.BooleanVar(value=False)
         self.rag_filter_custom_rules_var = tk.StringVar(value="")
         self.page_blocklist_rules_var = tk.StringVar(value=_merge_page_filter_defaults(""))
@@ -242,6 +258,7 @@ class OmniClipDesktopApp:
         self.chunks_var = tk.StringVar(value="0")
         self.refs_var = tk.StringVar(value="0")
         self.result_var = tk.StringVar(value=self._tr("result_empty"))
+        self.query_limit_hint_var = tk.StringVar(value=self._tr("query_limit_hint_idle"))
         self.vault_state_var = tk.StringVar(value=self._tr("vault_missing"))
         self.model_state_var = tk.StringVar(value=self._tr("model_missing"))
         self.index_state_var = tk.StringVar(value=self._tr("index_missing"))
@@ -279,6 +296,29 @@ class OmniClipDesktopApp:
 
     def _tip(self, key: str, **kwargs) -> str:
         return tooltip(self.language_code, key, **kwargs)
+
+    def _build_profile_label(self, profile: str) -> str:
+        normalized = normalize_build_resource_profile(profile)
+        return self._tr(f'build_profile_{normalized}')
+
+    def _build_profile_code(self, label: str) -> str:
+        normalized = str(label or '').strip()
+        mapping = {
+            self._tr('build_profile_quiet'): 'quiet',
+            self._tr('build_profile_balanced'): 'balanced',
+            self._tr('build_profile_peak'): 'peak',
+            'quiet': 'quiet',
+            'balanced': 'balanced',
+            'peak': 'peak',
+        }
+        return mapping.get(normalized, 'balanced')
+
+    def _build_profile_choices(self) -> list[str]:
+        return [
+            self._build_profile_label('quiet'),
+            self._build_profile_label('balanced'),
+            self._build_profile_label('peak'),
+        ]
 
     def _default_watch_summary(self) -> str:
         watch_text = self._tr("watch_ready") if WATCHDOG_AVAILABLE else self._tr("watch_fallback")
@@ -343,7 +383,12 @@ class OmniClipDesktopApp:
             self._refresh_context_jump_controls()
             self._update_context_selection_summary()
             return
-        self.current_context = OmniClipService.compose_context_pack_text(self.current_query_text, self._selected_hits())
+        self.current_context = OmniClipService.compose_context_pack_text(
+            self.current_query_text,
+            self._selected_hits(),
+            export_mode='ai-collab' if self.context_export_ai_collab_var.get() else 'standard',
+            language=self.language_code,
+        )
         self.context_view_text = self.current_context
         self._refresh_context_jump_controls()
         if hasattr(self, 'context_text'):
@@ -953,6 +998,7 @@ class OmniClipDesktopApp:
         )
         self.device_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_device_options())
         self._entry_row(form, 3, self._tr("interval_label"), self.interval_var, tooltip_key="interval")
+        self.build_profile_combo = self._combo_row(form, 4, self._tr("build_resource_profile_label"), self.build_resource_profile_var, self._build_profile_choices(), tooltip_key="build_resource_profile")
 
         action_panel = self._panel(parent, 1, pady=(12, 0))
         action_row = tk.Frame(action_panel, bg=self.colors["soft_2"])
@@ -984,9 +1030,26 @@ class OmniClipDesktopApp:
             polling = ttk.Checkbutton(advanced, text=self._tr("polling_label"), variable=self.polling_var, style="Plain.TCheckbutton")
             polling.grid(row=2, column=0, sticky="w", pady=(6, 0))
             self._attach_tooltip(polling, "polling")
+            reranker_check = ttk.Checkbutton(advanced, text=self._tr("reranker_enable_label"), variable=self.reranker_enabled_var, style="Plain.TCheckbutton")
+            reranker_check.grid(row=3, column=0, sticky="w", pady=(6, 0))
+            self._attach_tooltip(reranker_check, "reranker_enable")
+            export_mode_check = ttk.Checkbutton(advanced, text=self._tr("export_ai_collab_label"), variable=self.context_export_ai_collab_var, style="Plain.TCheckbutton")
+            export_mode_check.grid(row=4, column=0, sticky="w", pady=(6, 0))
+            self._attach_tooltip(export_mode_check, "export_ai_collab")
+
+            reranker_form = tk.Frame(advanced, bg=self.colors["soft_2"])
+            reranker_form.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+            reranker_form.grid_columnconfigure(1, weight=1)
+            reranker_form.grid_columnconfigure(3, weight=1)
+            self._entry_row(reranker_form, 0, self._tr("reranker_model_label"), self.reranker_model_var, tooltip_key="reranker_model")
+            self._entry_pair_row(reranker_form, 1, self._tr("reranker_batch_cpu_label"), self.reranker_batch_cpu_var, self._tr("reranker_batch_cuda_label"), self.reranker_batch_cuda_var, left_tip="reranker_batch_cpu", right_tip="reranker_batch_cuda")
+
+        reranker_button = ttk.Button(action_panel, text=self._tr("bootstrap_reranker_button"), style="Secondary.TButton", command=self._bootstrap_reranker)
+        reranker_button.grid(row=3, column=0, sticky="ew", padx=16, pady=(14, 0))
+        self._attach_tooltip(reranker_button, "bootstrap_reranker")
 
         refresh_button = ttk.Button(action_panel, text=self._tr("refresh_button"), style="Secondary.TButton", command=self._refresh)
-        refresh_button.grid(row=3, column=0, sticky="ew", padx=16, pady=(14, 14))
+        refresh_button.grid(row=4, column=0, sticky="ew", padx=16, pady=(14, 14))
     def _build_data_card(self, parent: tk.Widget) -> None:
         parent.grid_columnconfigure(0, weight=1)
 
@@ -1056,10 +1119,11 @@ class OmniClipDesktopApp:
         self._attach_tooltip(threshold_entry, "score_threshold")
         limit_label = tk.Label(query_meta, text=self._tr("limit_label"), bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
         limit_label.grid(row=0, column=2, sticky="w")
-        self._attach_tooltip(limit_label, "limit")
+        self.limit_label_tooltip = self._attach_tooltip(limit_label, "limit")
         limit_entry = ttk.Entry(query_meta, textvariable=self.limit_var, width=8, style="Field.TEntry")
         limit_entry.grid(row=0, column=3, sticky="w", padx=(8, 14))
-        self._attach_tooltip(limit_entry, "limit")
+        self.limit_entry_tooltip = self._attach_tooltip(limit_entry, "limit")
+        tk.Label(query_meta, textvariable=self.query_limit_hint_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left").grid(row=1, column=0, columnspan=5, sticky="w", pady=(8, 0))
 
         result_card = self._card(self.results_host, self._tr("results_title"), self._tr("results_subtitle"), 0)
         result_card.grid_rowconfigure(2, weight=1)
@@ -1160,7 +1224,7 @@ class OmniClipDesktopApp:
         entry.grid(row=row, column=1, columnspan=3, sticky="ew", pady=(8, 0))
         self._attach_tooltip(entry, tooltip_key)
 
-    def _combo_row(self, parent: tk.Widget, row: int, label: str, variable: tk.StringVar, values: list[str], *, tooltip_key: str) -> None:
+    def _combo_row(self, parent: tk.Widget, row: int, label: str, variable: tk.StringVar, values: list[str], *, tooltip_key: str):
         background = str(parent.cget("bg"))
         caption = tk.Label(parent, text=label, bg=background, fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
         caption.grid(row=row, column=0, sticky="w", pady=(8, 0))
@@ -1168,6 +1232,7 @@ class OmniClipDesktopApp:
         combo = ttk.Combobox(parent, textvariable=variable, values=values, state="readonly", style="Field.TCombobox")
         combo.grid(row=row, column=1, columnspan=3, sticky="ew", pady=(8, 0))
         self._attach_tooltip(combo, tooltip_key)
+        return combo
 
     def _combo_pair_row(self, parent: tk.Widget, row: int, left_label: str, left_var: tk.StringVar, left_values: list[str], right_label: str, right_var: tk.StringVar, right_values: list[str], *, left_tip: str, right_tip: str):
         background = str(parent.cget("bg"))
@@ -1407,10 +1472,63 @@ class OmniClipDesktopApp:
         parent.bind("<Configure>", _update, add="+")
         _update()
 
-    def _attach_tooltip(self, widget: tk.Widget, key: str, **kwargs) -> None:
+    def _attach_tooltip(self, widget: tk.Widget, key: str, **kwargs) -> ToolTip | None:
         tip_text = self._tip(key, **kwargs)
-        if tip_text:
-            self.tooltips.append(ToolTip(widget, tip_text))
+        if not tip_text:
+            return None
+        tip = ToolTip(widget, tip_text)
+        self.tooltips.append(tip)
+        return tip
+
+    def _format_elapsed_ms(self, elapsed_ms: int) -> str:
+        value = max(int(elapsed_ms or 0), 0)
+        if value <= 0:
+            return self._tr('query_limit_elapsed_unknown')
+        if value < 1000:
+            return self._tr('query_limit_elapsed_ms', value=value)
+        return self._tr('query_limit_elapsed_s', value=f"{value / 1000:.1f}")
+
+    def _query_limit_device_label(self, device: str) -> str:
+        return self._tr('query_limit_device_cuda') if str(device or '').strip().lower() == 'cuda' else self._tr('query_limit_device_cpu')
+
+    def _query_limit_reason_label(self, reason_code: str) -> str:
+        normalized = str(reason_code or 'baseline').strip().lower()
+        return self._tr(f'query_limit_reason_{normalized}')
+
+    def _render_query_limit_hint(self, recommendation: dict[str, object] | None) -> str:
+        if not recommendation:
+            return self._tr('query_limit_hint_idle')
+        minimum = int(recommendation.get('minimum', 0) or 0)
+        maximum = int(recommendation.get('maximum', 0) or 0)
+        preferred = int(recommendation.get('preferred', 0) or 0)
+        if minimum <= 0 or maximum <= 0 or preferred <= 0:
+            return self._tr('query_limit_hint_idle')
+        return self._tr(
+            'query_limit_hint_ready',
+            current=self.limit_var.get().strip() or '0',
+            minimum=minimum,
+            maximum=maximum,
+            preferred=preferred,
+            device=self._query_limit_device_label(str(recommendation.get('device', 'cpu'))),
+            elapsed=self._format_elapsed_ms(int(recommendation.get('elapsed_ms', 0) or 0)),
+            samples=int(recommendation.get('samples', 0) or 0),
+            reason=self._query_limit_reason_label(str(recommendation.get('reason_code', 'baseline'))),
+        )
+
+    def _refresh_query_limit_guidance(self) -> None:
+        hint = self._render_query_limit_hint(self.query_limit_recommendation)
+        self.query_limit_hint_var.set(hint)
+        tooltip_text = self._tip('limit')
+        if self.query_limit_recommendation:
+            tooltip_text = f"{tooltip_text}\n\n{hint}".strip()
+        for attr_name in ('limit_label_tooltip', 'limit_entry_tooltip'):
+            tip = getattr(self, attr_name, None)
+            if tip is not None:
+                tip.text = tooltip_text
+
+    def _update_query_limit_guidance(self, recommendation: dict[str, object] | None) -> None:
+        self.query_limit_recommendation = recommendation or None
+        self._refresh_query_limit_guidance()
 
     def _collect_vault_paths(self, active_vault: str = "") -> list[str]:
         ordered: list[str] = []
@@ -1532,6 +1650,10 @@ class OmniClipDesktopApp:
             if is_local_model_ready(config, paths):
                 return self._tr("task_eta_bootstrap_cached"), self._tr("task_detail_bootstrap_cached")
             return self._tr("task_eta_bootstrap_download"), self._tr("task_detail_bootstrap_download", model=config.vector_model)
+        if label_key == "bootstrap_reranker_button":
+            if is_local_reranker_ready(config, paths):
+                return self._tr("task_eta_bootstrap_cached"), self._tr("task_detail_reranker_cached")
+            return self._tr("task_eta_bootstrap_download"), self._tr("task_detail_reranker_download", model=config.reranker_model)
         if label_key in {"rebuild_button", "resume_rebuild_task"}:
             return self._tr("task_eta_rebuild"), self._tr("task_detail_rebuild")
         if label_key == "refresh_button":
@@ -1731,12 +1853,49 @@ class OmniClipDesktopApp:
             elif total > 0:
                 self.task_progress.stop()
                 self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
-                self.task_detail_var.set(self._tr("task_detail_rebuild_vectorizing", total=total))
+                detail = self._tr("task_detail_rebuild_vectorizing", total=total)
+                tuning = self._render_vector_tuning(payload)
+                self.task_detail_var.set(f"{detail}\n{tuning}" if tuning else detail)
             else:
                 self.task_progress.stop()
                 self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
                 self.task_progress.start(10)
-                self.task_detail_var.set(self._tr("task_detail_rebuild_vectorizing", total=total))
+                detail = self._tr("task_detail_rebuild_vectorizing", total=total)
+                tuning = self._render_vector_tuning(payload)
+                self.task_detail_var.set(f"{detail}\n{tuning}" if tuning else detail)
+
+    def _render_vector_tuning(self, payload: dict[str, object]) -> str:
+        encode_batch = int(payload.get('encode_batch_size', 0) or 0)
+        write_batch = int(payload.get('write_batch_size', 0) or 0)
+        if encode_batch <= 0 and write_batch <= 0:
+            return ''
+        profile = self._build_profile_label(str(payload.get('build_profile', 'balanced')))
+        action_key = f"vector_tuning_action_{str(payload.get('tuning_action', 'steady')).strip().lower() or 'steady'}"
+        reason_key = f"vector_tuning_reason_{str(payload.get('tuning_reason', 'stable')).strip().lower() or 'stable'}"
+        try:
+            action = self._tr(action_key)
+        except KeyError:
+            action = str(payload.get('tuning_action', 'steady'))
+        try:
+            reason = self._tr(reason_key)
+        except KeyError:
+            reason = str(payload.get('tuning_reason', 'stable'))
+        metrics = self._tr('none_value')
+        sample_payload = payload.get('resource_sample')
+        if isinstance(sample_payload, dict):
+            try:
+                metrics = format_resource_sample(ResourceSample(**sample_payload)) or self._tr('none_value')
+            except Exception:
+                metrics = self._tr('none_value')
+        return self._tr(
+            'task_detail_rebuild_vector_tuning',
+            profile=profile,
+            encode_batch=encode_batch,
+            write_batch=write_batch,
+            metrics=metrics,
+            action=action,
+            reason=reason,
+        )
 
     def _refresh_dynamic_views(self) -> None:
         self._refresh_state_chips()
@@ -2136,15 +2295,31 @@ class OmniClipDesktopApp:
         self.limit_var.set("15")
         self.score_threshold_var.set("0")
         self.interval_var.set("2.0")
+        self.build_resource_profile_var.set(self._build_profile_label('balanced'))
         self.local_only_var.set(False)
         self.rag_filter_core_var.set(True)
         self.rag_filter_extended_var.set(False)
         self.rag_filter_custom_rules_var.set("")
+        self.reranker_enabled_var.set(False)
+        self.reranker_model_var.set('BAAI/bge-reranker-v2-m3')
+        self.reranker_batch_cpu_var.set('4')
+        self.reranker_batch_cuda_var.set('8')
+        self.context_export_ai_collab_var.set(False)
         self.page_blocklist_rules_var.set(_merge_page_filter_defaults(""))
         self.force_var.set(False)
         self._update_page_blocklist_summary()
         self.polling_var.set(False)
         self._refresh_device_options()
+        profile_code = self._build_profile_code(self.build_resource_profile_var.get())
+        self.build_resource_profile_var.set(self._build_profile_label(profile_code))
+        build_profile_combo = getattr(self, 'build_profile_combo', None)
+        if build_profile_combo is not None:
+            try:
+                if int(build_profile_combo.winfo_exists()):
+                    build_profile_combo.configure(values=self._build_profile_choices())
+            except tk.TclError:
+                pass
+        self._refresh_query_limit_guidance()
         self.status_var.set(self._tr("status_recommended"))
         self._refresh_state_chips()
 
@@ -2205,7 +2380,13 @@ class OmniClipDesktopApp:
         self.limit_var.set(str(config.query_limit or 15))
         self.score_threshold_var.set(str(config.query_score_threshold))
         self.interval_var.set(str(config.poll_interval_seconds))
+        self.build_resource_profile_var.set(self._build_profile_label(getattr(config, 'build_resource_profile', 'balanced')))
         self.local_only_var.set(config.vector_local_files_only)
+        self.reranker_enabled_var.set(getattr(config, 'reranker_enabled', False))
+        self.reranker_model_var.set(getattr(config, 'reranker_model', 'BAAI/bge-reranker-v2-m3'))
+        self.reranker_batch_cpu_var.set(str(getattr(config, 'reranker_batch_size_cpu', 4)))
+        self.reranker_batch_cuda_var.set(str(getattr(config, 'reranker_batch_size_cuda', 8)))
+        self.context_export_ai_collab_var.set(getattr(config, 'context_export_mode', 'standard') == 'ai-collab')
         self.rag_filter_core_var.set(config.rag_filter_core_enabled)
         self.rag_filter_extended_var.set(config.rag_filter_extended_enabled)
         self.rag_filter_custom_rules_var.set(config.rag_filter_custom_rules)
@@ -2217,6 +2398,16 @@ class OmniClipDesktopApp:
         self.ui_right_sash = self._coerce_layout_value(config.ui_right_sash, self.ui_right_sash)
         self.ui_results_sash = self._coerce_layout_value(config.ui_results_sash, self.ui_results_sash)
         self._refresh_device_options()
+        profile_code = self._build_profile_code(self.build_resource_profile_var.get())
+        self.build_resource_profile_var.set(self._build_profile_label(profile_code))
+        build_profile_combo = getattr(self, 'build_profile_combo', None)
+        if build_profile_combo is not None:
+            try:
+                if int(build_profile_combo.winfo_exists()):
+                    build_profile_combo.configure(values=self._build_profile_choices())
+            except tk.TclError:
+                pass
+        self._refresh_query_limit_guidance()
         self._append_log(self._tr("log_loaded_config", path=paths.config_file))
         if language_changed:
             self._render_ui()
@@ -2239,7 +2430,9 @@ class OmniClipDesktopApp:
         limit = int(self.limit_var.get().strip() or "15")
         interval = float(self.interval_var.get().strip() or "2.0")
         score_threshold = float(self.score_threshold_var.get().strip() or "0")
-        if limit <= 0 or interval <= 0 or score_threshold < 0:
+        reranker_batch_cpu = int(self.reranker_batch_cpu_var.get().strip() or "4")
+        reranker_batch_cuda = int(self.reranker_batch_cuda_var.get().strip() or "8")
+        if limit <= 0 or interval <= 0 or score_threshold < 0 or reranker_batch_cpu <= 0 or reranker_batch_cuda <= 0:
             raise ValueError(self._tr("number_invalid"))
         config = AppConfig(
             vault_path=vault,
@@ -2248,11 +2441,17 @@ class OmniClipDesktopApp:
             query_limit=limit,
             query_score_threshold=score_threshold,
             poll_interval_seconds=interval,
+            build_resource_profile=self._build_profile_code(self.build_resource_profile_var.get()),
             vector_backend=self.backend_var.get().strip() or "disabled",
             vector_model=self.model_var.get().strip() or "BAAI/bge-m3",
             vector_runtime=self.runtime_var.get().strip() or "torch",
             vector_device=self.device_var.get().strip() or "auto",
             vector_local_files_only=self.local_only_var.get(),
+            reranker_enabled=self.reranker_enabled_var.get(),
+            reranker_model=self.reranker_model_var.get().strip() or 'BAAI/bge-reranker-v2-m3',
+            reranker_batch_size_cpu=reranker_batch_cpu,
+            reranker_batch_size_cuda=reranker_batch_cuda,
+            context_export_mode='ai-collab' if self.context_export_ai_collab_var.get() else 'standard',
             rag_filter_core_enabled=self.rag_filter_core_var.get(),
             rag_filter_extended_enabled=self.rag_filter_extended_var.get(),
             rag_filter_custom_rules=self.rag_filter_custom_rules_var.get().strip(),
@@ -2598,6 +2797,18 @@ class OmniClipDesktopApp:
 
         self._run_task("bootstrap_button", action, self._after_bootstrap, config=config, paths=paths)
 
+    def _bootstrap_reranker(self) -> None:
+        try:
+            config, paths = self._config(False)
+        except Exception as exc:
+            messagebox.showerror(self._tr("cannot_start_title"), str(exc), parent=self.root)
+            return
+
+        def action(service):
+            return {"result": service.bootstrap_reranker(), "status": service.status_snapshot()}
+
+        self._run_task("bootstrap_reranker_button", action, self._after_bootstrap_reranker, config=config, paths=paths)
+
     def _rebuild(self) -> None:
         try:
             config, paths = self._config(True)
@@ -2764,6 +2975,13 @@ class OmniClipDesktopApp:
         )
         self._refresh_state_chips()
 
+    def _after_bootstrap_reranker(self, payload) -> None:
+        result = payload['result']
+        self._apply_status(payload.get('status'))
+        self.status_var.set(self._tr('status_reranker_ready'))
+        self._append_log(self._tr('log_reranker_ready', model=result.get('model')))
+        self._refresh_state_chips()
+
     def _after_rebuild(self, payload) -> None:
         report = payload.get("report")
         if report is not None:
@@ -2793,7 +3011,8 @@ class OmniClipDesktopApp:
     def _after_query(self, payload) -> None:
         query = payload["query"]
         copied = payload["copied"]
-        hits, _context = payload["payload"]
+        result = payload["payload"]
+        hits = list(result.hits)
         self.current_query_text = query
         self.current_hits = hits
         self.selected_chunk_ids = {hit.chunk_id for hit in hits}
@@ -2802,6 +3021,7 @@ class OmniClipDesktopApp:
         selected_chunk_id = hits[0].chunk_id if hits else None
         self._render_hits(selected_chunk_id=selected_chunk_id)
         self._rebuild_context_view()
+        self._update_query_limit_guidance(asdict(result.insights.recommendation) if result.insights.recommendation is not None else None)
         if hits:
             self._show_hit(0)
         else:
@@ -2810,6 +3030,11 @@ class OmniClipDesktopApp:
         self.result_var.set(self._tr("query_hits", count=len(hits)))
         self.status_var.set(self._tr("status_query_copied") if copied else self._tr("status_query_done"))
         self._append_log(self._tr("log_query_done", query=query, count=len(hits)))
+        if result.insights.reranker is not None and result.insights.reranker.enabled:
+            if result.insights.reranker.applied:
+                self._append_log(self._tr('log_reranker_applied', device=result.insights.reranker.resolved_device, count=result.insights.reranker.reranked_count))
+            else:
+                self._append_log(self._tr('log_reranker_skipped', reason=result.insights.reranker.skipped_reason or self._tr('none_value')))
 
     def _after_clear(self, payload) -> None:
         self.clear_index_var.set(False)
@@ -2824,6 +3049,9 @@ class OmniClipDesktopApp:
     def _apply_status(self, payload) -> None:
         if not isinstance(payload, dict):
             return
+        recommendation = payload.get("query_limit_recommendation")
+        if isinstance(recommendation, dict):
+            self._update_query_limit_guidance(recommendation)
         stats = payload.get("stats") or {}
         self.files_var.set(str(stats.get("files", 0)))
         self.chunks_var.set(str(stats.get("chunks", 0)))

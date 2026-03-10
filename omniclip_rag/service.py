@@ -15,11 +15,14 @@ from pathlib import Path
 from .clipboard import copy_text
 from .config import AppConfig, DataPaths
 from .errors import BuildCancelledError
-from .models import SearchHit, SpaceEstimate
+from .models import QueryInsights, QueryResult, SearchHit, SpaceEstimate
 from .parser import BLOCK_REF_RE, BULLET_RE, EMBED_RE, PAGE_REF_RE, PROPERTY_RE
+from .query_runtime import QueryRuntimeAdvisor, select_query_hits
+from .retrieval_policy import QueryProfile, build_query_profile, rank_candidates
+from .reranker import create_reranker, is_local_reranker_ready
 from .preflight import estimate_storage_for_vault
 from .storage import MetadataStore
-from .timing import append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
+from .timing import BuildEtaTracker, append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
 from .vector_index import create_vector_index, is_local_model_ready, resolve_vector_device
 
 try:
@@ -47,6 +50,8 @@ WATCH_REPAIR_INTERVAL_SECONDS = 20.0
 WATCH_STATE_VERSION = 1
 REBUILD_STATE_VERSION = 1
 REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS = 0.25
+RENDER_UPDATE_BATCH_SIZE = 1024
+VECTOR_UPSERT_BATCH_SIZE = 256
 SENSITIVE_PLACEHOLDER = '[被RAG过滤/Filtered by RAG]'
 LOGSEQ_HIDDEN_PROPERTIES = {'id', 'collapsed'}
 LABELED_SECRET_PATTERNS = [
@@ -74,6 +79,9 @@ class OmniClipService:
         self._rebuild_state_file = self.paths.state_dir / 'rebuild_state.json'
         self._watch_state_file = self.paths.state_dir / 'watch_state.json'
         self._build_history_file = build_history_file(self.paths.state_dir)
+        self._query_runtime_file = self.paths.state_dir / 'query_runtime.json'
+        self._query_runtime_advisor = QueryRuntimeAdvisor(self._query_runtime_file)
+        self.reranker = create_reranker(config, paths)
 
     def close(self) -> None:
         self.store.close()
@@ -107,6 +115,11 @@ class OmniClipService:
         result['cache_bytes'] = _directory_size(self.paths.cache_dir / 'models')
         return result
 
+    def bootstrap_reranker(self) -> dict[str, object]:
+        result = self.reranker.warmup(allow_download=True)
+        result['cache_bytes'] = _directory_size(self.paths.cache_dir / 'models')
+        return result
+
     def rebuild_index(
         self,
         *,
@@ -135,6 +148,7 @@ class OmniClipService:
         vector_enabled = (self.config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
         model_ready = (not vector_enabled) or is_local_model_ready(self.config, self.paths)
         history_entry = find_matching_history(self._build_history_file, self.config)
+        eta_tracker = BuildEtaTracker(self.config, history_entry=history_entry, vector_enabled=vector_enabled, model_ready=model_ready)
         resolved_device = resolve_vector_device(self.config.vector_device)
 
         completed_paths = set(state.get('completed_paths', []))
@@ -180,8 +194,7 @@ class OmniClipService:
             estimated_total_chunks = parsed_chunk_count
             if completed_count > 0:
                 estimated_total_chunks = max(parsed_chunk_count, int(parsed_chunk_count / completed_count * max(total_files, 1)))
-            eta_seconds, overall_percent = estimate_remaining_build_seconds(
-                self.config,
+            eta_seconds, overall_percent = eta_tracker.estimate(
                 stage='indexing',
                 current=completed_count,
                 total=total_files,
@@ -189,9 +202,6 @@ class OmniClipService:
                 stage_elapsed=time.time() - indexing_started_at,
                 parsed_chunks=parsed_chunk_count,
                 estimated_total_chunks=estimated_total_chunks,
-                history_entry=history_entry,
-                vector_enabled=vector_enabled,
-                model_ready=model_ready,
             )
             _emit_progress(
                 on_progress,
@@ -223,17 +233,17 @@ class OmniClipService:
             history_entry=history_entry,
             vector_enabled=vector_enabled,
             model_ready=model_ready,
+            eta_tracker=eta_tracker,
         )
         rendering_seconds = max(time.time() - rendering_started_at, 0.0)
 
         _wait_for_worker_controls(pause_event, cancel_event)
-        documents = self.store.fetch_vector_documents()
-        total_documents = len(documents)
+        total_documents = self.store.count_vector_documents()
+        documents = self.store.iter_vector_documents()
         state.update({'phase': 'vectorizing', 'updated_at': _utc_now(), 'current_path': ''})
         self._write_rebuild_state(state)
         vectorizing_started_at = time.time()
-        eta_seconds, overall_percent = estimate_remaining_build_seconds(
-            self.config,
+        eta_seconds, overall_percent = eta_tracker.estimate(
             stage='vectorizing',
             current=0,
             total=total_documents,
@@ -241,9 +251,6 @@ class OmniClipService:
             stage_elapsed=0.0,
             parsed_chunks=parsed_chunk_count,
             estimated_total_chunks=max(total_documents, parsed_chunk_count),
-            history_entry=history_entry,
-            vector_enabled=vector_enabled,
-            model_ready=model_ready,
         )
         _emit_progress(
             on_progress,
@@ -260,8 +267,7 @@ class OmniClipService:
         def emit_vector_progress(progress: dict[str, object]) -> None:
             current = max(0, int(progress.get('current', 0) or 0))
             total = max(0, int(progress.get('total', total_documents) or total_documents))
-            eta_seconds, overall_percent = estimate_remaining_build_seconds(
-                self.config,
+            eta_seconds, overall_percent = eta_tracker.estimate(
                 stage='vectorizing',
                 current=current,
                 total=total,
@@ -269,9 +275,6 @@ class OmniClipService:
                 stage_elapsed=time.time() - vectorizing_started_at,
                 parsed_chunks=parsed_chunk_count,
                 estimated_total_chunks=max(total_documents, parsed_chunk_count),
-                history_entry=history_entry,
-                vector_enabled=vector_enabled,
-                model_ready=model_ready,
             )
             state['updated_at'] = _utc_now()
             self._write_rebuild_state(state)
@@ -280,7 +283,7 @@ class OmniClipService:
             enriched['overall_percent'] = overall_percent
             _emit_progress(on_progress, enriched)
 
-        self.vector_index.rebuild(documents, on_progress=emit_vector_progress, pause_event=pause_event, cancel_event=cancel_event)
+        self.vector_index.rebuild(documents, total=total_documents, on_progress=emit_vector_progress, pause_event=pause_event, cancel_event=cancel_event)
         vectorizing_seconds = max(time.time() - vectorizing_started_at, 0.0)
 
         stats = {**self.store.stats(), 'duplicate_block_ids': duplicate_block_ids}
@@ -291,6 +294,7 @@ class OmniClipService:
             indexing_seconds=indexing_seconds,
             rendering_seconds=rendering_seconds,
             vectorizing_seconds=vectorizing_seconds,
+            vector_tail_seconds_per_chunk=eta_tracker.recent_rate('vectorizing') or 0.0,
             resolved_device=resolved_device,
             total_seconds=max(time.time() - rebuild_started_at, 0.0),
         )
@@ -358,7 +362,7 @@ class OmniClipService:
             if vector_chunk_ids:
                 self.vector_index.delete(vector_chunk_ids)
             if vector_paths:
-                self.vector_index.upsert(self.store.fetch_vector_documents(vector_paths))
+                self._upsert_vector_documents_for_paths(vector_paths)
         except Exception as exc:
             return str(exc)
         self._update_watch_state(remove_vector_paths=vector_paths, remove_vector_chunk_ids=vector_chunk_ids)
@@ -379,7 +383,7 @@ class OmniClipService:
             if repaired_vector_chunk_ids:
                 self.vector_index.delete(repaired_vector_chunk_ids)
             if repaired_vector_paths:
-                self.vector_index.upsert(self.store.fetch_vector_documents(repaired_vector_paths))
+                self._upsert_vector_documents_for_paths(repaired_vector_paths)
             self._update_watch_state(
                 remove_vector_paths=repaired_vector_paths,
                 remove_vector_chunk_ids=repaired_vector_chunk_ids,
@@ -395,37 +399,66 @@ class OmniClipService:
             }
         ]
 
+    def _upsert_vector_documents_for_paths(self, source_paths: list[str]) -> None:
+        if not source_paths:
+            return
+        batch_size = max(int(self.config.vector_batch_size or 16) * 8, VECTOR_UPSERT_BATCH_SIZE)
+        buffer: list[dict[str, str]] = []
+        for document in self.store.iter_vector_documents(source_paths):
+            buffer.append(document)
+            if len(buffer) >= batch_size:
+                self.vector_index.upsert(buffer)
+                buffer = []
+        if buffer:
+            self.vector_index.upsert(buffer)
+
     def query(
         self,
         query_text: str,
         limit: int | None = None,
         copy_result: bool = False,
         score_threshold: float | None = None,
-    ) -> tuple[list[SearchHit], str]:
+    ) -> QueryResult:
+        started_at = time.perf_counter()
         limit = max(int(limit or self.config.query_limit or 0), 1)
-        candidate_limit = _candidate_limit_for_query(query_text, limit)
+        profile = build_query_profile(query_text, limit)
+        candidate_limit = profile.candidate_limit
         page_block_patterns = _compile_page_blocklist_patterns(getattr(self.config, 'page_blocklist_rules', ''))
         storage_candidates = _filter_candidate_rows_by_page_blocklist(self.store.search_candidates(query_text, candidate_limit), page_block_patterns)
         vector_candidates = {}
-        if _should_use_vector_search(query_text):
-            vector_candidates = {item.chunk_id: item.score for item in self.vector_index.search(query_text, max(self.config.vector_candidate_limit, candidate_limit))}
+        if profile.use_vector:
+            vector_limit = max(self.config.vector_candidate_limit, candidate_limit)
+            vector_candidates = {item.chunk_id: item.score for item in self.vector_index.search(query_text, vector_limit)}
         candidate_rows = _filter_candidate_rows_by_page_blocklist(self._merge_candidate_rows(storage_candidates, vector_candidates), page_block_patterns)
 
         if candidate_rows:
-            hits = self._rank_candidates(query_text, candidate_rows, vector_candidates)
+            hits = rank_candidates(query_text, candidate_rows, vector_candidates, profile)
         else:
             rows = _filter_candidate_rows_by_page_blocklist(self.store.fetch_all_rendered_chunks(), page_block_patterns)
-            hits = self._rank_candidates(query_text, rows, vector_candidates)
+            hits = rank_candidates(query_text, rows, vector_candidates, profile)
 
         effective_threshold = self.config.query_score_threshold if score_threshold is None else float(score_threshold or 0.0)
         filtered_hits = [hit for hit in hits if hit.score >= max(effective_threshold, 0.0)]
-        finalized_hits = self._finalize_query_hits(query_text, filtered_hits, limit)
-        context_pack = self.compose_context_pack_text(query_text, finalized_hits)
+        reranked_hits, rerank_outcome = self.reranker.rerank(query_text, filtered_hits, limit)
+        finalized_hits, insights = self._finalize_query_hits(query_text, reranked_hits, limit, profile)
+        insights.elapsed_ms = max(int((time.perf_counter() - started_at) * 1000), 0)
+        insights.reranker = rerank_outcome
+        insights.recommendation = self._query_runtime_advisor.record_and_recommend(
+            resolved_device=resolve_vector_device(self.config.vector_device),
+            query_limit=limit,
+            elapsed_ms=insights.elapsed_ms,
+            selected_hits=len(finalized_hits),
+            hydrated_candidates=insights.hydrated_candidates,
+            reranker_enabled=getattr(self.config, 'reranker_enabled', False),
+            reranker_degraded=bool(rerank_outcome.degraded_to_cpu if rerank_outcome else False),
+            reranker_oom=bool(rerank_outcome.oom_recovered if rerank_outcome else False),
+        )
+        context_pack = self.compose_context_pack_text(query_text, finalized_hits, export_mode=getattr(self.config, 'context_export_mode', 'standard'), language=getattr(self.config, 'ui_language', 'zh-CN'))
         if copy_result:
             copy_text(context_pack)
         export_name = f"context_{int(time.time())}.md"
         (self.paths.exports_dir / export_name).write_text(context_pack, encoding='utf-8')
-        return finalized_hits, context_pack
+        return QueryResult(hits=finalized_hits, context_text=context_pack, insights=insights)
 
     def _merge_candidate_rows(self, storage_candidates, vector_candidates: dict[str, float]):
         candidate_map = {row['chunk_id']: row for row in storage_candidates}
@@ -449,28 +482,34 @@ class OmniClipService:
             hit.display_text = display_text.strip() or _apply_output_redaction(_normalize_markup(hit.rendered_text), self.config)
             hit.preview_text = _build_preview_text(query_text, hit.display_text or hit.rendered_text)
 
-    def _finalize_query_hits(self, query_text: str, hits: list[SearchHit], limit: int) -> list[SearchHit]:
+    def _finalize_query_hits(self, query_text: str, hits: list[SearchHit], limit: int, profile: QueryProfile) -> tuple[list[SearchHit], QueryInsights]:
         if not hits or limit <= 0:
-            return []
+            return [], QueryInsights(hydrated_candidates=len(hits))
         hydrated_pool: list[SearchHit] = []
-        step = _hydration_pool_size(query_text, limit)
+        step = profile.hydration_pool_size
         offset = 0
         selected: list[SearchHit] = []
+        insights = QueryInsights(hydrated_candidates=len(hits))
         while offset < len(hits):
             batch = hits[offset: offset + step]
             self._hydrate_display_hits(query_text, batch)
             hydrated_pool.extend(batch)
-            selected = _select_query_hits(hydrated_pool, limit)
+            selected, insights = select_query_hits(hydrated_pool, limit)
             offset += len(batch)
             if len(selected) >= limit or offset >= len(hits):
                 break
-        return selected[:limit]
+        insights.hydrated_candidates = len(hydrated_pool)
+        insights.selected_hits = len(selected)
+        return selected[:limit], insights
 
     @staticmethod
-    def compose_context_pack_text(query_text: str, hits: list[SearchHit]) -> str:
+    def compose_context_pack_text(query_text: str, hits: list[SearchHit], *, export_mode: str = 'standard', language: str = 'zh-CN') -> str:
+        resolved_language = _resolve_context_language(language, query_text, hits)
         lines = ['# RAG结果']
         if query_text.strip():
             lines.extend(['', f'搜索词：{query_text.strip()}'])
+        if str(export_mode or 'standard').strip().lower() == 'ai-collab':
+            lines.extend(_ai_collaboration_lines(resolved_language))
 
         if not hits:
             lines.extend(['', '未找到足够相关的笔记片段。'])
@@ -517,7 +556,7 @@ class OmniClipService:
         return '\n'.join(lines).strip() + '\n'
 
     def compose_context_pack(self, query_text: str, hits: list[SearchHit]) -> str:
-        return self.compose_context_pack_text(query_text, hits)
+        return self.compose_context_pack_text(query_text, hits, export_mode=getattr(self.config, 'context_export_mode', 'standard'), language=getattr(self.config, 'ui_language', 'zh-CN'))
 
     def watch(self, interval: float | None = None, force_polling: bool = False) -> None:
         stop_event = threading.Event()
@@ -549,6 +588,7 @@ class OmniClipService:
             }
         pending = self.pending_rebuild()
         resolved_vault = str(self.config.vault_dir) if self.config.vault_path else ''
+        query_recommendation = asdict(self._query_runtime_advisor.current_recommendation(resolve_vector_device(self.config.vector_device), getattr(self.config, 'reranker_enabled', False)))
         return {
             'vault_path': resolved_vault,
             'data_root': str(self.paths.global_root),
@@ -556,10 +596,14 @@ class OmniClipService:
             'workspace_root': str(self.paths.root),
             'workspace_id': self.paths.root.name,
             'vector_backend': self.config.vector_backend,
+            'reranker_enabled': getattr(self.config, 'reranker_enabled', False),
+            'reranker_model': getattr(self.config, 'reranker_model', ''),
+            'reranker_ready': is_local_reranker_ready(self.config, self.paths),
             'stats': stats,
             'latest_preflight': latest_preflight,
             'watchdog_available': WATCHDOG_AVAILABLE,
             'pending_rebuild': pending,
+            'query_limit_recommendation': query_recommendation,
         }
 
     def pending_rebuild(self) -> dict[str, object] | None:
@@ -619,49 +663,6 @@ class OmniClipService:
         if clear_exports:
             _clear_directory(self.paths.exports_dir)
 
-    def _rank_candidates(self, query_text: str, rows, vector_candidates: dict[str, float]) -> list[SearchHit]:
-        hits: list[SearchHit] = []
-        short_query = _is_short_query(query_text)
-        vector_weight = 10.0 if short_query else 20.0
-        for row in rows:
-            fts_rank = row['fts_rank'] if 'fts_rank' in row.keys() else None
-            like_hits = row['like_hits'] if 'like_hits' in row.keys() else 0
-            lexical = _score_query(query_text, row['title'], row['anchor'], row['rendered_text'])
-            fts_score = _score_fts_rank(fts_rank)
-            like_score = float(like_hits or 0) * 8.0
-            vector_score = vector_candidates.get(row['chunk_id'], 0.0) * vector_weight
-            coverage = _query_coverage(query_text, row['title'], row['anchor'], row['rendered_text'])
-            raw_score = lexical + fts_score + like_score + vector_score - _length_penalty(row['rendered_text'], coverage)
-            if len(_tokenize_query(query_text)) > 1 and coverage < 0.45:
-                raw_score -= 12.0
-            score = _normalize_score(raw_score)
-            if lexical <= 0 and fts_score <= 0 and like_score <= 0 and vector_candidates.get(row['chunk_id'], 0.0) > 0:
-                score = max(score, _semantic_only_score(vector_candidates.get(row['chunk_id'], 0.0)))
-            if score <= 0:
-                continue
-            hits.append(
-                SearchHit(
-                    score=score,
-                    title=row['title'],
-                    anchor=row['anchor'],
-                    source_path=row['source_path'],
-                    rendered_text=row['rendered_text'],
-                    chunk_id=row['chunk_id'],
-                    display_text='',
-                    preview_text=_build_preview_text(query_text, row['rendered_text']),
-                    reason=_build_hit_reason(
-                        query_text,
-                        row['title'],
-                        row['anchor'],
-                        row['rendered_text'],
-                        fts_rank,
-                        like_hits,
-                        vector_candidates.get(row['chunk_id'], 0.0),
-                    ),
-                )
-            )
-        hits.sort(key=lambda item: item.score, reverse=True)
-        return hits
 
     def _watch_with_polling(
         self,
@@ -852,16 +853,24 @@ class OmniClipService:
         history_entry: dict[str, object] | None = None,
         vector_enabled: bool = False,
         model_ready: bool = False,
+        eta_tracker: BuildEtaTracker | None = None,
     ) -> int:
         block_lookup = self.store.fetch_block_lookup()
-        rows = self.store.fetch_render_rows(relative_paths)
         payloads: list[tuple[str, str]] = []
-        total_rows = len(rows)
+        total_rows = self.store.count_render_rows(relative_paths)
         stage_started_at = time.time()
         last_emit_at = 0.0
 
         if total_rows > 0:
-            eta_seconds, overall_percent = estimate_remaining_build_seconds(
+            eta_seconds, overall_percent = (eta_tracker.estimate(
+                stage='rendering',
+                current=0,
+                total=total_rows,
+                elapsed_total=max(time.time() - rebuild_started_at, 0.1),
+                stage_elapsed=0.0,
+                parsed_chunks=total_rows,
+                estimated_total_chunks=total_rows,
+            ) if eta_tracker is not None else estimate_remaining_build_seconds(
                 self.config,
                 stage='rendering',
                 current=0,
@@ -873,7 +882,7 @@ class OmniClipService:
                 history_entry=history_entry,
                 vector_enabled=vector_enabled,
                 model_ready=model_ready,
-            )
+            ))
             _emit_progress(
                 on_progress,
                 {
@@ -885,13 +894,25 @@ class OmniClipService:
                 },
             )
 
-        for index, row in enumerate(rows, start=1):
+        for index, row in enumerate(self.store.iter_render_rows(relative_paths), start=1):
             _wait_for_worker_controls(pause_event, cancel_event)
             payloads.append((row['chunk_id'], _render_row(row, block_lookup)))
+            if len(payloads) >= RENDER_UPDATE_BATCH_SIZE:
+                self.store.update_rendered_chunks(payloads)
+                payloads = []
             now = time.time()
             if index == total_rows or (now - last_emit_at) >= REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS:
                 last_emit_at = now
-                eta_seconds, overall_percent = estimate_remaining_build_seconds(
+                eta_seconds, overall_percent = (eta_tracker.estimate(
+                    stage='rendering',
+                    current=index,
+                    total=total_rows,
+                    elapsed_total=max(now - rebuild_started_at, 0.1),
+                    stage_elapsed=max(now - stage_started_at, 0.0),
+                    parsed_chunks=total_rows,
+                    estimated_total_chunks=total_rows,
+                    timestamp=now,
+                ) if eta_tracker is not None else estimate_remaining_build_seconds(
                     self.config,
                     stage='rendering',
                     current=index,
@@ -903,7 +924,7 @@ class OmniClipService:
                     history_entry=history_entry,
                     vector_enabled=vector_enabled,
                     model_ready=model_ready,
-                )
+                ))
                 _emit_progress(
                     on_progress,
                     {
@@ -914,7 +935,8 @@ class OmniClipService:
                         'overall_percent': overall_percent,
                     },
                 )
-        self.store.update_rendered_chunks(payloads)
+        if payloads:
+            self.store.update_rendered_chunks(payloads)
         return total_rows
 
     def _record_build_history(
@@ -926,6 +948,7 @@ class OmniClipService:
         indexing_seconds: float,
         rendering_seconds: float,
         vectorizing_seconds: float,
+        vector_tail_seconds_per_chunk: float,
         resolved_device: str,
         total_seconds: float,
     ) -> None:
@@ -944,6 +967,7 @@ class OmniClipService:
                 'indexing_seconds': float(indexing_seconds),
                 'rendering_seconds': float(rendering_seconds),
                 'vectorizing_seconds': float(vectorizing_seconds),
+                'vector_tail_seconds_per_chunk': float(vector_tail_seconds_per_chunk),
                 'vector_load_seconds': 0.0,
                 'total_seconds': float(total_seconds),
             },
@@ -1483,96 +1507,6 @@ def _filter_candidate_rows_by_page_blocklist(rows, patterns: list[re.Pattern[str
     return [row for row in rows if not _page_matches_blocklist(row['title'], row['source_path'], patterns)]
 
 
-def _normalize_fragment_key(fragment: str) -> str:
-    return '\n'.join(line.rstrip() for line in fragment.splitlines() if line.strip())
-
-
-def _anchor_parts(anchor: str) -> list[str]:
-    return [part.strip() for part in str(anchor or '').split(' > ') if part.strip()]
-
-
-def _hit_is_descendant_of(hit: SearchHit, other: SearchHit) -> bool:
-    if hit.source_path != other.source_path:
-        return False
-    hit_parts = _anchor_parts(hit.anchor)
-    other_parts = _anchor_parts(other.anchor)
-    return len(hit_parts) > len(other_parts) and hit_parts[: len(other_parts)] == other_parts
-
-
-def _dedupe_query_hits(hits: list[SearchHit]) -> list[SearchHit]:
-    deduped: list[SearchHit] = []
-    fragment_keys: set[str] = set()
-    for hit in hits:
-        fragment = (hit.display_text or hit.rendered_text).strip()
-        if not fragment or fragment in {'-', '- '}:
-            continue
-        fragment_key = _normalize_fragment_key(fragment)
-        if fragment_key and fragment_key in fragment_keys:
-            continue
-        skip_hit = False
-        replace_index = -1
-        for index, existing in enumerate(deduped):
-            existing_fragment = (existing.display_text or existing.rendered_text).strip()
-            if not existing_fragment:
-                continue
-            if existing.source_path != hit.source_path:
-                continue
-            if hit.anchor == existing.anchor:
-                skip_hit = True
-                break
-            if _fragment_is_covered(fragment, existing_fragment):
-                if _hit_is_descendant_of(hit, existing) or fragment_key == _normalize_fragment_key(existing_fragment):
-                    skip_hit = True
-                    break
-            if _fragment_is_covered(existing_fragment, fragment):
-                if _hit_is_descendant_of(existing, hit) or _normalize_fragment_key(existing_fragment) == fragment_key:
-                    replace_index = index
-                    break
-            if _hit_is_descendant_of(hit, existing):
-                skip_hit = True
-                break
-            if _hit_is_descendant_of(existing, hit):
-                replace_index = index
-                break
-        if skip_hit:
-            continue
-        if replace_index >= 0:
-            deduped[replace_index] = hit
-            fragment_keys = {
-                _normalize_fragment_key((item.display_text or item.rendered_text).strip())
-                for item in deduped
-                if (item.display_text or item.rendered_text).strip()
-            }
-            continue
-        deduped.append(hit)
-        if fragment_key:
-            fragment_keys.add(fragment_key)
-    return deduped
-
-
-def _diversify_hits(hits: list[SearchHit], limit: int) -> list[SearchHit]:
-    remaining = list(hits)
-    selected: list[SearchHit] = []
-    page_counts: dict[str, int] = {}
-    while remaining and len(selected) < limit:
-        best_index = 0
-        best_score = float('-inf')
-        for index, hit in enumerate(remaining):
-            adjusted = hit.score - page_counts.get(hit.source_path, 0) * 8.0
-            if adjusted > best_score:
-                best_index = index
-                best_score = adjusted
-        chosen = remaining.pop(best_index)
-        selected.append(chosen)
-        page_counts[chosen.source_path] = page_counts.get(chosen.source_path, 0) + 1
-    return selected
-
-
-def _select_query_hits(hits: list[SearchHit], limit: int) -> list[SearchHit]:
-    if limit <= 0:
-        return []
-    return _diversify_hits(_dedupe_query_hits(hits), limit)
-
 
 def _semantic_only_score(vector_similarity: float) -> float:
     similarity = max(float(vector_similarity or 0.0), 0.0)
@@ -1929,6 +1863,35 @@ def _merge_relative_paths(*groups) -> list[str]:
             if isinstance(item, str) and item:
                 merged.add(item)
     return sorted(merged)
+
+
+def _resolve_context_language(language: str, query_text: str, hits: list[SearchHit]) -> str:
+    normalized = str(language or 'zh-CN').strip() or 'zh-CN'
+    if normalized.lower().startswith('zh'):
+        return normalized
+    samples = [query_text] + [hit.title for hit in hits[:3]] + [hit.anchor for hit in hits[:3]]
+    if any(re.search(r'[\u4e00-\u9fff]', sample or '') for sample in samples):
+        return 'zh-CN'
+    return normalized
+
+
+def _ai_collaboration_lines(language: str) -> list[str]:
+    normalized = str(language or 'zh-CN').strip().lower()
+    if normalized.startswith('en'):
+        return [
+            '',
+            'AI collaboration mode:',
+            '- These are candidate snippets from my local notes.',
+            '- Ignore low-relevance fragments directly.',
+            '- If the evidence is still insufficient, return only 1-3 more specific retrieval keywords.',
+        ]
+    return [
+        '',
+        'AI协作模式：',
+        '- 下面是来自我本地笔记库的候选片段。',
+        '- 低相关内容请直接忽略。',
+        '- 如果上下文仍不足，请只返回 1-3 个更具体的检索关键词。',
+    ]
 
 
 def _clear_directory(directory: Path) -> None:
