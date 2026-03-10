@@ -4,6 +4,8 @@ import ctypes
 import os
 import subprocess
 import time
+
+from .process_utils import run_hidden
 from collections import deque
 from dataclasses import asdict, dataclass
 from typing import Literal
@@ -142,7 +144,7 @@ class ResourceMonitor:
         if now < self._gpu_cache_until:
             return self._gpu_cache
         try:
-            result = subprocess.run(
+            result = run_hidden(
                 [
                     'nvidia-smi',
                     '--query-gpu=utilization.gpu,memory.used,memory.total',
@@ -212,9 +214,19 @@ class BuildPerformanceController:
         sample = self.monitor.sample(force=True)
         return self.snapshot(sample, action='shrink', reason='oom_recovery')
 
-    def observe(self, *, encode_elapsed_ms: float, write_elapsed_ms: float) -> BuildTuningSnapshot:
+    def observe(
+        self,
+        *,
+        encode_elapsed_ms: float,
+        write_elapsed_ms: float,
+        prepare_elapsed_ms: float = 0.0,
+        write_queue_depth: int | None = None,
+        write_queue_capacity: int | None = None,
+        progress_ratio: float | None = None,
+    ) -> BuildTuningSnapshot:
         sample = self.monitor.sample(force=False)
-        self._history.append((max(encode_elapsed_ms, 0.0), max(write_elapsed_ms, 0.0)))
+        combined_write_elapsed_ms = max(write_elapsed_ms, 0.0) + max(prepare_elapsed_ms, 0.0)
+        self._history.append((max(encode_elapsed_ms, 0.0), combined_write_elapsed_ms))
         now = sample.timestamp
         if now < self._cooldown_until or (now - self._last_adjustment_at) < self.monitor.sample_interval_seconds:
             return self.snapshot(sample)
@@ -226,11 +238,22 @@ class BuildPerformanceController:
         memory = sample.memory_percent if sample.memory_percent is not None else 0.0
         gpu = sample.gpu_percent if sample.gpu_percent is not None else None
         gpu_memory = sample.gpu_memory_percent if sample.gpu_memory_percent is not None else 0.0
+        queue_fill = 0.0
+        if write_queue_depth is not None and write_queue_capacity:
+            queue_fill = max(0.0, min(float(write_queue_depth) / max(float(write_queue_capacity), 1.0), 1.0))
+        late_tail = max(float(progress_ratio or 0.0), 0.0) >= 0.72
 
         if memory >= self.targets['memory_soft'] or gpu_memory >= self.targets['gpu_memory_soft']:
             self.current_encode_batch_size = max(self.min_encode_batch_size, int(self.current_encode_batch_size * 0.75))
             self.current_write_batch_size = max(self.min_write_batch_size, int(self.current_write_batch_size * 0.75))
             return self.snapshot(sample, action='shrink', reason='memory_pressure')
+
+        if queue_fill >= 0.85 and average_write >= average_encode * (0.72 if late_tail else 0.8) and memory < self.targets['memory_soft'] * 0.95:
+            write_step = max(self.base_batch_size * (12 if late_tail else 8), 128)
+            cool_ratio = 0.9 if late_tail else 0.92
+            self.current_write_batch_size = min(self.max_write_batch_size, self.current_write_batch_size + write_step)
+            self.current_encode_batch_size = max(self.min_encode_batch_size, int(self.current_encode_batch_size * cool_ratio))
+            return self.snapshot(sample, action='expand', reason='write_overhead')
 
         if self.resolved_device == 'cuda' and gpu is not None:
             if gpu < self.targets['gpu_low'] and cpu < self.targets['cpu_high'] and gpu_memory < self.targets['gpu_memory_soft'] * 0.92:
@@ -243,8 +266,10 @@ class BuildPerformanceController:
                 self.current_encode_batch_size = max(self.min_encode_batch_size, int(self.current_encode_batch_size * 0.85))
                 return self.snapshot(sample, action='shrink', reason='gpu_pressure')
 
-        if average_write > average_encode * 1.35 and cpu < self.targets['cpu_high'] and memory < self.targets['memory_soft'] * 0.95:
-            self.current_write_batch_size = min(self.max_write_batch_size, self.current_write_batch_size + max(self.base_batch_size * 8, 128))
+        if average_write > average_encode * (1.18 if late_tail else 1.35) and cpu < self.targets['cpu_high'] and memory < self.targets['memory_soft'] * 0.95:
+            self.current_write_batch_size = min(self.max_write_batch_size, self.current_write_batch_size + max(self.base_batch_size * (10 if late_tail else 8), 128))
+            if late_tail:
+                self.current_encode_batch_size = max(self.min_encode_batch_size, int(self.current_encode_batch_size * 0.94))
             return self.snapshot(sample, action='expand', reason='write_overhead')
 
         if cpu < self.targets['cpu_low'] and memory < self.targets['memory_soft'] * 0.9:
@@ -365,3 +390,4 @@ def _read_system_memory_percent_windows() -> float:
     if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
         raise OSError('GlobalMemoryStatusEx failed')
     return float(status.dwMemoryLoad)
+

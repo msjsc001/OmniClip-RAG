@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from omniclip_rag.gui import OmniClipDesktopApp
 from omniclip_rag.models import SearchHit
+from omniclip_rag.reranker import get_local_reranker_dir
 from omniclip_rag.vector_index import get_local_model_dir
 
 
@@ -62,6 +63,19 @@ class GuiTests(unittest.TestCase):
                 result = app._choose_model_download_mode('下载模型', config, paths)
             self.assertEqual(result, 'manual')
             self.assertTrue(get_local_model_dir(config, paths).exists())
+            self.assertTrue(showinfo_mock.called)
+        finally:
+            app._on_close()
+
+    def test_choose_reranker_download_mode_manual_creates_target_folder(self) -> None:
+        app = self._build_app()
+        try:
+            config, paths = app._config(True)
+            with patch('omniclip_rag.gui.messagebox.askyesnocancel', return_value=False), \
+                 patch('omniclip_rag.gui.messagebox.showinfo') as showinfo_mock:
+                result = app._choose_reranker_download_mode('下载重排模型', config, paths)
+            self.assertEqual(result, 'manual')
+            self.assertTrue(get_local_reranker_dir(config, paths).exists())
             self.assertTrue(showinfo_mock.called)
         finally:
             app._on_close()
@@ -135,6 +149,7 @@ class GuiTests(unittest.TestCase):
         app = self._build_app()
         try:
             self.assertEqual(app.limit_var.get(), '15')
+            self.assertEqual(app.score_threshold_var.get(), '20')
             self.assertTrue(app.quick_start_expanded_var.get())
             self.assertTrue(app.show_advanced_var.get())
             self.assertIn('1\t^2026-.*\\.android$', app.page_blocklist_rules_var.get())
@@ -148,6 +163,7 @@ class GuiTests(unittest.TestCase):
             app.device_var.set('cpu')
             app._apply_recommended()
             self.assertEqual(app.device_var.get(), 'auto')
+            self.assertEqual(app.score_threshold_var.get(), '20')
         finally:
             app._on_close()
 
@@ -171,6 +187,19 @@ class GuiTests(unittest.TestCase):
             tabs = app.main_tabs.tabs()
             self.assertEqual(app.main_tabs.tab(tabs[0], 'text'), app._tr('main_tab_query'))
             self.assertEqual(app.main_tabs.tab(tabs[1], 'text'), app._tr('main_tab_config'))
+        finally:
+            app._on_close()
+
+    def test_bootstrap_reranker_runs_even_when_disabled(self) -> None:
+        app = self._build_app()
+        try:
+            app.reranker_enabled_var.set(False)
+            with patch('omniclip_rag.gui.is_local_reranker_ready', return_value=False), \
+                 patch.object(app, '_choose_reranker_download_mode', return_value='auto') as choose_mock, \
+                 patch.object(app, '_run_task') as run_task_mock:
+                app._bootstrap_reranker()
+            choose_mock.assert_called_once()
+            run_task_mock.assert_called_once()
         finally:
             app._on_close()
 
@@ -335,6 +364,28 @@ class GuiTests(unittest.TestCase):
         finally:
             app._on_close()
 
+
+    def test_config_left_tabs_include_retrieval_boost(self) -> None:
+        app = self._build_app()
+        try:
+            tabs = app.left_tabs.tabs()
+            labels = [app.left_tabs.tab(tab, 'text') for tab in tabs]
+            self.assertIn(app._tr('left_tab_retrieval'), labels)
+        finally:
+            app._on_close()
+
+    def test_apply_status_updates_reranker_state_summary(self) -> None:
+        app = self._build_app()
+        try:
+            app._apply_status({
+                'stats': {'files': 1, 'chunks': 2, 'refs': 0},
+                'reranker_ready': True,
+                'reranker_model': 'BAAI/bge-reranker-v2-m3',
+            })
+            self.assertEqual(app.reranker_state_var.get(), app._tr('reranker_ready'))
+            self.assertIsNotNone(app.reranker_state_label)
+        finally:
+            app._on_close()
 
 if __name__ == '__main__':
     unittest.main()

@@ -257,6 +257,44 @@ class VectorIndexTests(unittest.TestCase):
             self.assertIn('build_profile', progress[-1])
             self.assertIn('encode_batch_size', progress[-1])
             self.assertIn('write_batch_size', progress[-1])
+            self.assertIn('encoded_count', progress[-1])
+            self.assertIn('written_count', progress[-1])
+            self.assertIn('write_queue_depth', progress[-1])
+            self.assertIn('write_queue_capacity', progress[-1])
+            self.assertIn('write_flush_count', progress[-1])
+
+    def test_lancedb_rebuild_reports_pipeline_metrics(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "pipeline_metrics"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend="lancedb",
+            vector_batch_size=2,
+        )
+        documents = [
+            {
+                "chunk_id": f"m{index}",
+                "source_path": f"pages/{index}.md",
+                "title": f"T{index}",
+                "anchor": f"A{index}",
+                "rendered_text": f"metric chunk {index}",
+            }
+            for index in range(12)
+        ]
+        progress: list[dict[str, object]] = []
+        with patch.dict(sys.modules, _fake_lancedb_modules()):
+            index = LanceDbVectorIndex(config, data_paths, embedder_factory=FakeEmbedder)
+            index.rebuild(documents, on_progress=progress.append)
+        self.assertTrue(progress)
+        final = progress[-1]
+        self.assertEqual(final['current'], len(documents))
+        self.assertEqual(final['written_count'], len(documents))
+        self.assertEqual(final['encoded_count'], len(documents))
+        self.assertGreaterEqual(int(final['write_queue_capacity']), 1)
+        self.assertGreaterEqual(int(final['write_flush_count']), 1)
+        self.assertGreaterEqual(float(final['encode_elapsed_total_ms']), 0.0)
+        self.assertGreaterEqual(float(final['prepare_elapsed_total_ms']), 0.0)
+        self.assertGreaterEqual(float(final['write_elapsed_total_ms']), 0.0)
 
     def test_lancedb_warmup_returns_dimension(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "warmup"))

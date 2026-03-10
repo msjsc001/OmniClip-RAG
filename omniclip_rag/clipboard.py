@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import subprocess
+from .process_utils import run_hidden
 
 
 # Why: Windows 的 clip.exe 读取 Unicode 时更稳定的输入格式是 UTF-16LE；
@@ -8,4 +8,6 @@ import subprocess
 def copy_text(text: str) -> None:
     normalized = (text or '').replace('\r\n', '\n').replace('\n', '\r\n')
     payload = normalized.encode('utf-16le')
-    subprocess.run(["cmd", "/u", "/c", "clip"], input=payload, check=True)
+    run_hidden(["cmd", "/u", "/c", "clip"], input=payload, check=True)
+
+

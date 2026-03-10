@@ -8,7 +8,10 @@ from unittest.mock import patch
 
 from omniclip_rag import parser as parser_module
 from omniclip_rag.config import AppConfig, ensure_data_paths
+from omniclip_rag.models import SearchHit
+from omniclip_rag.retrieval_policy import build_query_profile
 from omniclip_rag.service import OmniClipService
+from omniclip_rag.timing import load_build_history
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +68,59 @@ class _FailingVectorIndex(_StubVectorIndex):
     def delete(self, chunk_ids):
         self.deleted_batches.append(list(chunk_ids))
         return None
+
+
+class _ProfilingVectorIndex(_StubVectorIndex):
+    def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None):
+        count = int(total or 0)
+        if on_progress is not None:
+            on_progress(
+                {
+                    'stage': 'vectorizing',
+                    'current': count,
+                    'total': count,
+                    'encoded_count': count,
+                    'written_count': count,
+                    'write_queue_depth': 0,
+                    'write_queue_capacity': 4,
+                    'staged_write_rows': 0,
+                    'encode_elapsed_total_ms': 120.0,
+                    'prepare_elapsed_total_ms': 80.0,
+                    'write_elapsed_total_ms': 40.0,
+                    'write_flush_count': 3,
+                }
+            )
+        return None
+
+
+class _LoweringReranker:
+    def __init__(self) -> None:
+        self.last_candidate_limit: int | None = None
+
+    def warmup(self, *, allow_download: bool = False):
+        return {'backend': 'stub', 'model': 'stub', 'model_ready': True}
+
+    def rerank(self, query_text: str, hits: list[SearchHit], candidate_limit: int):
+        self.last_candidate_limit = candidate_limit
+        reranked: list[SearchHit] = []
+        for index, hit in enumerate(hits):
+            score = hit.score
+            if index == 0:
+                score = 29.0
+            reranked.append(
+                SearchHit(
+                    score=score,
+                    title=hit.title,
+                    anchor=hit.anchor,
+                    source_path=hit.source_path,
+                    rendered_text=hit.rendered_text,
+                    chunk_id=hit.chunk_id,
+                    display_text=hit.display_text,
+                    preview_text=hit.preview_text,
+                    reason=hit.reason,
+                )
+            )
+        return reranked, SimpleNamespace(enabled=True, applied=True, resolved_device='cpu', reranked_count=min(candidate_limit, len(hits)), degraded_to_cpu=False, oom_recovered=False)
 
 
 class ServiceTests(unittest.TestCase):
@@ -143,6 +199,40 @@ class ServiceTests(unittest.TestCase):
         finally:
             service.close()
 
+    def test_bootstrap_reranker_works_when_disabled(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'bootstrap_reranker_disabled'))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), reranker_enabled=False)
+        service = OmniClipService(config, data_paths)
+        try:
+            with patch('omniclip_rag.service.CrossEncoderReranker') as reranker_cls:
+                reranker_cls.return_value.warmup.return_value = {'backend': 'cross-encoder', 'model': config.reranker_model, 'model_ready': True}
+                result = service.bootstrap_reranker()
+            reranker_cls.assert_called_once()
+            reranker_cls.return_value.warmup.assert_called_once_with(allow_download=True)
+            self.assertTrue(result['model_ready'])
+        finally:
+            service.close()
+
+    def test_query_filters_by_final_reranked_score(self) -> None:
+        vault_copy = ROOT / ".tmp" / "threshold_rerank_vault_test"
+        data_root = ROOT / ".tmp" / "threshold_rerank_data_test"
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        (vault_copy / "page_a.md").write_text("- 我的日程\n  id:: 11111111-1111-1111-1111-111111111111\n", encoding="utf-8")
+        (vault_copy / "page_b.md").write_text("- 我的待办\n  id:: 22222222-2222-2222-2222-222222222222\n", encoding="utf-8")
+        data_paths = ensure_data_paths(str(data_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root), reranker_enabled=True)
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        service.reranker = _LoweringReranker()
+        try:
+            service.rebuild_index()
+            result = service.query("我的", limit=39, score_threshold=35)
+            self.assertTrue(result.hits)
+            self.assertTrue(all(hit.score >= 35 for hit in result.hits))
+            self.assertEqual(service.reranker.last_candidate_limit, min(2, max(39, build_query_profile("我的", 39).hydration_pool_size)))
+        finally:
+            service.close()
+
     def test_semantic_only_hits_keep_reasonable_score_floor(self) -> None:
         vault_copy = ROOT / ".tmp" / "semantic_floor_vault_test"
         data_root = ROOT / ".tmp" / "semantic_floor_data_test"
@@ -189,6 +279,43 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("page_b", {hit.title for hit in hits})
         finally:
             service.close()
+
+    def test_context_pack_merges_same_parent_siblings(self) -> None:
+        hits = [
+            SearchHit(
+                score=96.0,
+                title='如何极致的用好MyLifeOrganized',
+                anchor='总结 > 第二部分 > 步骤三 > 区分“日程”与“待办” > 核心原则',
+                source_path='pages/mlo.md',
+                rendered_text='',
+                chunk_id='a',
+                display_text='- **总结**\n    - **第二部分**\n        - **步骤三**\n            - **区分“日程”与“待办”**\n                - **核心原则**：MLO 是待办，不是日程表。',
+            ),
+            SearchHit(
+                score=95.0,
+                title='如何极致的用好MyLifeOrganized',
+                anchor='总结 > 第二部分 > 步骤三 > 区分“日程”与“待办” > 如何操作',
+                source_path='pages/mlo.md',
+                rendered_text='',
+                chunk_id='b',
+                display_text='- **总结**\n    - **第二部分**\n        - **步骤三**\n            - **区分“日程”与“待办”**\n                - **如何操作**：固定出席型事务放进日历，而不是待办。',
+            ),
+            SearchHit(
+                score=94.0,
+                title='如何极致的用好MyLifeOrganized',
+                anchor='总结 > 第二部分 > 步骤三 > 区分“日程”与“待办” > 极致用法',
+                source_path='pages/mlo.md',
+                rendered_text='',
+                chunk_id='c',
+                display_text='- **总结**\n    - **第二部分**\n        - **步骤三**\n            - **区分“日程”与“待办”**\n                - **极致用法**：与日历双向同步，保持待办列表纯净。',
+            ),
+        ]
+        context = OmniClipService.compose_context_pack_text('我的日程', hits)
+        self.assertEqual(context.count('笔记片段1：'), 1)
+        self.assertEqual(context.count('笔记片段2：'), 0)
+        self.assertIn('**核心原则**', context)
+        self.assertIn('**如何操作**', context)
+        self.assertIn('**极致用法**', context)
 
     def test_context_pack_redacts_core_secrets(self) -> None:
         vault_copy = ROOT / ".tmp" / "redact_vault_test"
@@ -543,6 +670,22 @@ class ServiceTests(unittest.TestCase):
             latest = service.store.fetch_latest_preflight()
             self.assertIsNotNone(latest)
             self.assertEqual(latest["vault_file_count"], report.vault_file_count)
+        finally:
+            service.close()
+
+    def test_rebuild_records_vector_pipeline_history(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _ProfilingVectorIndex()
+        try:
+            service.rebuild_index()
+            history = load_build_history(data_paths.state_dir / 'build_history.json')
+            self.assertTrue(history)
+            latest = history[-1]
+            self.assertAlmostEqual(float(latest['vector_prepare_seconds']), 0.08, places=3)
+            self.assertAlmostEqual(float(latest['vector_write_seconds']), 0.04, places=3)
+            self.assertEqual(int(latest['vector_write_flush_count']), 3)
         finally:
             service.close()
 

@@ -1,8 +1,8 @@
 # Architecture Notes
 
-## Release Boundary For V0.1.8
+## Release Boundary For Current Mainline
 
-`V0.1.8` is not trying to ship a giant all-in-one AI platform.
+The current mainline is not trying to ship a giant all-in-one AI platform.
 
 Its delivery goal is narrower and much more deliberate:
 
@@ -77,6 +77,13 @@ Current layering:
 
 Why: if GUI logic leaks into retrieval/storage internals, later additions such as tray mode, hotkeys, and advanced settings become expensive and brittle.
 
+The new `Retrieval Boost` tab follows the same boundary: GUI only exposes reranker/model/export controls and status, while query shaping, reranker readiness, and export behavior stay in backend modules.
+
+Reranker bootstrap also stays independent from the enable checkbox: users may download or manually stage the reranker cache before ever turning reranking on for actual queries.
+
+Full-context export now deliberately diverges from raw hit listing: result tables stay atomic for inspection, but the exported context pack may merge same-parent sibling fragments into one compact local structure so AI-facing output keeps evidence density without repeating nearly identical branches.
+
+
 ### 5. Watch mode must be externally stoppable
 
 CLI-only blocking watch was not enough for a desktop app.
@@ -140,7 +147,7 @@ Current validation includes:
 - successful GUI startup and shutdown,
 - successful Windows EXE packaging.
 
-## Intentional Tradeoffs In V0.1.8
+## Intentional Tradeoffs In The Current Mainline
 
 ### 1. `torch` is the stable default runtime
 
@@ -214,6 +221,26 @@ Why: the desktop app, taskbar icon, and packaged EXE must present a consistent i
 ### 12. Global shared data and per-vault workspace data must be separated explicitly
 ### 13. Lean packaged builds must discover external runtime installs explicitly
 
+### 14. Late-stage build optimizations are independent performance tracks
+
+Current build-performance work is intentionally split into two groups:
+
+- core usability and stability work that is already in the main path,
+- heavier throughput work that is still optional and can be deferred safely.
+
+The main-path work now includes:
+
+- adaptive encode/write batch control,
+- phase-aware ETA tracking,
+- a bounded single-writer rebuild pipeline for vector indexing,
+- split accounting for encode vs row-materialization vs LanceDB write time,
+- write-backlog-aware tuning and task-detail/build-history telemetry.
+
+The remaining items such as deeper LanceDB profiling and narrower late-tail specialization are **not** prerequisites for rebuild correctness. They are independent performance tracks that matter mainly when users rebuild very large vaults frequently.
+
+Why: this keeps the product boundary clear. Not shipping those later-stage optimizations must never be interpreted as "full rebuild is broken" or "daily search quality depends on them". They only affect how far the product pushes the throughput ceiling on huge full rebuilds.
+
+
 Current runtime policy:
 
 - the public Windows package stays lean and does not bundle `torch` or `sentence-transformers`,
@@ -223,7 +250,7 @@ Current runtime policy:
 
 Why: a lean PyInstaller build cannot assume that every stdlib module or DLL needed by an externally installed runtime is already discoverable inside the frozen app environment.
 
-### 14. Rebuilds must preserve an existing local runtime install
+### 15. Rebuilds must preserve an existing local runtime install
 
 Current packaging rule:
 
@@ -439,6 +466,15 @@ Current acceleration-reporting rule:
 
 Why: users reasonably assume “nvcc works” means the app should already use the GPU. The product must explain the missing app-local runtime boundary explicitly.
 
+### 28. Plan documents under `plans/` are execution baselines, not speculative notes
+
+Current documentation rule:
+
+- `plans/检索优化计划.md` records the retrieval-quality work that has already been delivered into the mainline.
+- `plans/建库性能优化计划.md` records the full-rebuild performance work that is already in the mainline plus the explicit boundary of what is intentionally out of scope for now.
+- README and changelog entries should stay aligned with those plan files so a reader does not mistake independent future work for a missing core capability.
+
+Why: the project uses the plan files as durable engineering memory. If the higher-level docs drift away from them, users can wrongly conclude that rebuild or retrieval is still incomplete when the missing items are actually optional later-stage work.
 ## 2026-03-09 RAG Output Contract Refresh
 
 ### Decisions
@@ -529,8 +565,8 @@ Why: users reasonably assume “nvcc works” means the app should already use t
 - `timing.py` now owns a `BuildEtaTracker` that keeps recent per-stage progress windows and blends them with static history instead of trusting one whole-run average.
 - Vector tail speed is now written into `build_history.json`, so the next build can start with a more realistic estimate for the expensive late vector stage.
 - The GUI only persists and renders the build peak profile plus live tuning summaries. It does not decide when to expand or shrink batches.
-- The first implementation intentionally stays single-process and conservative. It improves throughput by larger buffered writes and adaptive batch sizes, but it does not yet introduce a full producer/consumer pipeline.
-- Future performance work should focus on deeper pipeline overlap, more granular phase telemetry, and sustained late-stage LanceDB write optimization without breaking rebuild safety.
+- The current implementation intentionally stays single-process plus a bounded single writer. It improves throughput through adaptive batching, queue-aware tuning, and a stable encode/write overlap path without introducing aggressive multi-writer risk.
+- Future performance work, if needed later, should be treated as a new independent topic focused on narrower LanceDB tail profiling and specialty late-stage tuning, not as a prerequisite for rebuild correctness.
 
 ## 2026-03-10 Retrieval Optimization Delivery
 
@@ -554,3 +590,10 @@ Why: users reasonably assume “nvcc works” means the app should already use t
 - `gui.py` only renders recommendation hints, reranker settings, and export-mode controls; it does not recompute backend policy.
 - `query_runtime.json` stores lightweight runtime samples so the app can recommend a practical query-limit range without silently rewriting user settings.
 - `ai-collab` export mode appends a minimal collaboration note only when explicitly enabled.
+
+### 9. Windows background helper processes must never steal focus
+
+GPU/runtime probing helpers such as `nvidia-smi`, `nvcc`, and clipboard bridge commands must run through a hidden subprocess wrapper on Windows.
+
+Why: repeated console flashes during rebuilds are user-visible regressions, can steal focus from the desktop app, and make large-vault indexing feel unstable even when the worker itself is still healthy.
+

@@ -46,7 +46,7 @@ class AppConfig:
         ]
     )
     query_limit: int = 15
-    query_score_threshold: float = 0.0
+    query_score_threshold: float = 20.0
     poll_interval_seconds: float = 2.0
     vector_backend: str = "disabled"
     vector_model: str = "BAAI/bge-m3"

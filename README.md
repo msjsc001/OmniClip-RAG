@@ -1,6 +1,6 @@
 # OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.9-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.10-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#quick-start)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#core-positioning)
@@ -43,12 +43,14 @@ This naturally emphasizes:
 - controlled exposure
 - no blanket vault access for AI
 
-## What's New In v0.1.9
-This release focuses on retrieval quality and large-vault build realism:
-- Added backend-only retrieval policy, same-page novelty selection, optional reranker wiring, and AI-collaboration export shaping.
-- Added adaptive build-throughput control with `30% / 50% / 90%` hardware-peak profiles and safer encode/write batch tuning.
-- Reworked rebuild ETA so it learns from the current stage's recent throughput and previous vector tail-speed history instead of one blunt average.
-- Moved planning documents into `plans/` and kept this release source-only by default, without shipping a new EXE asset.
+## What's New In v0.1.10
+This release focuses on lowering retrieval friction further and packaging the work that had already been finished in source but not yet shipped as a Windows build:
+- `Retrieval Boost` is now a dedicated settings page that groups reranker controls, AI-collaboration export, CPU/GPU batch sizing, and reranker readiness in one place.
+- Reranker bootstrap now supports both automatic download and manual placement even when reranking itself is still disabled; ready-state checks also prevent redundant downloads.
+- Full-context export now performs compact same-parent sibling merging so repeated local branches are reduced without turning result inspection into a black box.
+- Minimum relevance now recommends starting at `20`, and threshold filtering is applied to the final displayed score after reranking.
+- The packaged release now includes the stabilized large-vault rebuild improvements: hardware-peak profiles, adaptive encode/write batching, phase-aware ETA, a stable single-writer vector pipeline, and better late-stage write observability.
+
 ## Current Capabilities
 
 - Desktop GUI: configuration, precheck, model bootstrap, indexing, search, live watch, selective cleanup
@@ -56,10 +58,14 @@ This release focuses on retrieval quality and large-vault build realism:
 - Logseq semantics: page properties, block properties, `id:: UUID`, block refs, block embeds
 - Hybrid retrieval: `SQLite + FTS5 + structural scoring + LanceDB`
 - Local embedding model: `BAAI/bge-m3`
+- Optional reranker: `BAAI/bge-reranker-v2-m3`
 - Multi-vault support: shared common data plus isolated per-vault workspace data
 - Space and time precheck: estimate disk usage and first-run duration before indexing
 - Full rebuilds can be resumed and paused
+- Full rebuild throughput control: hardware-peak profiles, adaptive encode/write batches, a stable single-writer vector pipeline, and phase-aware ETA
 - Context-pack export for use with any AI
+- AI-collaboration export that lets the external AI ask for the next retrieval round
+- Query-limit recommendations derived from device/runtime history and reranker state
 - Single-character query guard: a one-character search such as `鞋` stays on lexical retrieval only, so vector recall does not pull noisy journal-like pages too early
 - Relevance scoring: a visible `0-100` engineering score built from title/path/body lexical hits, FTS rank, LIKE hits, vector similarity, and anti-noise penalties
 
@@ -147,7 +153,7 @@ See [RUNTIME_SETUP.md](RUNTIME_SETUP.md) for the packaged runtime flow.
 
 ## Current Version
 
-- Version: `V0.1.9`
+- Version: `V0.1.10`
 - Main delivery form: desktop GUI
 - Current stable path: `torch + bge-m3`
 
@@ -190,6 +196,9 @@ The current tree has already been validated with:
 - [Changelog](CHANGELOG.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
 - [Runtime Setup](RUNTIME_SETUP.md)
+- [Retrieval Optimization Plan](plans/检索优化计划.md)
+- [Build Performance Plan](plans/建库性能优化计划.md)
+- [Release Notes v0.1.10](releases/RELEASE_NOTES_v0.1.10.md)
 - [Release Notes v0.1.9](releases/RELEASE_NOTES_v0.1.9.md)
 - [Release Notes v0.1.7](releases/RELEASE_NOTES_v0.1.7.md)
 - [Release Notes v0.1.6](releases/RELEASE_NOTES_v0.1.6.md)
@@ -198,7 +207,6 @@ The current tree has already been validated with:
 - [Release Notes v0.1.2](releases/RELEASE_NOTES_v0.1.2.md)
 - [Release Notes v0.1.1](releases/RELEASE_NOTES_v0.1.1.md)
 - [Release Notes v0.1.0](releases/RELEASE_NOTES_v0.1.0.md)
-
 ## License
 
 This project is released under the [MIT License](LICENSE).
@@ -221,3 +229,6 @@ Do not use OmniClip RAG or any exported context pack as the sole basis for medic
 The maintainers and contributors are not liable for any direct, indirect, incidental, consequential, special, exemplary, or punitive damages, or for any data loss, downtime, model misuse, privacy incident, operational interruption, or decision made based on the use or misuse of this project, to the maximum extent permitted by applicable law.
 
 All third-party product names, model names, platforms, and trademarks mentioned in this repository remain the property of their respective owners. Their appearance here does not imply affiliation, endorsement, certification, or partnership.
+
+
+

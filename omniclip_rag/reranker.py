@@ -193,7 +193,7 @@ class CrossEncoderReranker:
             from sentence_transformers import CrossEncoder
         except ImportError as exc:
             raise RuntimeDependencyError('当前还缺少 sentence-transformers 运行时，无法启用 reranker。') from exc
-        return CrossEncoder(str(local_dir), device=device, automodel_args={'local_files_only': True})
+        return CrossEncoder(str(local_dir), device=device, local_files_only=True)
 
     def _initial_batch_size(self, device: str) -> int:
         if device == 'cuda':

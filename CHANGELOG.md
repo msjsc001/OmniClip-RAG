@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## V0.1.10 - 2026-03-10
+
+### Added
+
+- Added a dedicated `Retrieval Boost` settings area so reranker controls, AI-collaboration export, CPU / GPU batch sizing, and reranker readiness are easier to understand and adjust.
+- Added explicit reranker bootstrap choices for automatic download versus manual placement, including exact cache-folder guidance and ready-state detection.
+- Added compact same-parent sibling merging in full-context export so AI-facing context packs keep local structure while reducing repeated branches.
+
+### Changed
+
+- Changed LanceDB full rebuilds to use a bounded single-writer pipeline so encoding and vector writes can overlap without introducing aggressive multi-writer instability.
+- Changed build tuning so write-queue backlog can grow write batches and slightly cool encode batches when late-stage write pressure starts dominating.
+- Changed vector rebuilds so encoded vectors are materialized into rows inside the writer stage, allowing encode, row preparation, and LanceDB writes to overlap more cleanly without aggressive multi-writer risk.
+- Changed the minimum relevance guidance and defaults to recommend starting around `20`, which better matches the current hybrid-score calibration.
+- Changed full-context export so same-parent sibling hits can be merged into one compact fragment group, reducing repeated local branches while keeping result tables atomic.
+- Changed final minimum-relevance filtering so it applies to the final displayed score after reranking, preventing low-score rows from leaking into the visible result table.
+
+### Fixed
+
+- Fixed reranker bootstrap so download/manual staging works even before reranking is enabled, and added explicit manual-download guidance plus duplicate-download protection.
+- Fixed the `CrossEncoder(... local_files_only=...)` bootstrap error caused by passing `local_files_only` through two different argument paths.
+- Fixed Windows helper subprocesses used during rebuild/runtime probing so `nvidia-smi`, `nvcc`, and clipboard commands run without flashing black console windows or stealing focus.
+
 ## V0.1.9 - 2026-03-10
 
 ### Added
@@ -240,3 +263,4 @@
 - The current stable default remains `torch + bge-m3`.
 - ONNX remains a future optimization path, not the default production route for `V0.1.0`.
 - CLI remains available for debugging and automation, but GUI is now the primary workflow.
+

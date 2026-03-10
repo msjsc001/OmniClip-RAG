@@ -19,7 +19,7 @@ from .models import QueryInsights, QueryResult, SearchHit, SpaceEstimate
 from .parser import BLOCK_REF_RE, BULLET_RE, EMBED_RE, PAGE_REF_RE, PROPERTY_RE
 from .query_runtime import QueryRuntimeAdvisor, select_query_hits
 from .retrieval_policy import QueryProfile, build_query_profile, rank_candidates
-from .reranker import create_reranker, is_local_reranker_ready
+from .reranker import CrossEncoderReranker, create_reranker, is_local_reranker_ready
 from .preflight import estimate_storage_for_vault
 from .storage import MetadataStore
 from .timing import BuildEtaTracker, append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
@@ -116,7 +116,8 @@ class OmniClipService:
         return result
 
     def bootstrap_reranker(self) -> dict[str, object]:
-        result = self.reranker.warmup(allow_download=True)
+        bootstrapper = CrossEncoderReranker(self.config, self.paths)
+        result = bootstrapper.warmup(allow_download=True)
         result['cache_bytes'] = _directory_size(self.paths.cache_dir / 'models')
         return result
 
@@ -264,6 +265,8 @@ class OmniClipService:
             },
         )
 
+        vector_metrics: dict[str, object] = {}
+
         def emit_vector_progress(progress: dict[str, object]) -> None:
             current = max(0, int(progress.get('current', 0) or 0))
             total = max(0, int(progress.get('total', total_documents) or total_documents))
@@ -281,6 +284,19 @@ class OmniClipService:
             enriched = dict(progress)
             enriched['eta_seconds'] = eta_seconds
             enriched['overall_percent'] = overall_percent
+            for key in (
+                'encode_elapsed_total_ms',
+                'prepare_elapsed_total_ms',
+                'write_elapsed_total_ms',
+                'write_flush_count',
+                'encoded_count',
+                'written_count',
+                'write_queue_depth',
+                'write_queue_capacity',
+                'staged_write_rows',
+            ):
+                if key in enriched:
+                    vector_metrics[key] = enriched[key]
             _emit_progress(on_progress, enriched)
 
         self.vector_index.rebuild(documents, total=total_documents, on_progress=emit_vector_progress, pause_event=pause_event, cancel_event=cancel_event)
@@ -297,6 +313,9 @@ class OmniClipService:
             vector_tail_seconds_per_chunk=eta_tracker.recent_rate('vectorizing') or 0.0,
             resolved_device=resolved_device,
             total_seconds=max(time.time() - rebuild_started_at, 0.0),
+            vector_prepare_seconds=float(vector_metrics.get('prepare_elapsed_total_ms', 0.0) or 0.0) / 1000.0,
+            vector_write_seconds=float(vector_metrics.get('write_elapsed_total_ms', 0.0) or 0.0) / 1000.0,
+            vector_write_flush_count=int(vector_metrics.get('write_flush_count', 0) or 0),
         )
         self._clear_rebuild_state()
         self._clear_watch_state()
@@ -438,9 +457,11 @@ class OmniClipService:
             hits = rank_candidates(query_text, rows, vector_candidates, profile)
 
         effective_threshold = self.config.query_score_threshold if score_threshold is None else float(score_threshold or 0.0)
-        filtered_hits = [hit for hit in hits if hit.score >= max(effective_threshold, 0.0)]
-        reranked_hits, rerank_outcome = self.reranker.rerank(query_text, filtered_hits, limit)
-        finalized_hits, insights = self._finalize_query_hits(query_text, reranked_hits, limit, profile)
+        threshold_floor = max(effective_threshold, 0.0)
+        rerank_limit = min(len(hits), max(limit, profile.hydration_pool_size))
+        reranked_hits, rerank_outcome = self.reranker.rerank(query_text, hits, rerank_limit)
+        filtered_hits = [hit for hit in reranked_hits if hit.score >= threshold_floor]
+        finalized_hits, insights = self._finalize_query_hits(query_text, filtered_hits, limit, profile)
         insights.elapsed_ms = max(int((time.perf_counter() - started_at) * 1000), 0)
         insights.reranker = rerank_outcome
         insights.recommendation = self._query_runtime_advisor.record_and_recommend(
@@ -523,28 +544,7 @@ class OmniClipService:
         total_groups = len(grouped)
         for page_index, ((title, _source_path), page_hits) in enumerate(grouped.items()):
             lines.extend(['', f'# 笔记名：{title}'])
-            selected_fragments: list[str] = []
-            for hit in page_hits:
-                fragment = (hit.display_text or hit.rendered_text).strip()
-                if not fragment or fragment in {'-', '- '}:
-                    continue
-                skip_fragment = False
-                for index, existing in enumerate(selected_fragments):
-                    if fragment == existing or fragment in existing:
-                        skip_fragment = True
-                        break
-                    if existing in fragment:
-                        selected_fragments[index] = fragment
-                        skip_fragment = True
-                        break
-                if not skip_fragment:
-                    selected_fragments.append(fragment)
-
-            deduped_fragments: list[str] = []
-            for fragment in selected_fragments:
-                if any(fragment != other and _fragment_is_covered(fragment, other) for other in selected_fragments):
-                    continue
-                deduped_fragments.append(fragment)
+            deduped_fragments = _collect_context_fragments(page_hits)
 
             for fragment_index, fragment in enumerate(deduped_fragments, start=1):
                 lines.append(f'笔记片段{fragment_index}：')
@@ -951,6 +951,9 @@ class OmniClipService:
         vector_tail_seconds_per_chunk: float,
         resolved_device: str,
         total_seconds: float,
+        vector_prepare_seconds: float = 0.0,
+        vector_write_seconds: float = 0.0,
+        vector_write_flush_count: int = 0,
     ) -> None:
         append_build_history(
             self._build_history_file,
@@ -968,6 +971,9 @@ class OmniClipService:
                 'rendering_seconds': float(rendering_seconds),
                 'vectorizing_seconds': float(vectorizing_seconds),
                 'vector_tail_seconds_per_chunk': float(vector_tail_seconds_per_chunk),
+                'vector_prepare_seconds': float(vector_prepare_seconds),
+                'vector_write_seconds': float(vector_write_seconds),
+                'vector_write_flush_count': int(vector_write_flush_count),
                 'vector_load_seconds': 0.0,
                 'total_seconds': float(total_seconds),
             },
@@ -1842,6 +1848,139 @@ def _fragment_is_covered(fragment: str, other: str) -> bool:
         if not matched:
             return False
     return True
+
+
+def _collect_context_fragments(page_hits: list[SearchHit]) -> list[str]:
+    grouped: dict[tuple[str, ...], list[tuple[SearchHit, str]]] = {}
+    ordered_keys: list[tuple[str, ...]] = []
+    for hit in page_hits:
+        fragment = (hit.display_text or hit.rendered_text).strip()
+        if not fragment or fragment in {'-', '- '}:
+            continue
+        key = _context_sibling_group_key(hit, fragment)
+        if key not in grouped:
+            grouped[key] = []
+            ordered_keys.append(key)
+        grouped[key].append((hit, fragment))
+
+    merged_fragments: list[str] = []
+    for key in ordered_keys:
+        merged = _merge_context_group(grouped[key])
+        if merged:
+            merged_fragments.append(merged)
+
+    deduped_fragments: list[str] = []
+    for fragment in merged_fragments:
+        skip_fragment = False
+        for index, existing in enumerate(deduped_fragments):
+            if fragment == existing or fragment in existing or _fragment_is_covered(fragment, existing):
+                skip_fragment = True
+                break
+            if existing in fragment or _fragment_is_covered(existing, fragment):
+                deduped_fragments[index] = fragment
+                skip_fragment = True
+                break
+        if not skip_fragment:
+            deduped_fragments.append(fragment)
+
+    return [
+        fragment
+        for fragment in deduped_fragments
+        if not any(fragment != other and _fragment_is_covered(fragment, other) for other in deduped_fragments)
+    ]
+
+
+def _context_sibling_group_key(hit: SearchHit, fragment: str) -> tuple[str, ...]:
+    parts = _context_anchor_parts(hit.anchor)
+    if len(parts) >= 2:
+        parent_parts = [_normalize_anchor_segment(part) for part in parts[:-1] if _normalize_anchor_segment(part)]
+        if parent_parts:
+            return ('anchor-parent', hit.source_path, *parent_parts[-4:])
+    fragment_lines = [line.rstrip() for line in fragment.splitlines() if line.strip()]
+    if len(fragment_lines) >= 2:
+        return ('line-parent', hit.source_path, *_normalize_context_lines(fragment_lines[:-1])[-4:])
+    return ('single', hit.source_path, hit.chunk_id)
+
+
+def _merge_context_group(items: list[tuple[SearchHit, str]]) -> str:
+    if not items:
+        return ''
+    unique_fragments: list[str] = []
+    for _hit, fragment in items:
+        if any(fragment == existing or fragment in existing for existing in unique_fragments):
+            continue
+        replaced = False
+        for index, existing in enumerate(unique_fragments):
+            if existing in fragment:
+                unique_fragments[index] = fragment
+                replaced = True
+                break
+        if not replaced:
+            unique_fragments.append(fragment)
+
+    if len(unique_fragments) <= 1:
+        return unique_fragments[0] if unique_fragments else ''
+
+    longest = max(unique_fragments, key=len)
+    if all(fragment == longest or _fragment_is_covered(fragment, longest) for fragment in unique_fragments):
+        return longest
+
+    merged = _merge_sibling_fragments(unique_fragments)
+    if merged:
+        return merged
+    return longest
+
+
+def _merge_sibling_fragments(fragments: list[str]) -> str:
+    if len(fragments) <= 1:
+        return fragments[0] if fragments else ''
+    line_groups = [[line.rstrip() for line in fragment.splitlines() if line.strip()] for fragment in fragments]
+    if any(not group for group in line_groups):
+        return ''
+
+    common_prefix: list[str] = []
+    for candidate_lines in zip(*line_groups):
+        head = candidate_lines[0]
+        if all(line == head for line in candidate_lines[1:]):
+            common_prefix.append(head)
+            continue
+        break
+
+    if not common_prefix:
+        return ''
+
+    merged_lines = list(common_prefix)
+    seen_tails: set[tuple[str, ...]] = set()
+    for lines in line_groups:
+        tail = tuple(lines[len(common_prefix):])
+        if not tail or tail in seen_tails:
+            continue
+        seen_tails.add(tail)
+        merged_lines.extend(tail)
+
+    merged_text = '\n'.join(merged_lines).strip()
+    if len(merged_text) > 3200:
+        return ''
+    return merged_text
+
+
+def _context_anchor_parts(anchor: str) -> list[str]:
+    return [part.strip() for part in str(anchor or '').split(' > ') if part.strip()]
+
+
+def _normalize_anchor_segment(text: str) -> str:
+    cleaned = _normalize_markup(text or '')
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip().lower()
+    return cleaned
+
+
+def _normalize_context_lines(lines: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for line in lines:
+        cleaned = re.sub(r'\s+', ' ', line.strip()).lower()
+        if cleaned:
+            normalized.append(cleaned)
+    return normalized
 
 
 def _diff_snapshot(previous: dict[str, tuple[float, int]], current: dict[str, tuple[float, int]]) -> tuple[list[str], list[str]]:

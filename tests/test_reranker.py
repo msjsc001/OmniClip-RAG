@@ -1,7 +1,9 @@
 import shutil
+import sys
+import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.models import SearchHit
@@ -63,6 +65,18 @@ class RerankerTests(unittest.TestCase):
         self.assertEqual(outcome.resolved_device, 'cpu')
         self.assertEqual(len(reranked), 2)
 
+
+    def test_default_loader_uses_direct_local_files_only_flag(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT))
+        config = AppConfig(vault_path='.', data_root=str(paths.global_root), reranker_enabled=True)
+        reranker = CrossEncoderReranker(config, paths)
+        cross_encoder_ctor = Mock(return_value=object())
+        fake_module = types.SimpleNamespace(CrossEncoder=cross_encoder_ctor)
+        with patch.dict(sys.modules, {'sentence_transformers': fake_module}):
+            reranker._default_loader(paths.cache_dir / 'models' / 'BAAI__bge-reranker-v2-m3', 'cpu')
+        cross_encoder_ctor.assert_called_once()
+        self.assertTrue(cross_encoder_ctor.call_args.kwargs.get('local_files_only'))
+        self.assertNotIn('automodel_args', cross_encoder_ctor.call_args.kwargs)
 
 if __name__ == '__main__':
     unittest.main()

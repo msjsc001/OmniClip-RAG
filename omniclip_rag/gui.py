@@ -24,11 +24,11 @@ from .preflight import estimate_model_cache_bytes
 from .service import WATCHDOG_AVAILABLE, OmniClipService
 from .ui_i18n import language_code_from_label, language_label, normalize_language, text, tooltip
 from .ui_tooltip import ToolTip
-from .reranker import is_local_reranker_ready
+from .reranker import get_local_reranker_dir, is_local_reranker_ready
 from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.1.9"
+APP_VERSION = "V0.1.10"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 _CONTEXT_PAGE_RE = re.compile(r'^# 笔记名：(.*)$')
 _CONTEXT_FRAGMENT_RE = re.compile(r'^笔记片段\d+：$')
@@ -128,6 +128,7 @@ class OmniClipDesktopApp:
         self.limit_label_tooltip: ToolTip | None = None
         self.limit_entry_tooltip: ToolTip | None = None
         self.query_limit_recommendation: dict[str, object] | None = None
+        self.reranker_state_label: tk.Label | None = None
 
         self._init_style()
         self._init_vars()
@@ -218,7 +219,7 @@ class OmniClipDesktopApp:
         self.device_summary_var = tk.StringVar(value="")
         self.limit_var = tk.StringVar(value="15")
         self.limit_var.trace_add('write', lambda *_args: self._refresh_query_limit_guidance())
-        self.score_threshold_var = tk.StringVar(value="0")
+        self.score_threshold_var = tk.StringVar(value="20")
         self.interval_var = tk.StringVar(value="2.0")
         self.build_resource_profile_var = tk.StringVar(value=self._build_profile_label('balanced'))
         self.query_var = tk.StringVar()
@@ -232,6 +233,7 @@ class OmniClipDesktopApp:
         self.reranker_model_var = tk.StringVar(value='BAAI/bge-reranker-v2-m3')
         self.reranker_batch_cpu_var = tk.StringVar(value='4')
         self.reranker_batch_cuda_var = tk.StringVar(value='8')
+        self.reranker_state_var = tk.StringVar(value='')
         self.context_export_ai_collab_var = tk.BooleanVar(value=False)
         self.context_export_ai_collab_var.trace_add('write', lambda *_args: self._rebuild_context_view())
         self.reranker_enabled_var.trace_add('write', lambda *_args: self._refresh_query_limit_guidance())
@@ -826,13 +828,16 @@ class OmniClipDesktopApp:
 
         start_tab, start_body = self._make_scrollable_tab(self.left_tabs)
         settings_tab, settings_body = self._make_scrollable_tab(self.left_tabs)
+        retrieval_tab, retrieval_body = self._make_scrollable_tab(self.left_tabs)
         data_tab, data_body = self._make_scrollable_tab(self.left_tabs)
         self.left_tabs.add(start_tab, text=self._tr("left_tab_start"))
         self.left_tabs.add(settings_tab, text=self._tr("left_tab_settings"))
+        self.left_tabs.add(retrieval_tab, text=self._tr("left_tab_retrieval"))
         self.left_tabs.add(data_tab, text=self._tr("left_tab_data"))
 
         self._build_quick_start_card(start_body)
         self._build_settings_card(settings_body)
+        self._build_retrieval_card(retrieval_body)
         self._build_data_card(data_body)
 
     def _build_quick_start_card(self, parent: tk.Widget) -> None:
@@ -1030,26 +1035,50 @@ class OmniClipDesktopApp:
             polling = ttk.Checkbutton(advanced, text=self._tr("polling_label"), variable=self.polling_var, style="Plain.TCheckbutton")
             polling.grid(row=2, column=0, sticky="w", pady=(6, 0))
             self._attach_tooltip(polling, "polling")
-            reranker_check = ttk.Checkbutton(advanced, text=self._tr("reranker_enable_label"), variable=self.reranker_enabled_var, style="Plain.TCheckbutton")
-            reranker_check.grid(row=3, column=0, sticky="w", pady=(6, 0))
-            self._attach_tooltip(reranker_check, "reranker_enable")
-            export_mode_check = ttk.Checkbutton(advanced, text=self._tr("export_ai_collab_label"), variable=self.context_export_ai_collab_var, style="Plain.TCheckbutton")
-            export_mode_check.grid(row=4, column=0, sticky="w", pady=(6, 0))
-            self._attach_tooltip(export_mode_check, "export_ai_collab")
-
-            reranker_form = tk.Frame(advanced, bg=self.colors["soft_2"])
-            reranker_form.grid(row=5, column=0, sticky="ew", pady=(8, 0))
-            reranker_form.grid_columnconfigure(1, weight=1)
-            reranker_form.grid_columnconfigure(3, weight=1)
-            self._entry_row(reranker_form, 0, self._tr("reranker_model_label"), self.reranker_model_var, tooltip_key="reranker_model")
-            self._entry_pair_row(reranker_form, 1, self._tr("reranker_batch_cpu_label"), self.reranker_batch_cpu_var, self._tr("reranker_batch_cuda_label"), self.reranker_batch_cuda_var, left_tip="reranker_batch_cpu", right_tip="reranker_batch_cuda")
-
-        reranker_button = ttk.Button(action_panel, text=self._tr("bootstrap_reranker_button"), style="Secondary.TButton", command=self._bootstrap_reranker)
-        reranker_button.grid(row=3, column=0, sticky="ew", padx=16, pady=(14, 0))
-        self._attach_tooltip(reranker_button, "bootstrap_reranker")
 
         refresh_button = ttk.Button(action_panel, text=self._tr("refresh_button"), style="Secondary.TButton", command=self._refresh)
-        refresh_button.grid(row=4, column=0, sticky="ew", padx=16, pady=(14, 14))
+        refresh_button.grid(row=3, column=0, sticky="ew", padx=16, pady=(14, 14))
+    def _build_retrieval_card(self, parent: tk.Widget) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+
+        summary_panel = self._panel(parent, 0)
+        retrieval_subtitle = tk.Label(summary_panel, text=self._tr("retrieval_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left")
+        retrieval_subtitle.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+        self._configure_responsive_wrap(retrieval_subtitle, padding=20, min_wrap=260, max_wrap=760)
+        self.reranker_state_label = tk.Label(summary_panel, textvariable=self.reranker_state_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left")
+        self.reranker_state_label.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 14))
+        self._attach_tooltip(self.reranker_state_label, "bootstrap_reranker")
+
+        options_panel = self._panel(parent, 1, pady=(12, 0))
+        options = tk.Frame(options_panel, bg=self.colors["soft_2"])
+        options.grid(row=0, column=0, sticky="ew", padx=16, pady=14)
+        options.grid_columnconfigure(1, weight=1)
+        options.grid_columnconfigure(3, weight=1)
+
+        reranker_check = ttk.Checkbutton(options, text=self._tr("reranker_enable_label"), variable=self.reranker_enabled_var, style="Plain.TCheckbutton")
+        reranker_check.grid(row=0, column=0, columnspan=4, sticky="w")
+        self._attach_tooltip(reranker_check, "reranker_enable")
+
+        export_mode_check = ttk.Checkbutton(options, text=self._tr("export_ai_collab_label"), variable=self.context_export_ai_collab_var, style="Plain.TCheckbutton")
+        export_mode_check.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        self._attach_tooltip(export_mode_check, "export_ai_collab")
+
+        self._entry_row(options, 2, self._tr("reranker_model_label"), self.reranker_model_var, tooltip_key="reranker_model")
+        self._entry_pair_row(options, 3, self._tr("reranker_batch_cpu_label"), self.reranker_batch_cpu_var, self._tr("reranker_batch_cuda_label"), self.reranker_batch_cuda_var, left_tip="reranker_batch_cpu", right_tip="reranker_batch_cuda")
+
+        action_panel = self._panel(parent, 2, pady=(12, 0))
+        actions = tk.Frame(action_panel, bg=self.colors["soft_2"])
+        actions.grid(row=0, column=0, sticky="ew", padx=16, pady=14)
+        actions.grid_columnconfigure(0, weight=1)
+        actions.grid_columnconfigure(1, weight=1)
+        reranker_button = ttk.Button(actions, text=self._tr("bootstrap_reranker_button"), style="Primary.TButton", command=self._bootstrap_reranker)
+        reranker_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self._attach_tooltip(reranker_button, "bootstrap_reranker")
+        refresh_button = ttk.Button(actions, text=self._tr("refresh_button"), style="Secondary.TButton", command=self._refresh)
+        refresh_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self._attach_tooltip(refresh_button, "refresh")
+
+        self._refresh_reranker_state_summary()
     def _build_data_card(self, parent: tk.Widget) -> None:
         parent.grid_columnconfigure(0, weight=1)
 
@@ -1887,6 +1916,13 @@ class OmniClipDesktopApp:
                 metrics = format_resource_sample(ResourceSample(**sample_payload)) or self._tr('none_value')
             except Exception:
                 metrics = self._tr('none_value')
+        queue_depth = int(payload.get('write_queue_depth', 0) or 0)
+        queue_capacity = int(payload.get('write_queue_capacity', 0) or 0)
+        encoded_count = int(payload.get('encoded_count', 0) or 0)
+        written_count = int(payload.get('written_count', 0) or 0)
+        flush_count = int(payload.get('write_flush_count', 0) or 0)
+        prepare_seconds = float(payload.get('prepare_elapsed_total_ms', 0.0) or 0.0) / 1000.0
+        write_seconds = float(payload.get('write_elapsed_total_ms', 0.0) or 0.0) / 1000.0
         return self._tr(
             'task_detail_rebuild_vector_tuning',
             profile=profile,
@@ -1895,6 +1931,13 @@ class OmniClipDesktopApp:
             metrics=metrics,
             action=action,
             reason=reason,
+            encoded_count=encoded_count,
+            written_count=written_count,
+            queue_depth=queue_depth,
+            queue_capacity=queue_capacity,
+            flush_count=flush_count,
+            prepare_seconds=f'{prepare_seconds:.1f}',
+            write_seconds=f'{write_seconds:.1f}',
         )
 
     def _refresh_dynamic_views(self) -> None:
@@ -2186,6 +2229,25 @@ class OmniClipDesktopApp:
         save_button.grid(row=0, column=1, sticky='e')
         self._attach_tooltip(save_button, 'save_filters')
 
+    def _refresh_reranker_state_summary(self, payload: dict[str, object] | None = None) -> None:
+        ready: bool | None = None
+        model_name = self.reranker_model_var.get().strip() or 'BAAI/bge-reranker-v2-m3'
+        if isinstance(payload, dict):
+            if 'reranker_ready' in payload:
+                ready = bool(payload.get('reranker_ready'))
+            if payload.get('reranker_model'):
+                model_name = str(payload.get('reranker_model'))
+        if ready is None:
+            try:
+                config, paths = self._config(False)
+            except Exception:
+                ready = False
+            else:
+                model_name = config.reranker_model or model_name
+                ready = is_local_reranker_ready(config, paths)
+        self.reranker_state_var.set(self._tr('reranker_ready') if ready else self._tr('reranker_missing'))
+        if self.reranker_state_label is not None:
+            self.reranker_state_label.configure(fg=self.colors['accent_dark'] if ready else self.colors['muted'])
     def _refresh_state_chips(self) -> None:
         self._refresh_workspace_summary()
         try:
@@ -2293,7 +2355,7 @@ class OmniClipDesktopApp:
         self.runtime_var.set("torch")
         self.device_var.set("auto")
         self.limit_var.set("15")
-        self.score_threshold_var.set("0")
+        self.score_threshold_var.set("20")
         self.interval_var.set("2.0")
         self.build_resource_profile_var.set(self._build_profile_label('balanced'))
         self.local_only_var.set(False)
@@ -2378,7 +2440,8 @@ class OmniClipDesktopApp:
         if (config.vector_device or '').strip().lower() in {'', 'cpu'} and acceleration.get('cuda_available'):
             self.device_var.set('auto')
         self.limit_var.set(str(config.query_limit or 15))
-        self.score_threshold_var.set(str(config.query_score_threshold))
+        threshold_value = float(config.query_score_threshold)
+        self.score_threshold_var.set(str(int(threshold_value)) if threshold_value.is_integer() else str(threshold_value))
         self.interval_var.set(str(config.poll_interval_seconds))
         self.build_resource_profile_var.set(self._build_profile_label(getattr(config, 'build_resource_profile', 'balanced')))
         self.local_only_var.set(config.vector_local_files_only)
@@ -2429,7 +2492,7 @@ class OmniClipDesktopApp:
         paths = ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()), vault or None)
         limit = int(self.limit_var.get().strip() or "15")
         interval = float(self.interval_var.get().strip() or "2.0")
-        score_threshold = float(self.score_threshold_var.get().strip() or "0")
+        score_threshold = float(self.score_threshold_var.get().strip() or "20")
         reranker_batch_cpu = int(self.reranker_batch_cpu_var.get().strip() or "4")
         reranker_batch_cuda = int(self.reranker_batch_cuda_var.get().strip() or "8")
         if limit <= 0 or interval <= 0 or score_threshold < 0 or reranker_batch_cpu <= 0 or reranker_batch_cuda <= 0:
@@ -2578,6 +2641,18 @@ class OmniClipDesktopApp:
             model_dir=get_local_model_dir(config, paths),
         )
 
+    def _manual_reranker_hint(self, config: AppConfig, paths) -> str:
+        model_dir = get_local_reranker_dir(config, paths)
+        model_dir.mkdir(parents=True, exist_ok=True)
+        return self._tr(
+            "manual_reranker_hint",
+            mirror_url="https://hf-mirror.com/",
+            hf_url=f"https://huggingface.co/{config.reranker_model}",
+            model=config.reranker_model,
+            size=format_bytes(estimate_model_cache_bytes(config.reranker_model, config.vector_runtime)),
+            model_dir=model_dir,
+        )
+
     def _choose_model_download_mode(self, task_label: str, config: AppConfig, paths) -> str | None:
         model_dir = get_local_model_dir(config, paths)
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -2599,14 +2674,7 @@ class OmniClipDesktopApp:
         if choice is False:
             messagebox.showinfo(
                 self._tr("model_manual_title"),
-                self._tr(
-                    "manual_model_hint",
-                    mirror_url="https://hf-mirror.com/",
-                    hf_url=f"https://huggingface.co/{config.vector_model}",
-                    model=config.vector_model,
-                    size=size_text,
-                    model_dir=model_dir,
-                ),
+                self._manual_model_hint(config, paths),
                 parent=self.root,
             )
             self.status_var.set(self._tr("status_manual_download_waiting"))
@@ -2614,6 +2682,37 @@ class OmniClipDesktopApp:
             return "manual"
         self.status_var.set(self._tr("model_prompt_declined"))
         self._append_log(self._tr("log_model_download_declined"))
+        return None
+
+    def _choose_reranker_download_mode(self, task_label: str, config: AppConfig, paths) -> str | None:
+        model_dir = get_local_reranker_dir(config, paths)
+        model_dir.mkdir(parents=True, exist_ok=True)
+        size_text = format_bytes(estimate_model_cache_bytes(config.reranker_model, config.vector_runtime))
+        choice = messagebox.askyesnocancel(
+            self._tr("model_prompt_title"),
+            self._tr(
+                "reranker_download_choice_body",
+                task=task_label,
+                model=config.reranker_model,
+                size=size_text,
+                model_dir=model_dir,
+            ),
+            parent=self.root,
+        )
+        if choice is True:
+            self._append_log(self._tr("log_reranker_download_prompt"))
+            return "auto"
+        if choice is False:
+            messagebox.showinfo(
+                self._tr("reranker_manual_title"),
+                self._manual_reranker_hint(config, paths),
+                parent=self.root,
+            )
+            self.status_var.set(self._tr("status_manual_download_waiting"))
+            self._append_log(self._tr("log_manual_reranker_hint", model=config.reranker_model))
+            return "manual"
+        self.status_var.set(self._tr("status_reranker_download_declined"))
+        self._append_log(self._tr("log_reranker_download_declined"))
         return None
 
     def _traceback_summary(self, tb: str) -> str:
@@ -2632,6 +2731,13 @@ class OmniClipDesktopApp:
             except Exception:
                 manual_hint = ""
             return self._tr("bootstrap_failed_body", error=summary, manual_hint=manual_hint)
+        if label_key == "bootstrap_reranker_button":
+            try:
+                config, paths = self._config(False)
+                manual_hint = self._manual_reranker_hint(config, paths)
+            except Exception:
+                manual_hint = ""
+            return self._tr("reranker_failed_body", error=summary, manual_hint=manual_hint)
         return summary
 
     def _describe_resume_phase(self, phase: str | None) -> str:
@@ -2802,6 +2908,15 @@ class OmniClipDesktopApp:
             config, paths = self._config(False)
         except Exception as exc:
             messagebox.showerror(self._tr("cannot_start_title"), str(exc), parent=self.root)
+            return
+        if is_local_reranker_ready(config, paths):
+            self.status_var.set(self._tr("status_reranker_already_ready"))
+            self._append_log(self._tr("log_reranker_already_ready", model=config.reranker_model))
+            self._refresh_reranker_state_summary()
+            messagebox.showinfo(self._tr("reranker_ready_title"), self._tr("reranker_ready_body", model=config.reranker_model), parent=self.root)
+            return
+        choice = self._choose_reranker_download_mode(self._tr("bootstrap_reranker_button"), config, paths)
+        if choice != "auto":
             return
 
         def action(service):
@@ -3076,6 +3191,7 @@ class OmniClipDesktopApp:
         if not (self.watch_thread and self.watch_thread.is_alive()):
             self.watch_var.set(self._tr("vector_watch_summary", backend=backend, watch_text=watch_text))
         self._refresh_state_chips()
+        self._refresh_reranker_state_summary(payload)
 
     def _select_hit(self, _event=None) -> None:
         selection = self.tree.selection()
@@ -3313,3 +3429,11 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
+
+
+
+

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ from typing import Callable, Protocol
 from .build_control import BuildPerformanceController
 from .config import AppConfig, DataPaths
 from .errors import BuildCancelledError, RuntimeDependencyError
+from .process_utils import run_hidden
 
 
 class VectorCandidate(Protocol):
@@ -137,78 +139,247 @@ class LanceDbVectorIndex:
                 return
             documents = [first_document, *iterator]
             total = len(documents)
+
         processed = 0
+        encoded = 0
+        encode_elapsed_total_ms = 0.0
+        prepare_elapsed_total_ms = 0.0
+        write_elapsed_total_ms = 0.0
+        write_flush_count = 0
+        staged_rows_hint = 0
         resolved_device = resolve_vector_device(self.config.vector_device)
         controller = BuildPerformanceController(self.config, resolved_device)
         iterator = iter(documents)
-        table = None
-        pending_rows: list[dict[str, object]] = []
+        if resolved_device == 'cuda':
+            write_queue_capacity = {'quiet': 2, 'balanced': 4, 'peak': 6}.get(controller.profile, 4)
+        else:
+            write_queue_capacity = {'quiet': 1, 'balanced': 2, 'peak': 3}.get(controller.profile, 2)
+        write_queue: queue.Queue = queue.Queue(maxsize=max(int(write_queue_capacity), 1))
+        completion_queue: queue.Queue = queue.Queue()
+        writer_stop = threading.Event()
+        writer_thread: threading.Thread | None = None
+
+        def current_progress_ratio() -> float:
+            return (processed / total) if total and total > 0 else 0.0
+
+        def emit_vector_progress(snapshot, *, stage_status: str | None = None) -> None:
+            payload: dict[str, object] = {
+                'stage': 'vectorizing',
+                'current': processed,
+                'total': total,
+                'encoded_count': encoded,
+                'written_count': processed,
+                'write_queue_depth': write_queue.qsize(),
+                'write_queue_capacity': write_queue_capacity,
+                'staged_write_rows': staged_rows_hint,
+                'encode_elapsed_total_ms': round(encode_elapsed_total_ms, 3),
+                'prepare_elapsed_total_ms': round(prepare_elapsed_total_ms, 3),
+                'write_elapsed_total_ms': round(write_elapsed_total_ms, 3),
+                'write_flush_count': write_flush_count,
+            }
+            if stage_status:
+                payload['stage_status'] = stage_status
+            payload.update(snapshot.to_progress_payload())
+            _emit_progress(on_progress, payload)
+
+        def writer() -> None:
+            table = None
+            staged_documents: list[dict[str, str]] = []
+            staged_vectors: list[object] = []
+
+            def flush(force: bool = False) -> None:
+                nonlocal table, staged_documents, staged_vectors
+                while staged_documents and (force or len(staged_documents) >= max(controller.current_write_batch_size, 1)):
+                    target = min(max(controller.current_write_batch_size, 1), len(staged_documents))
+                    batch_documents = staged_documents[:target]
+                    batch_vectors = staged_vectors[:target]
+                    del staged_documents[:target]
+                    del staged_vectors[:target]
+                    if not batch_documents:
+                        break
+                    prepare_started = time.perf_counter()
+                    rows = self._materialize_rows(batch_documents, batch_vectors)
+                    prepare_elapsed_ms = max((time.perf_counter() - prepare_started) * 1000.0, 0.0)
+                    if table is None:
+                        self._ensure_table(len(rows[0]['vector']))
+                        table = self._table()
+                    write_started = time.perf_counter()
+                    table.add(rows)
+                    write_elapsed_ms = max((time.perf_counter() - write_started) * 1000.0, 0.0)
+                    completion_queue.put(
+                        (
+                            'write',
+                            {
+                                'written': len(rows),
+                                'prepare_elapsed_ms': prepare_elapsed_ms,
+                                'write_elapsed_ms': write_elapsed_ms,
+                                'queue_depth': write_queue.qsize(),
+                                'staged_rows': len(staged_documents),
+                            },
+                        )
+                    )
+
+            try:
+                while True:
+                    _wait_for_controls(pause_event, cancel_event)
+                    try:
+                        item = write_queue.get(timeout=0.15)
+                    except queue.Empty:
+                        if writer_stop.is_set():
+                            flush(force=True)
+                            break
+                        continue
+                    force = item is None
+                    if force:
+                        writer_stop.set()
+                    else:
+                        batch_documents, batch_vectors = item
+                        staged_documents.extend(batch_documents)
+                        staged_vectors.extend(list(batch_vectors))
+                    flush(force=force)
+                    if force:
+                        break
+            except BuildCancelledError:
+                completion_queue.put(('cancelled', None))
+            except Exception as exc:
+                completion_queue.put(('error', exc))
+
+        def drain_write_completions(*, wait_for_one: bool = False) -> tuple[float, float]:
+            nonlocal processed, prepare_elapsed_total_ms, write_elapsed_total_ms, write_flush_count, staged_rows_hint
+            drained_prepare_ms = 0.0
+            drained_write_ms = 0.0
+            waited = False
+            while True:
+                try:
+                    if wait_for_one and not waited:
+                        kind, payload = completion_queue.get(timeout=0.25)
+                        waited = True
+                    else:
+                        kind, payload = completion_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == 'write':
+                    report = payload
+                    written = int(report.get('written', 0) or 0)
+                    prepare_elapsed_ms = float(report.get('prepare_elapsed_ms', 0.0) or 0.0)
+                    write_elapsed_ms = float(report.get('write_elapsed_ms', 0.0) or 0.0)
+                    processed += written
+                    drained_prepare_ms += prepare_elapsed_ms
+                    drained_write_ms += write_elapsed_ms
+                    prepare_elapsed_total_ms += prepare_elapsed_ms
+                    write_elapsed_total_ms += write_elapsed_ms
+                    write_flush_count += 1
+                    staged_rows_hint = int(report.get('staged_rows', 0) or 0)
+                elif kind == 'cancelled':
+                    raise BuildCancelledError('cancelled')
+                elif kind == 'error':
+                    if isinstance(payload, Exception):
+                        raise payload
+                    raise RuntimeError(str(payload))
+            return drained_prepare_ms, drained_write_ms
+
+        def observe_write_feedback(drained_prepare_ms: float, drained_write_ms: float) -> None:
+            if drained_prepare_ms <= 0.0 and drained_write_ms <= 0.0:
+                return
+            tuning = controller.observe(
+                encode_elapsed_ms=0.0,
+                prepare_elapsed_ms=drained_prepare_ms,
+                write_elapsed_ms=drained_write_ms,
+                write_queue_depth=write_queue.qsize(),
+                write_queue_capacity=write_queue_capacity,
+                progress_ratio=current_progress_ratio(),
+            )
+            emit_vector_progress(tuning)
+
+        def dispatch_encoded_batch(batch_documents: list[dict[str, str]], batch_vectors) -> None:
+            while True:
+                _wait_for_controls(pause_event, cancel_event)
+                drained_prepare_ms, drained_write_ms = drain_write_completions()
+                observe_write_feedback(drained_prepare_ms, drained_write_ms)
+                try:
+                    write_queue.put((batch_documents, batch_vectors), timeout=0.15)
+                    return
+                except queue.Full:
+                    drained_prepare_ms, drained_write_ms = drain_write_completions(wait_for_one=True)
+                    observe_write_feedback(drained_prepare_ms, drained_write_ms)
+                    continue
 
         _wait_for_controls(pause_event, cancel_event)
-        _emit_progress(on_progress, {"stage": "vectorizing", "current": 0, "total": total, "stage_status": "loading_model", **controller.snapshot().to_progress_payload()})
+        emit_vector_progress(controller.snapshot(), stage_status='loading_model')
         self._load_embedder()
+        writer_thread = threading.Thread(target=writer, daemon=True)
+        writer_thread.start()
 
-        def flush_rows(force: bool = False) -> float:
-            nonlocal table, pending_rows
-            if not pending_rows:
-                return 0.0
-            write_target = max(controller.current_write_batch_size, 1)
-            if not force and len(pending_rows) < write_target:
-                return 0.0
-            flushed = 0
-            started = time.perf_counter()
-            while pending_rows and (force or flushed < write_target):
-                batch_rows = pending_rows[:write_target]
-                pending_rows = pending_rows[len(batch_rows):]
-                if not batch_rows:
-                    break
-                if table is None:
-                    self._ensure_table(len(batch_rows[0]["vector"]))
-                    table = self._table()
-                table.add(batch_rows)
-                flushed += len(batch_rows)
-                if not force:
-                    break
-            return max((time.perf_counter() - started) * 1000.0, 0.0)
-
-        while True:
-            _wait_for_controls(pause_event, cancel_event)
-            desired_batch = max(controller.current_encode_batch_size, 1)
-            batch: list[dict[str, str]] = []
-            for _ in range(desired_batch):
-                try:
-                    batch.append(next(iterator))
-                except StopIteration:
-                    break
-            if not batch:
-                break
-            encode_elapsed_ms = 0.0
+        try:
             while True:
-                started = time.perf_counter()
-                try:
-                    rows = self._embed_documents(batch, batch_size=min(len(batch), controller.current_encode_batch_size))
-                    encode_elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
-                    break
-                except RuntimeError as exc:
-                    if _is_oom_error(exc) and controller.current_encode_batch_size > controller.min_encode_batch_size:
-                        _clear_cuda_cache()
-                        tuning = controller.note_oom()
-                        _emit_progress(on_progress, {"stage": "vectorizing", "current": processed, "total": total, **tuning.to_progress_payload()})
-                        continue
-                    raise
-            _wait_for_controls(pause_event, cancel_event)
-            if not rows:
-                continue
-            pending_rows.extend(rows)
-            write_elapsed_ms = flush_rows(force=False)
-            processed += len(rows)
-            tuning = controller.observe(encode_elapsed_ms=encode_elapsed_ms, write_elapsed_ms=write_elapsed_ms)
-            _emit_progress(on_progress, {"stage": "vectorizing", "current": processed, "total": total, **tuning.to_progress_payload()})
+                _wait_for_controls(pause_event, cancel_event)
+                drained_prepare_ms, drained_write_ms = drain_write_completions()
+                observe_write_feedback(drained_prepare_ms, drained_write_ms)
 
-        write_elapsed_ms = flush_rows(force=True)
-        if write_elapsed_ms > 0:
-            tuning = controller.observe(encode_elapsed_ms=0.0, write_elapsed_ms=write_elapsed_ms)
-            _emit_progress(on_progress, {"stage": "vectorizing", "current": processed, "total": total, **tuning.to_progress_payload()})
+                desired_batch = max(controller.current_encode_batch_size, 1)
+                batch: list[dict[str, str]] = []
+                for _ in range(desired_batch):
+                    try:
+                        batch.append(next(iterator))
+                    except StopIteration:
+                        break
+                if not batch:
+                    break
+
+                encode_elapsed_ms = 0.0
+                while True:
+                    started = time.perf_counter()
+                    try:
+                        vectors = self._encode(
+                            [item['rendered_text'] for item in batch],
+                            batch_size=min(len(batch), controller.current_encode_batch_size),
+                        )
+                        encode_elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
+                        break
+                    except RuntimeError as exc:
+                        if _is_oom_error(exc) and controller.current_encode_batch_size > controller.min_encode_batch_size:
+                            _clear_cuda_cache()
+                            tuning = controller.note_oom()
+                            emit_vector_progress(tuning)
+                            continue
+                        raise
+
+                _wait_for_controls(pause_event, cancel_event)
+                encoded += len(batch)
+                encode_elapsed_total_ms += encode_elapsed_ms
+                dispatch_encoded_batch(batch, vectors)
+                drained_prepare_ms, drained_write_ms = drain_write_completions()
+                tuning = controller.observe(
+                    encode_elapsed_ms=encode_elapsed_ms,
+                    prepare_elapsed_ms=drained_prepare_ms,
+                    write_elapsed_ms=drained_write_ms,
+                    write_queue_depth=write_queue.qsize(),
+                    write_queue_capacity=write_queue_capacity,
+                    progress_ratio=current_progress_ratio(),
+                )
+                emit_vector_progress(tuning)
+
+            while True:
+                try:
+                    write_queue.put(None, timeout=0.15)
+                    break
+                except queue.Full:
+                    drained_prepare_ms, drained_write_ms = drain_write_completions(wait_for_one=True)
+                    observe_write_feedback(drained_prepare_ms, drained_write_ms)
+            while (writer_thread is not None and writer_thread.is_alive()) or processed < encoded:
+                drained_prepare_ms, drained_write_ms = drain_write_completions(wait_for_one=True)
+                observe_write_feedback(drained_prepare_ms, drained_write_ms)
+            remaining_prepare_ms, remaining_write_ms = drain_write_completions()
+            observe_write_feedback(remaining_prepare_ms, remaining_write_ms)
+        finally:
+            writer_stop.set()
+            if writer_thread is not None and writer_thread.is_alive():
+                try:
+                    write_queue.put_nowait(None)
+                except queue.Full:
+                    pass
+                writer_thread.join(timeout=1.0)
+            drain_write_completions()
 
     def upsert(self, documents: list[dict[str, str]]) -> None:
         if not documents:
@@ -298,7 +469,21 @@ class LanceDbVectorIndex:
     def _embed_documents(self, documents: list[dict[str, str]], *, batch_size: int | None = None) -> list[dict[str, object]]:
         texts = [item["rendered_text"] for item in documents]
         vectors = self._encode(texts, batch_size=batch_size)
-        return [{**document, "vector": [float(value) for value in vector]} for document, vector in zip(documents, vectors, strict=True)]
+        return self._materialize_rows(documents, vectors)
+
+    def _materialize_rows(self, documents: list[dict[str, str]], vectors) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for document, vector in zip(documents, vectors, strict=True):
+            rows.append({**document, "vector": self._coerce_vector(vector)})
+        return rows
+
+    @staticmethod
+    def _coerce_vector(vector) -> list[float]:
+        if hasattr(vector, 'tolist'):
+            values = vector.tolist()
+        else:
+            values = list(vector)
+        return [float(value) for value in values]
 
     def _encode(self, texts: list[str], *, batch_size: int | None = None):
         embedder = self._load_embedder()
@@ -481,7 +666,7 @@ def resolve_vector_device(device_name: str | None) -> str:
 
 def _detect_nvcc_version() -> str:
     try:
-        result = subprocess.run(
+        result = run_hidden(
             ["nvcc", "-V"],
             capture_output=True,
             text=True,
@@ -674,7 +859,7 @@ def _is_model_dir_ready(path: Path, runtime: str) -> bool:
 
 def _detect_nvidia_gpus() -> list[str]:
     try:
-        result = subprocess.run(
+        result = run_hidden(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True,
             text=True,
@@ -699,4 +884,5 @@ def _wait_for_controls(pause_event: threading.Event | None, cancel_event: thread
         if pause_event is None or not pause_event.is_set():
             return
         time.sleep(0.12)
+
 
