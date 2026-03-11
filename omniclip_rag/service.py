@@ -437,17 +437,21 @@ class OmniClipService:
         limit: int | None = None,
         copy_result: bool = False,
         score_threshold: float | None = None,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
     ) -> QueryResult:
         started_at = time.perf_counter()
         limit = max(int(limit or self.config.query_limit or 0), 1)
         profile = build_query_profile(query_text, limit)
         candidate_limit = profile.candidate_limit
+        _emit_query_progress(on_progress, 'prepare', percent=5, query_text=query_text, limit=limit)
         page_block_patterns = _compile_page_blocklist_patterns(getattr(self.config, 'page_blocklist_rules', ''))
         storage_candidates = _filter_candidate_rows_by_page_blocklist(self.store.search_candidates(query_text, candidate_limit), page_block_patterns)
+        _emit_query_progress(on_progress, 'candidate', percent=22, candidates=len(storage_candidates), limit=candidate_limit)
         vector_candidates = {}
         if profile.use_vector:
             vector_limit = max(self.config.vector_candidate_limit, candidate_limit)
             vector_candidates = {item.chunk_id: item.score for item in self.vector_index.search(query_text, vector_limit)}
+            _emit_query_progress(on_progress, 'vector', percent=35, candidates=len(vector_candidates), limit=vector_limit)
         candidate_rows = _filter_candidate_rows_by_page_blocklist(self._merge_candidate_rows(storage_candidates, vector_candidates), page_block_patterns)
 
         if candidate_rows:
@@ -455,13 +459,15 @@ class OmniClipService:
         else:
             rows = _filter_candidate_rows_by_page_blocklist(self.store.fetch_all_rendered_chunks(), page_block_patterns)
             hits = rank_candidates(query_text, rows, vector_candidates, profile)
+        _emit_query_progress(on_progress, 'rank', percent=52, candidates=len(hits), limit=limit)
 
         effective_threshold = self.config.query_score_threshold if score_threshold is None else float(score_threshold or 0.0)
         threshold_floor = max(effective_threshold, 0.0)
         rerank_limit = min(len(hits), max(limit, profile.hydration_pool_size))
+        _emit_query_progress(on_progress, 'rerank', percent=68, candidates=rerank_limit, limit=limit)
         reranked_hits, rerank_outcome = self.reranker.rerank(query_text, hits, rerank_limit)
         filtered_hits = [hit for hit in reranked_hits if hit.score >= threshold_floor]
-        finalized_hits, insights = self._finalize_query_hits(query_text, filtered_hits, limit, profile)
+        finalized_hits, insights = self._finalize_query_hits(query_text, filtered_hits, limit, profile, on_progress=on_progress)
         insights.elapsed_ms = max(int((time.perf_counter() - started_at) * 1000), 0)
         insights.reranker = rerank_outcome
         insights.recommendation = self._query_runtime_advisor.record_and_recommend(
@@ -474,8 +480,10 @@ class OmniClipService:
             reranker_degraded=bool(rerank_outcome.degraded_to_cpu if rerank_outcome else False),
             reranker_oom=bool(rerank_outcome.oom_recovered if rerank_outcome else False),
         )
+        _emit_query_progress(on_progress, 'context', percent=96, hits=len(finalized_hits), limit=limit)
         context_pack = self.compose_context_pack_text(query_text, finalized_hits, export_mode=getattr(self.config, 'context_export_mode', 'standard'), language=getattr(self.config, 'ui_language', 'zh-CN'))
         if copy_result:
+            _emit_query_progress(on_progress, 'copy', percent=98, hits=len(finalized_hits), limit=limit)
             copy_text(context_pack)
         export_name = f"context_{int(time.time())}.md"
         (self.paths.exports_dir / export_name).write_text(context_pack, encoding='utf-8')
@@ -503,7 +511,15 @@ class OmniClipService:
             hit.display_text = display_text.strip() or _apply_output_redaction(_normalize_markup(hit.rendered_text), self.config)
             hit.preview_text = _build_preview_text(query_text, hit.display_text or hit.rendered_text)
 
-    def _finalize_query_hits(self, query_text: str, hits: list[SearchHit], limit: int, profile: QueryProfile) -> tuple[list[SearchHit], QueryInsights]:
+    def _finalize_query_hits(
+        self,
+        query_text: str,
+        hits: list[SearchHit],
+        limit: int,
+        profile: QueryProfile,
+        *,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+    ) -> tuple[list[SearchHit], QueryInsights]:
         if not hits or limit <= 0:
             return [], QueryInsights(hydrated_candidates=len(hits))
         hydrated_pool: list[SearchHit] = []
@@ -511,12 +527,25 @@ class OmniClipService:
         offset = 0
         selected: list[SearchHit] = []
         insights = QueryInsights(hydrated_candidates=len(hits))
+        total_batches = max((len(hits) + max(step, 1) - 1) // max(step, 1), 1)
+        batch_index = 0
         while offset < len(hits):
             batch = hits[offset: offset + step]
             self._hydrate_display_hits(query_text, batch)
             hydrated_pool.extend(batch)
             selected, insights = select_query_hits(hydrated_pool, limit)
             offset += len(batch)
+            batch_index += 1
+            percent = min(90, 68 + int(round((batch_index / max(total_batches, 1)) * 22)))
+            _emit_query_progress(
+                on_progress,
+                'hydrate',
+                percent=percent,
+                current=batch_index,
+                total=total_batches,
+                hydrated=len(hydrated_pool),
+                selected=len(selected),
+            )
             if len(selected) >= limit or offset >= len(hits):
                 break
         insights.hydrated_candidates = len(hydrated_pool)
@@ -2115,6 +2144,26 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
 def _emit_progress(on_progress: Callable[[dict[str, object]], None] | None, payload: dict[str, object]) -> None:
     if on_progress is None:
         return
+    on_progress(payload)
+
+
+def _emit_query_progress(
+    on_progress: Callable[[dict[str, object]], None] | None,
+    stage_status: str,
+    *,
+    percent: int,
+    **extra: object,
+) -> None:
+    if on_progress is None:
+        return
+    payload: dict[str, object] = {
+        'stage': 'query',
+        'stage_status': stage_status,
+        'current': max(min(int(percent), 100), 0),
+        'total': 100,
+        'overall_percent': max(min(float(percent), 100.0), 0.0),
+    }
+    payload.update(extra)
     on_progress(payload)
 
 

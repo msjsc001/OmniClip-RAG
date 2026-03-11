@@ -307,7 +307,21 @@ Current desktop layout policy:
 
 Why: the app is a desktop workstation, not a fixed dialog. Users need to adapt it to their monitor shape and keep that layout across sessions.
 
-### 16. A ready local model must never trigger fresh network access
+### 16. Query result views must keep the UI interactive under repeated sorting and selection
+
+Current desktop-result policy:
+
+- result rows use stable `chunk_id` identities instead of index-based row ids,
+- checkbox toggles update only the affected row state instead of deleting and recreating the whole `Treeview`,
+- heavy full-context rebuilds may be deferred briefly when the result set is large so quick repeated clicks do not lock the main thread,
+- log output appends incrementally instead of rewriting the entire log text area every time,
+- background queue draining is batch-limited so rebuild/watch progress updates do not starve normal UI input,
+- the result toolbar now includes a page-level sort mode that groups fragments by page and ranks pages by the average score of their visible fragments,
+- clicking the page-sort button again or using any table heading exits page sort and returns to the normal flat result ordering workflow.
+
+Why: the desktop query surface is touched far more often than setup screens. If sorting, ticking, or progress updates monopolize the Tk main thread, users read that as a frozen product even when retrieval quality is correct.
+
+### 17. A ready local model must never trigger fresh network access
 
 Current vector-loading rule:
 
@@ -597,3 +611,24 @@ GPU/runtime probing helpers such as `nvidia-smi`, `nvcc`, and clipboard bridge c
 
 Why: repeated console flashes during rebuilds are user-visible regressions, can steal focus from the desktop app, and make large-vault indexing feel unstable even when the worker itself is still healthy.
 
+
+
+## 2026-03-10 Desktop UI Performance And Display Preferences
+
+### Decisions
+- Routine UI toggles such as quick-start expansion and advanced options must stay local to their own card. They are not allowed to trigger a full `root` rebuild anymore.
+- Any layout work driven by Tk `Configure` events must be coalesced through deferred callbacks instead of recalculating wrap lengths or canvas widths on every drag frame.
+- Query feedback in the desktop window must reflect real backend query stages. Static "searching" text without backend progress is no longer acceptable for the query page.
+- Theme mode and UI text scaling are first-class persisted preferences. They belong in config, not as one-off runtime tweaks.
+
+### Why
+- The largest visible lag was no longer in retrieval logic; it came from rebuilding the whole widget tree for small visibility toggles and from synchronously handling high-frequency layout events during pane dragging.
+- Users need immediate confidence about whether a query is idle, blocked, running, or finished. The absence of a clear query-state surface made the app feel frozen even when work was progressing.
+- Long sessions in large vaults are desktop-heavy workflows, so readability and dark/light preference handling are part of usability, not cosmetic extras.
+
+### Implementation Notes
+- `gui.py` now keeps quick-start and advanced sections mounted and only switches them with `grid()` / `grid_remove()`.
+- Scroll-canvas width sync, responsive wrap recalculation, and similar `Configure`-driven updates now go through deferred UI callbacks so divider drags do not fan out into full-frame layout churn.
+- The query page now renders a dedicated status banner with idle / blocked / running / done modes, and its running state is fed by `service.py::query(..., on_progress=...)` stage payloads.
+- Query task progress is also reflected in the shared background-task panel so the banner and task panel stay consistent.
+- UI theme (`system` / `light` / `dark`) and UI scale percent are persisted in config and applied through the shared style/bootstrap path.

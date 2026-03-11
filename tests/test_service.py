@@ -175,6 +175,25 @@ class ServiceTests(unittest.TestCase):
         finally:
             service.close()
 
+    def test_query_emits_progress_stages(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_progress'))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        try:
+            service.rebuild_index()
+            progress: list[dict[str, object]] = []
+            result = service.query('块嵌入', limit=5, on_progress=progress.append)
+            self.assertTrue(result.hits)
+            self.assertGreaterEqual(len(progress), 4)
+            self.assertEqual(progress[0].get('stage'), 'query')
+            self.assertEqual(progress[0].get('stage_status'), 'prepare')
+            stages = [str(item.get('stage_status')) for item in progress]
+            self.assertIn('rank', stages)
+            self.assertEqual(stages[-1], 'context')
+            self.assertTrue(all(float(item.get('overall_percent', 0.0) or 0.0) >= 0.0 for item in progress))
+        finally:
+            service.close()
+
     def test_single_character_query_skips_vector_noise(self) -> None:
         vault_copy = ROOT / ".tmp" / "single_char_vault_test"
         data_root = ROOT / ".tmp" / "single_char_data_test"

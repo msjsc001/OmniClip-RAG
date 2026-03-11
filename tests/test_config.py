@@ -79,6 +79,24 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(paths.global_root, FALLBACK_ROOT.resolve())
         self.assertTrue(paths.config_file.parent.exists())
 
+    def test_ui_preferences_are_normalized_when_saved(self) -> None:
+        vault = ROOT / 'vault_ui'
+        paths = config_module.ensure_data_paths(str(CUSTOM_ROOT), str(vault))
+        config = config_module.AppConfig(
+            vault_path=str(vault),
+            data_root=str(paths.global_root),
+            ui_theme='night',
+            ui_scale_percent=240,
+        )
+
+        config_module.save_config(config, paths)
+        loaded = config_module.load_config(paths)
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.ui_theme, 'dark')
+        self.assertEqual(loaded.ui_scale_percent, 200)
+
 
 if __name__ == '__main__':
     unittest.main()

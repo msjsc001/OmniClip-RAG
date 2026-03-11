@@ -16,6 +16,7 @@ htmlcov/
 # Build outputs
 build/
 build_smoke/
+build_release*/
 dist/
 dist_smoke/
 *.spec

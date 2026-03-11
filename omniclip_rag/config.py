@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -13,6 +13,10 @@ from .ui_i18n import detect_system_language, normalize_language
 
 APP_NAME = "OmniClip RAG"
 DEFAULT_WORKSPACE_ID = "default"
+DEFAULT_UI_THEME = "system"
+SUPPORTED_UI_THEMES = {"system", "light", "dark"}
+UI_SCALE_PERCENT_MIN = 80
+UI_SCALE_PERCENT_MAX = 200
 
 
 @dataclass(slots=True)
@@ -67,6 +71,8 @@ class AppConfig:
     rag_filter_custom_rules: str = ""
     page_blocklist_rules: str = ""
     ui_language: str = field(default_factory=detect_system_language)
+    ui_theme: str = DEFAULT_UI_THEME
+    ui_scale_percent: int = 100
     ui_quick_start_expanded: bool = True
     ui_window_geometry: str = ''
     ui_main_sash: int = 900
@@ -98,6 +104,30 @@ def normalize_vault_path(vault_path: str | Path | None) -> str:
         return str(candidate.resolve())
     except OSError:
         return str(candidate.absolute())
+
+
+def normalize_ui_theme(value: str | None) -> str:
+    normalized = str(value or DEFAULT_UI_THEME).strip().lower()
+    aliases = {
+        "system": "system",
+        "auto": "system",
+        "follow-system": "system",
+        "follow_system": "system",
+        "light": "light",
+        "day": "light",
+        "dark": "dark",
+        "night": "dark",
+    }
+    theme = aliases.get(normalized, DEFAULT_UI_THEME)
+    return theme if theme in SUPPORTED_UI_THEMES else DEFAULT_UI_THEME
+
+
+def normalize_ui_scale_percent(value: object, default: int = 100) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        parsed = int(default)
+    return max(UI_SCALE_PERCENT_MIN, min(UI_SCALE_PERCENT_MAX, parsed))
 
 
 def workspace_id_for_vault(vault_path: str | Path | None) -> str:
@@ -172,6 +202,8 @@ def save_config(config: AppConfig, paths: DataPaths) -> None:
     config.data_root = str(paths.global_root)
     payload = asdict(config)
     payload["ui_language"] = normalize_language(payload.get("ui_language"))
+    payload["ui_theme"] = normalize_ui_theme(payload.get("ui_theme"))
+    payload["ui_scale_percent"] = normalize_ui_scale_percent(payload.get("ui_scale_percent"), config.ui_scale_percent)
     paths.config_file.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -188,6 +220,8 @@ def load_config(paths: DataPaths) -> AppConfig | None:
     cleaned["vault_paths"] = _clean_vault_paths(cleaned.get("vault_paths") or [], active_vault=cleaned["vault_path"])
     cleaned["data_root"] = str(paths.global_root)
     cleaned["ui_language"] = normalize_language(cleaned.get("ui_language"))
+    cleaned["ui_theme"] = normalize_ui_theme(cleaned.get("ui_theme"))
+    cleaned["ui_scale_percent"] = normalize_ui_scale_percent(cleaned.get("ui_scale_percent"), 100)
     return AppConfig(**cleaned)
 
 

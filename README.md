@@ -1,6 +1,6 @@
 # OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.10-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.11-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#quick-start)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#core-positioning)
@@ -43,13 +43,13 @@ This naturally emphasizes:
 - controlled exposure
 - no blanket vault access for AI
 
-## What's New In v0.1.10
-This release focuses on lowering retrieval friction further and packaging the work that had already been finished in source but not yet shipped as a Windows build:
-- `Retrieval Boost` is now a dedicated settings page that groups reranker controls, AI-collaboration export, CPU/GPU batch sizing, and reranker readiness in one place.
-- Reranker bootstrap now supports both automatic download and manual placement even when reranking itself is still disabled; ready-state checks also prevent redundant downloads.
-- Full-context export now performs compact same-parent sibling merging so repeated local branches are reduced without turning result inspection into a black box.
-- Minimum relevance now recommends starting at `20`, and threshold filtering is applied to the final displayed score after reranking.
-- The packaged release now includes the stabilized large-vault rebuild improvements: hardware-peak profiles, adaptive encode/write batching, phase-aware ETA, a stable single-writer vector pipeline, and better late-stage write observability.
+## What's New In v0.1.11
+This release turns the recent desktop interaction work into a cleaner daily-use Windows build:
+- The results table now includes `Page Sort`, which can regroup hits by note and sort notes by average fragment score, then restore the original fragment order on demand.
+- The query page now shows a dedicated status banner for `idle / blocked / running / done`, with real query-stage progress instead of ambiguous search feedback.
+- The new `UI` settings page adds persisted text scaling plus `Light / Dark / Follow system` theme selection.
+- The most noticeable layout lag was cut down by removing full-window rebuilds from quick-start and advanced-toggle interactions and by coalescing drag-time layout work.
+- The public release asset remains a lean EXE package without `runtime/`, while local `dist/OmniClipRAG/runtime/` content is preserved across rebuilds.
 
 ## Current Capabilities
 
@@ -153,7 +153,7 @@ See [RUNTIME_SETUP.md](RUNTIME_SETUP.md) for the packaged runtime flow.
 
 ## Current Version
 
-- Version: `V0.1.10`
+- Version: `V0.1.11`
 - Main delivery form: desktop GUI
 - Current stable path: `torch + bge-m3`
 
@@ -198,6 +198,7 @@ The current tree has already been validated with:
 - [Runtime Setup](RUNTIME_SETUP.md)
 - [Retrieval Optimization Plan](plans/检索优化计划.md)
 - [Build Performance Plan](plans/建库性能优化计划.md)
+- [Release Notes v0.1.11](releases/RELEASE_NOTES_v0.1.11.md)
 - [Release Notes v0.1.10](releases/RELEASE_NOTES_v0.1.10.md)
 - [Release Notes v0.1.9](releases/RELEASE_NOTES_v0.1.9.md)
 - [Release Notes v0.1.7](releases/RELEASE_NOTES_v0.1.7.md)

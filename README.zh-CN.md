@@ -1,6 +1,6 @@
 # 方寸引 / OmniClip RAG
 
-[![Version](https://img.shields.io/badge/version-v0.1.10-1d7467)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.1.11-1d7467)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#首次使用建议)
 [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml)
 [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#核心定位)
@@ -43,15 +43,15 @@
 - 可控暴露面
 - 不把整库直接交给 AI
 
-## V0.1.10 重点更新
+## V0.1.11 重点更新
 
-这一轮聚焦在“进一步减少筛选摩擦，并把之前已经完成但还没发包的改进一起正式交付”：
+这一轮聚焦在“把桌面端真正用起来时最别扭的交互问题一次性收口，并发出新的 Windows 包”：
 
-- 检索侧现在把 `检索强化` 独立成页签，集中放置 reranker、AI 协作导出、CPU / GPU 批大小和重排模型就绪状态。
-- 重排模型下载链路已经改成真正可用：即使不启用 reranker，也能先自动下载或手动放置模型；本地已就绪时不会重复下载。
-- 完整上下文现在会对同页、同父级、适合合并的兄弟片段做小范围结构合并，减少重复分支。
-- 最低相关性现在默认建议从 `20` 开始，并且会按最终显示分数过滤，避免高阈值下仍出现低分结果。
-- 建库侧把稳定单写线程流水线、硬件峰值档位、自适应编码/写库批次、分阶段 ETA 和后段写库可观测性一起纳入正式发布。
+- 结果表格新增 `页面排序`，可以按页面聚合现有命中片段，并按页面平均分排序，再一键还原到原始片段顺序。
+- 查询台新增独立状态条，明确显示 `空闲 / 不可查询 / 查询中 / 已完成`，并直接展示真实查询阶段进度。
+- `配置` 下新增 `UI` 页签，支持整体文字缩放，以及 `白天模式 / 黑夜模式 / 跟随系统` 三种主题。
+- 开始页新手指引、配置页高级选项不再触发整窗重建；拖动分隔条时的高频布局计算也做了合并延后，明显减轻交互卡顿。
+- 对外发布的 Release 继续保持不带 `runtime/` 的轻量 EXE 包，但本地 `dist/OmniClipRAG/runtime/` 会在重建时保留。
 
 ## 当前能力
 
@@ -155,7 +155,7 @@ OmniClip RAG/
 
 ## 当前版本说明
 
-- 版本：`V0.1.10`
+- 版本：`V0.1.11`
 - 主交付形态：桌面 GUI
 - 当前稳定主线：`torch + bge-m3`
 
@@ -200,6 +200,7 @@ tests/
 - [运行时安装说明](RUNTIME_SETUP.md)
 - [检索优化计划](plans/检索优化计划.md)
 - [建库性能优化计划](plans/建库性能优化计划.md)
+- [v0.1.11 发布说明](releases/RELEASE_NOTES_v0.1.11.md)
 - [v0.1.10 发布说明](releases/RELEASE_NOTES_v0.1.10.md)
 - [v0.1.9 发布说明](releases/RELEASE_NOTES_v0.1.9.md)
 - [v0.1.7 发布说明](releases/RELEASE_NOTES_v0.1.7.md)

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## V0.1.11 - 2026-03-11
+
+### Added
+
+- Added a page-level `Page Sort` toggle in the results table so users can regroup hits by note and order notes by average fragment score, with one-click restore back to fragment order.
+- Added a dedicated query-status banner on the query page that clearly shows idle, blocked, running, and completed states with stage-aware progress feedback.
+- Added a `UI` settings page with persisted text scaling plus `Light / Dark / Follow system` theme controls.
+
+### Changed
+
+- Changed quick-start and advanced-option toggles to local show/hide behavior instead of rebuilding the whole desktop window for small visibility changes.
+- Changed high-frequency `Configure`-driven layout work so wrap recalculation, scroll-region sync, and canvas width updates are now coalesced through deferred UI callbacks during pane dragging.
+- Changed text panels, sensitive-filter editing, and query-status surfaces to follow the active theme and scaled UI typography more consistently.
+- Changed the packaged Windows release flow so the local `dist/OmniClipRAG/runtime/` folder remains preserved across rebuilds, while the public release zip stays runtime-free.
+
+### Fixed
+
+- Fixed the most obvious GUI lag on the `Start` page and `Query` page by removing full-root rerenders from routine UI interaction paths.
+- Fixed duplicate root layout tracking from piling up across rerenders, which could amplify redraw work over time.
+- Fixed query-task feedback so the visible query state now reflects real backend query progress instead of leaving users unsure whether search is still running.
+
 ## V0.1.10 - 2026-03-10
 
 ### Added

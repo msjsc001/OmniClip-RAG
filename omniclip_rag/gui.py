@@ -16,7 +16,18 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .clipboard import copy_text
-from .config import AppConfig, default_data_root, ensure_data_paths, load_config, normalize_vault_path, save_config
+from .config import (
+    AppConfig,
+    UI_SCALE_PERCENT_MAX,
+    UI_SCALE_PERCENT_MIN,
+    default_data_root,
+    ensure_data_paths,
+    load_config,
+    normalize_ui_scale_percent,
+    normalize_ui_theme,
+    normalize_vault_path,
+    save_config,
+)
 from .errors import BuildCancelledError, RuntimeDependencyError
 from .build_control import format_resource_sample, normalize_build_resource_profile, ResourceSample
 from .formatting import format_bytes, format_duration, format_space_report, summarize_preflight
@@ -28,16 +39,121 @@ from .reranker import get_local_reranker_dir, is_local_reranker_ready
 from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.1.10"
+APP_VERSION = "V0.1.11"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 _CONTEXT_PAGE_RE = re.compile(r'^# 笔记名：(.*)$')
 _CONTEXT_FRAGMENT_RE = re.compile(r'^笔记片段\d+：$')
+UI_QUEUE_BATCH_SIZE = 24
+UI_QUEUE_FAST_POLL_MS = 20
+UI_QUEUE_IDLE_POLL_MS = 120
+UI_CONTEXT_DEFER_MS = 45
+UI_CONTEXT_DEFER_HIT_THRESHOLD = 8
+UI_LAYOUT_DEFER_MS = 24
+UI_DEFAULT_SCALE_PERCENT = 100
 DEFAULT_PAGE_FILTER_RULES: tuple[tuple[bool, str], ...] = (
     (True, r"^2026-.*\.android$"),
     (True, r"^.*\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]+$"),
     (True, r"^\d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2}\.\d{3}Z\.(?:Desktop|android)$"),
     (True, r"^hls__.*?_\d+_\d+_\d+_\d+$"),
 )
+
+LIGHT_THEME_COLORS = {
+    "bg": "#F5F7FA",
+    "card": "#FFFFFF",
+    "soft": "#EEF3F7",
+    "soft_2": "#F8FAFC",
+    "ink": "#16202A",
+    "muted": "#667085",
+    "accent": "#0F7B6C",
+    "accent_dark": "#0B5D52",
+    "accent_soft": "#E6F5F2",
+    "danger": "#B54708",
+    "danger_dark": "#93370D",
+    "border": "#D7E0E8",
+    "select": "#E3F4EF",
+    "chip_ok_bg": "#E7F6EC",
+    "chip_ok_fg": "#166534",
+    "chip_warn_bg": "#FFF4DD",
+    "chip_warn_fg": "#9A6700",
+    "chip_neutral_bg": "#EEF3F7",
+    "chip_neutral_fg": "#344054",
+    "input_bg": "#FFFFFF",
+    "input_fg": "#16202A",
+    "input_border": "#D7E0E8",
+    "secondary_active": "#E5ECF3",
+    "tree_bg": "#FFFFFF",
+    "tree_heading_bg": "#EEF3F7",
+    "search_current_bg": "#FDE68A",
+    "query_idle_bg": "#F3F6FA",
+    "query_idle_fg": "#344054",
+    "query_idle_border": "#D7E0E8",
+    "query_running_bg": "#E6F5F2",
+    "query_running_fg": "#0B5D52",
+    "query_running_border": "#9BD8CB",
+    "query_blocked_bg": "#FFF4DD",
+    "query_blocked_fg": "#9A6700",
+    "query_blocked_border": "#F2C97D",
+    "query_done_bg": "#EAF2FF",
+    "query_done_fg": "#1D4ED8",
+    "query_done_border": "#A7C4FF",
+}
+
+DARK_THEME_COLORS = {
+    "bg": "#0E1620",
+    "card": "#16212C",
+    "soft": "#1C2A38",
+    "soft_2": "#101A24",
+    "ink": "#E7F0F7",
+    "muted": "#9CB1C4",
+    "accent": "#2DB39B",
+    "accent_dark": "#8AE7D8",
+    "accent_soft": "#143B36",
+    "danger": "#D66A4A",
+    "danger_dark": "#F08A6D",
+    "border": "#304152",
+    "select": "#22483F",
+    "chip_ok_bg": "#143B36",
+    "chip_ok_fg": "#8AE7D8",
+    "chip_warn_bg": "#4A3614",
+    "chip_warn_fg": "#F6CB6B",
+    "chip_neutral_bg": "#223141",
+    "chip_neutral_fg": "#D0D8E2",
+    "input_bg": "#0C141D",
+    "input_fg": "#E7F0F7",
+    "input_border": "#425567",
+    "secondary_active": "#263646",
+    "tree_bg": "#0F1822",
+    "tree_heading_bg": "#1C2A38",
+    "search_current_bg": "#6F5510",
+    "query_idle_bg": "#1B2734",
+    "query_idle_fg": "#D0D8E2",
+    "query_idle_border": "#405366",
+    "query_running_bg": "#143B36",
+    "query_running_fg": "#8AE7D8",
+    "query_running_border": "#2A8C7C",
+    "query_blocked_bg": "#4A3614",
+    "query_blocked_fg": "#F6CB6B",
+    "query_blocked_border": "#8C6730",
+    "query_done_bg": "#16314B",
+    "query_done_fg": "#9FD3FF",
+    "query_done_border": "#2D5E86",
+}
+
+
+def _detect_system_theme_mode() -> str:
+    if sys.platform != "win32":
+        return "light"
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ) as key:
+            apps_use_light_theme, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return "light" if int(apps_use_light_theme) else "dark"
+    except Exception:
+        return "light"
 
 
 def _serialize_page_filter_rules(rules: list[tuple[bool, str]] | tuple[tuple[bool, str], ...]) -> str:
@@ -142,71 +258,211 @@ class OmniClipDesktopApp:
         self.root.mainloop()
         return 0
 
-    def _init_style(self) -> None:
-        self.colors = {
-            "bg": "#F5F7FA",
-            "card": "#FFFFFF",
-            "soft": "#EEF3F7",
-            "soft_2": "#F8FAFC",
-            "ink": "#16202A",
-            "muted": "#667085",
-            "accent": "#0F7B6C",
-            "accent_dark": "#0B5D52",
-            "accent_soft": "#E6F5F2",
-            "danger": "#B54708",
-            "danger_dark": "#93370D",
-            "border": "#D7E0E8",
-            "select": "#E3F4EF",
-            "chip_ok_bg": "#E7F6EC",
-            "chip_ok_fg": "#166534",
-            "chip_warn_bg": "#FFF4DD",
-            "chip_warn_fg": "#9A6700",
-            "chip_neutral_bg": "#EEF3F7",
-            "chip_neutral_fg": "#344054",
+    def _scaled_size(self, size: int, *, minimum: int = 8) -> int:
+        scale = getattr(self, 'ui_scale_percent', UI_DEFAULT_SCALE_PERCENT) / UI_DEFAULT_SCALE_PERCENT
+        return max(int(round(size * scale)), minimum)
+
+    def _scaled_px(self, value: int, *, minimum: int = 0) -> int:
+        scale = getattr(self, 'ui_scale_percent', UI_DEFAULT_SCALE_PERCENT) / UI_DEFAULT_SCALE_PERCENT
+        return max(int(round(value * scale)), minimum)
+
+    def _theme_colors(self, theme_name: str) -> dict[str, str]:
+        return dict(DARK_THEME_COLORS if theme_name == 'dark' else LIGHT_THEME_COLORS)
+
+    def _ui_theme_label(self, code: str) -> str:
+        return self._tr(f'ui_theme_{normalize_ui_theme(code)}')
+
+    def _ui_theme_code(self, label: str) -> str:
+        mapping = {
+            self._tr('ui_theme_system'): 'system',
+            self._tr('ui_theme_light'): 'light',
+            self._tr('ui_theme_dark'): 'dark',
+            'system': 'system',
+            'light': 'light',
+            'dark': 'dark',
         }
-        self.root.configure(bg=self.colors["bg"])
-        self.root.option_add("*Font", "{Segoe UI} 10")
-        self.root.option_add("*TCombobox*Listbox.font", "{Segoe UI} 10")
-        default_font = tkfont.nametofont("TkDefaultFont")
-        default_font.configure(family="Segoe UI", size=10)
-        text_font = tkfont.nametofont("TkTextFont")
-        text_font.configure(family="Segoe UI", size=10)
-        fixed_font = tkfont.nametofont("TkFixedFont")
-        fixed_font.configure(family="Consolas", size=10)
+        return mapping.get(str(label or '').strip(), normalize_ui_theme(getattr(self, 'ui_theme', 'system')))
+
+    def _ui_theme_choices(self) -> list[str]:
+        return [self._ui_theme_label('system'), self._ui_theme_label('light'), self._ui_theme_label('dark')]
+
+    def _parse_ui_scale_percent(self, raw_value: str) -> int:
+        stripped = str(raw_value or '').strip()
+        try:
+            value = int(stripped)
+        except ValueError as exc:
+            raise ValueError(self._tr('ui_scale_invalid')) from exc
+        if value < UI_SCALE_PERCENT_MIN or value > UI_SCALE_PERCENT_MAX:
+            raise ValueError(self._tr('ui_scale_invalid'))
+        return value
+
+    def _apply_visual_preferences(
+        self,
+        *,
+        theme_code: str | None = None,
+        scale_percent: int | None = None,
+        rebuild_ui: bool = False,
+    ) -> bool:
+        requested_theme = normalize_ui_theme(theme_code if theme_code is not None else getattr(self, 'ui_theme', 'system'))
+        requested_scale = normalize_ui_scale_percent(scale_percent if scale_percent is not None else getattr(self, 'ui_scale_percent', UI_DEFAULT_SCALE_PERCENT), UI_DEFAULT_SCALE_PERCENT)
+        effective_theme = _detect_system_theme_mode() if requested_theme == 'system' else requested_theme
+        changed = (
+            requested_theme != getattr(self, 'ui_theme', 'system')
+            or requested_scale != getattr(self, 'ui_scale_percent', UI_DEFAULT_SCALE_PERCENT)
+            or effective_theme != getattr(self, 'effective_ui_theme', 'light')
+        )
+        self.ui_theme = requested_theme
+        self.ui_scale_percent = requested_scale
+        self.effective_ui_theme = effective_theme
+        self.colors = self._theme_colors(effective_theme)
+        self.root.configure(bg=self.colors['bg'])
+
+        default_font_size = self._scaled_size(10)
+        fixed_font_size = self._scaled_size(10)
+        self.root.option_add('*Font', f'{{Segoe UI}} {default_font_size}')
+        self.root.option_add('*TCombobox*Listbox.font', f'{{Segoe UI}} {default_font_size}')
+        self.root.option_add('*TCombobox*Listbox.background', self.colors['input_bg'])
+        self.root.option_add('*TCombobox*Listbox.foreground', self.colors['input_fg'])
+        self.root.option_add('*TCombobox*Listbox.selectBackground', self.colors['accent'])
+        self.root.option_add('*TCombobox*Listbox.selectForeground', '#FFFFFF')
+
+        default_font = tkfont.nametofont('TkDefaultFont')
+        default_font.configure(family='Segoe UI', size=default_font_size)
+        text_font = tkfont.nametofont('TkTextFont')
+        text_font.configure(family='Segoe UI', size=default_font_size)
+        fixed_font = tkfont.nametofont('TkFixedFont')
+        fixed_font.configure(family='Consolas', size=fixed_font_size)
 
         self.fonts = {
-            "header_title": ("Segoe UI Semibold", 17),
-            "header_subtitle": ("Segoe UI", 10),
-            "guide": ("Segoe UI", 10),
-            "card_title": ("Segoe UI Semibold", 12),
-            "body": ("Segoe UI", 10),
-            "small": ("Segoe UI", 9),
-            "chip": ("Segoe UI Semibold", 9),
-            "value": ("Segoe UI Semibold", 15),
+            'header_title': ('Segoe UI Semibold', self._scaled_size(17, minimum=12)),
+            'header_subtitle': ('Segoe UI', self._scaled_size(10)),
+            'guide': ('Segoe UI', self._scaled_size(10)),
+            'card_title': ('Segoe UI Semibold', self._scaled_size(12, minimum=10)),
+            'body': ('Segoe UI', self._scaled_size(10)),
+            'small': ('Segoe UI', self._scaled_size(9)),
+            'chip': ('Segoe UI Semibold', self._scaled_size(9)),
+            'value': ('Segoe UI Semibold', self._scaled_size(15, minimum=11)),
         }
 
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Primary.TButton", background=self.colors["accent"], foreground="#FFFFFF", borderwidth=0, padding=(14, 10), font=("Segoe UI Semibold", 10))
-        style.map("Primary.TButton", background=[("active", self.colors["accent_dark"])])
-        style.configure("Secondary.TButton", background=self.colors["soft"], foreground=self.colors["ink"], bordercolor=self.colors["border"], padding=(14, 10), font=("Segoe UI", 10))
-        style.map("Secondary.TButton", background=[("active", "#E5ECF3")])
-        style.configure("Danger.TButton", background=self.colors["danger"], foreground="#FFFFFF", borderwidth=0, padding=(14, 10), font=("Segoe UI Semibold", 10))
-        style.map("Danger.TButton", background=[("active", self.colors["danger_dark"])])
-        style.configure("Field.TEntry", fieldbackground="#FFFFFF", foreground=self.colors["ink"], bordercolor=self.colors["border"], lightcolor=self.colors["border"], darkcolor=self.colors["border"], padding=7)
-        style.configure("Query.TEntry", fieldbackground="#FFFFFF", foreground=self.colors["ink"], bordercolor=self.colors["border"], lightcolor=self.colors["border"], darkcolor=self.colors["border"], padding=10)
-        style.configure("Field.TCombobox", fieldbackground="#FFFFFF", foreground=self.colors["ink"], bordercolor=self.colors["border"], lightcolor=self.colors["border"], darkcolor=self.colors["border"], padding=5)
-        style.configure("Plain.TCheckbutton", background=self.colors["card"], foreground=self.colors["ink"], font=("Segoe UI", 10))
-        style.configure("App.Treeview", background="#FFFFFF", fieldbackground="#FFFFFF", foreground=self.colors["ink"], rowheight=30, bordercolor=self.colors["border"], relief="flat")
-        style.map("App.Treeview", background=[("selected", self.colors["select"])], foreground=[("selected", self.colors["ink"])])
-        style.configure("App.Treeview.Heading", background=self.colors["soft"], foreground=self.colors["ink"], font=("Segoe UI Semibold", 10), relief="flat")
-        style.configure("App.TNotebook", background=self.colors["card"], borderwidth=0)
-        style.configure("App.TNotebook.Tab", background=self.colors["soft"], foreground=self.colors["ink"], padding=(14, 8), font=("Segoe UI", 10))
-        style.map("App.TNotebook.Tab", background=[("selected", self.colors["card"])])
+        self.style.theme_use('clam')
+        self.style.configure(
+            'Primary.TButton',
+            background=self.colors['accent'],
+            foreground='#FFFFFF',
+            borderwidth=0,
+            padding=(self._scaled_px(14, minimum=10), self._scaled_px(10, minimum=8)),
+            font=('Segoe UI Semibold', self._scaled_size(10)),
+        )
+        self.style.map('Primary.TButton', background=[('active', self.colors['accent_dark'])])
+        self.style.configure(
+            'Secondary.TButton',
+            background=self.colors['soft'],
+            foreground=self.colors['ink'],
+            bordercolor=self.colors['border'],
+            padding=(self._scaled_px(14, minimum=10), self._scaled_px(10, minimum=8)),
+            font=('Segoe UI', self._scaled_size(10)),
+        )
+        self.style.map('Secondary.TButton', background=[('active', self.colors['secondary_active'])])
+        self.style.configure(
+            'Danger.TButton',
+            background=self.colors['danger'],
+            foreground='#FFFFFF',
+            borderwidth=0,
+            padding=(self._scaled_px(14, minimum=10), self._scaled_px(10, minimum=8)),
+            font=('Segoe UI Semibold', self._scaled_size(10)),
+        )
+        self.style.map('Danger.TButton', background=[('active', self.colors['danger_dark'])])
+        self.style.configure(
+            'Field.TEntry',
+            fieldbackground=self.colors['input_bg'],
+            foreground=self.colors['input_fg'],
+            bordercolor=self.colors['input_border'],
+            lightcolor=self.colors['input_border'],
+            darkcolor=self.colors['input_border'],
+            padding=self._scaled_px(7, minimum=5),
+        )
+        self.style.configure(
+            'Query.TEntry',
+            fieldbackground=self.colors['input_bg'],
+            foreground=self.colors['input_fg'],
+            bordercolor=self.colors['input_border'],
+            lightcolor=self.colors['input_border'],
+            darkcolor=self.colors['input_border'],
+            padding=self._scaled_px(10, minimum=7),
+        )
+        self.style.configure(
+            'Field.TCombobox',
+            fieldbackground=self.colors['input_bg'],
+            foreground=self.colors['input_fg'],
+            bordercolor=self.colors['input_border'],
+            lightcolor=self.colors['input_border'],
+            darkcolor=self.colors['input_border'],
+            padding=self._scaled_px(5, minimum=4),
+        )
+        self.style.map(
+            'Field.TCombobox',
+            fieldbackground=[('readonly', self.colors['input_bg'])],
+            foreground=[('readonly', self.colors['input_fg'])],
+        )
+        self.style.configure('Plain.TCheckbutton', background=self.colors['card'], foreground=self.colors['ink'], font=('Segoe UI', self._scaled_size(10)))
+        self.style.configure(
+            'App.Treeview',
+            background=self.colors['tree_bg'],
+            fieldbackground=self.colors['tree_bg'],
+            foreground=self.colors['ink'],
+            rowheight=self._scaled_px(30, minimum=26),
+            bordercolor=self.colors['border'],
+            relief='flat',
+        )
+        self.style.map('App.Treeview', background=[('selected', self.colors['select'])], foreground=[('selected', self.colors['ink'])])
+        self.style.configure(
+            'App.Treeview.Heading',
+            background=self.colors['tree_heading_bg'],
+            foreground=self.colors['ink'],
+            font=('Segoe UI Semibold', self._scaled_size(10)),
+            relief='flat',
+        )
+        self.style.map('App.Treeview.Heading', background=[('active', self.colors['soft'])])
+        self.style.configure('App.TNotebook', background=self.colors['card'], borderwidth=0)
+        self.style.configure(
+            'App.TNotebook.Tab',
+            background=self.colors['soft'],
+            foreground=self.colors['ink'],
+            padding=(self._scaled_px(14, minimum=10), self._scaled_px(8, minimum=6)),
+            font=('Segoe UI', self._scaled_size(10)),
+        )
+        self.style.map('App.TNotebook.Tab', background=[('selected', self.colors['card'])])
+        self.style.configure(
+            'Horizontal.TProgressbar',
+            background=self.colors['accent'],
+            troughcolor=self.colors['soft'],
+            bordercolor=self.colors['border'],
+            lightcolor=self.colors['accent'],
+            darkcolor=self.colors['accent'],
+        )
+        self.style.configure(
+            'TScrollbar',
+            background=self.colors['soft'],
+            troughcolor=self.colors['soft_2'],
+            bordercolor=self.colors['border'],
+            arrowcolor=self.colors['muted'],
+        )
+        if rebuild_ui and changed and hasattr(self, 'main_tabs'):
+            self._render_ui()
+        return changed
+
+    def _init_style(self) -> None:
+        self.ui_theme = 'system'
+        self.ui_scale_percent = UI_DEFAULT_SCALE_PERCENT
+        self.effective_ui_theme = 'light'
+        self.style = ttk.Style(self.root)
+        self._apply_visual_preferences(theme_code=self.ui_theme, scale_percent=self.ui_scale_percent, rebuild_ui=False)
 
     def _init_vars(self) -> None:
         self.language_code = normalize_language(None)
         self.language_var = tk.StringVar(value=language_label(self.language_code))
+        self.ui_theme_var = tk.StringVar(value=self._ui_theme_label(self.ui_theme))
+        self.ui_scale_var = tk.StringVar(value=str(self.ui_scale_percent))
         self.vault_var = tk.StringVar()
         self.saved_vault_var = tk.StringVar()
         self.saved_vaults: list[str] = []
@@ -223,10 +479,21 @@ class OmniClipDesktopApp:
         self.interval_var = tk.StringVar(value="2.0")
         self.build_resource_profile_var = tk.StringVar(value=self._build_profile_label('balanced'))
         self.query_var = tk.StringVar()
+        self.query_status_title_var = tk.StringVar(value=self._tr("query_status_idle_title"))
+        self.query_status_detail_var = tk.StringVar(value=self._tr("query_status_idle_detail"))
+        self.query_status_mode = "idle"
+        self.query_last_completed_at = 0.0
+        self.query_last_result_count = 0
+        self.query_last_copied = False
         self.context_selection_var = tk.StringVar(value="")
         self.context_toggle_var = tk.StringVar(value=self._tr("context_select_all"))
         self.result_sort_column: str | None = None
         self.result_sort_reverse = False
+        self.result_page_sort_active = False
+        self.result_page_sort_restore_order: list[str] = []
+        self.result_page_sort_restore_column: str | None = None
+        self.result_page_sort_restore_reverse = False
+        self.page_sort_var = tk.StringVar(value=self._tr("page_sort_button"))
         self.local_only_var = tk.BooleanVar(value=False)
         self.rag_filter_core_var = tk.BooleanVar(value=True)
         self.reranker_enabled_var = tk.BooleanVar(value=False)
@@ -235,7 +502,7 @@ class OmniClipDesktopApp:
         self.reranker_batch_cuda_var = tk.StringVar(value='8')
         self.reranker_state_var = tk.StringVar(value='')
         self.context_export_ai_collab_var = tk.BooleanVar(value=False)
-        self.context_export_ai_collab_var.trace_add('write', lambda *_args: self._rebuild_context_view())
+        self.context_export_ai_collab_var.trace_add('write', lambda *_args: self._request_context_refresh())
         self.reranker_enabled_var.trace_add('write', lambda *_args: self._refresh_query_limit_guidance())
         self.rag_filter_extended_var = tk.BooleanVar(value=False)
         self.rag_filter_custom_rules_var = tk.StringVar(value="")
@@ -248,7 +515,9 @@ class OmniClipDesktopApp:
         self.force_var = tk.BooleanVar(value=False)
         self.polling_var = tk.BooleanVar(value=False)
         self.show_advanced_var = tk.BooleanVar(value=True)
+        self.advanced_button_var = tk.StringVar(value=self._tr("advanced_hide"))
         self.quick_start_expanded_var = tk.BooleanVar(value=True)
+        self.quick_start_button_var = tk.StringVar(value=self._tr("quick_start_hide"))
         self.clear_index_var = tk.BooleanVar(value=False)
         self.clear_logs_var = tk.BooleanVar(value=False)
         self.clear_cache_var = tk.BooleanVar(value=False)
@@ -280,8 +549,10 @@ class OmniClipDesktopApp:
         self.rebuild_cancel_event = threading.Event()
         self.task_after_id: str | None = None
         self.queue_after_id: str | None = None
+        self.context_after_id: str | None = None
         self.layout_after_id: str | None = None
         self.capture_after_id: str | None = None
+        self.deferred_ui_after_ids: dict[str, str] = {}
         self.active_task_key: str | None = None
         self.active_task_config: AppConfig | None = None
         self.resume_prompt_workspace_id: str | None = None
@@ -378,7 +649,91 @@ class OmniClipDesktopApp:
     def _selected_hits(self) -> list:
         return [hit for hit in self.current_hits if hit.chunk_id in self.selected_chunk_ids]
 
+    def _cancel_deferred_ui_callback(self, key: str) -> None:
+        after_id = self.deferred_ui_after_ids.pop(key, None)
+        if after_id is None:
+            return
+        try:
+            self.root.after_cancel(after_id)
+        except Exception:
+            pass
+
+    def _cancel_all_deferred_ui_callbacks(self) -> None:
+        for key in list(self.deferred_ui_after_ids):
+            self._cancel_deferred_ui_callback(key)
+
+    def _schedule_deferred_ui_callback(self, key: str, callback, *, delay_ms: int = UI_LAYOUT_DEFER_MS) -> None:
+        self._cancel_deferred_ui_callback(key)
+        if not self.root.winfo_exists():
+            return
+
+        def _run() -> None:
+            self.deferred_ui_after_ids.pop(key, None)
+            callback()
+
+        self.deferred_ui_after_ids[key] = self.root.after(max(int(delay_ms), 0), _run)
+
+    def _cancel_scheduled_context_refresh(self) -> None:
+        if self.context_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self.context_after_id)
+        except Exception:
+            pass
+        self.context_after_id = None
+
+    def _request_context_refresh(self, *, force_async: bool = False) -> None:
+        if force_async or len(self.current_hits) > UI_CONTEXT_DEFER_HIT_THRESHOLD:
+            self._cancel_scheduled_context_refresh()
+            if self.root.winfo_exists():
+                self.context_after_id = self.root.after(UI_CONTEXT_DEFER_MS, self._rebuild_context_view)
+            return
+        self._rebuild_context_view()
+
+    def _restore_page_sort_order(self) -> None:
+        if not self.result_page_sort_restore_order:
+            return
+        order = {chunk_id: index for index, chunk_id in enumerate(self.result_page_sort_restore_order)}
+        fallback = len(order)
+        self.current_hits.sort(
+            key=lambda hit: (
+                order.get(hit.chunk_id, fallback),
+                self._sort_text_value(hit.title),
+                self._sort_text_value(hit.anchor),
+            )
+        )
+
+    def _update_page_sort_button(self) -> None:
+        self.page_sort_var.set(self._tr('page_sort_restore_button') if self.result_page_sort_active else self._tr('page_sort_button'))
+        if hasattr(self, 'page_sort_button'):
+            if self.current_hits:
+                self.page_sort_button.state(['!disabled'])
+            else:
+                self.page_sort_button.state(['disabled'])
+
+    def _page_group_key(self, hit) -> tuple[str, str]:
+        return (str(hit.title or ''), str(hit.source_path or ''))
+
+    def _apply_page_sort(self) -> None:
+        page_stats: dict[tuple[str, str], tuple[float, int, int]] = {}
+        original_order = {hit.chunk_id: index for index, hit in enumerate(self.current_hits)}
+        for index, hit in enumerate(self.current_hits):
+            key = self._page_group_key(hit)
+            total, count, first_index = page_stats.get(key, (0.0, 0, index))
+            page_stats[key] = (total + float(hit.score), count + 1, min(first_index, index))
+        ordered_pages = sorted(
+            page_stats.items(),
+            key=lambda item: (
+                -(item[1][0] / max(item[1][1], 1)),
+                item[1][2],
+                self._sort_text_value(item[0][0]),
+            ),
+        )
+        page_order = {page_key: index for index, (page_key, _stats) in enumerate(ordered_pages)}
+        self.current_hits.sort(key=lambda hit: (page_order.get(self._page_group_key(hit), len(page_order)), original_order.get(hit.chunk_id, 0)))
+
     def _rebuild_context_view(self) -> None:
+        self._cancel_scheduled_context_refresh()
         if not self.current_query_text and not self.current_hits:
             self.current_context = ''
             self.context_view_text = ''
@@ -405,6 +760,8 @@ class OmniClipDesktopApp:
         else:
             self.context_selection_var.set(self._tr('context_selection_summary', selected=selected, total=total))
         self._update_context_toggle_button(selected=selected, total=total)
+        self._update_page_sort_button()
+        self._refresh_query_status_banner()
 
     def _update_context_toggle_button(self, *, selected: int | None = None, total: int | None = None) -> None:
         if selected is None or total is None:
@@ -419,6 +776,33 @@ class OmniClipDesktopApp:
         if hasattr(self, 'context_toggle_button'):
             self.context_toggle_button.state(['!disabled'])
 
+    def _toggle_page_sort(self) -> None:
+        if not self.current_hits:
+            return
+        preserve_chunk_id = self._selected_tree_chunk_id() or (self.current_hits[0].chunk_id if self.current_hits else None)
+        if self.result_page_sort_active:
+            self._restore_page_sort_order()
+            self.result_sort_column = self.result_page_sort_restore_column
+            self.result_sort_reverse = self.result_page_sort_restore_reverse
+            self.result_page_sort_active = False
+            self.result_page_sort_restore_order = []
+            self.result_page_sort_restore_column = None
+            self.result_page_sort_restore_reverse = False
+        else:
+            self.result_page_sort_restore_order = [hit.chunk_id for hit in self.current_hits]
+            self.result_page_sort_restore_column = self.result_sort_column
+            self.result_page_sort_restore_reverse = self.result_sort_reverse
+            self.result_page_sort_active = True
+            self.result_sort_column = None
+            self.result_sort_reverse = False
+            self._apply_page_sort()
+        self._render_hits(selected_chunk_id=preserve_chunk_id)
+        self._refresh_tree_headings()
+        selected_index = self._find_hit_index(preserve_chunk_id)
+        if selected_index is None and self.current_hits:
+            selected_index = 0
+        if selected_index is not None:
+            self._show_hit(selected_index)
 
     def _show_query_workspace(self, detail_index: int | None = None) -> None:
         if hasattr(self, 'main_tabs'):
@@ -438,13 +822,10 @@ class OmniClipDesktopApp:
         selection = self.tree.selection()
         if not selection:
             return None
-        try:
-            index = int(selection[0])
-        except (TypeError, ValueError):
+        chunk_id = str(selection[0]).strip()
+        if not chunk_id:
             return None
-        if index < 0 or index >= len(self.current_hits):
-            return None
-        return self.current_hits[index].chunk_id
+        return chunk_id if self._find_hit_index(chunk_id) is not None else None
 
     def _find_hit_index(self, chunk_id: str | None) -> int | None:
         if not chunk_id:
@@ -487,6 +868,14 @@ class OmniClipDesktopApp:
         if not self.current_hits:
             return
         preserve_chunk_id = self._selected_tree_chunk_id() or (self.current_hits[0].chunk_id if self.current_hits else None)
+        if self.result_page_sort_active:
+            self._restore_page_sort_order()
+            self.result_page_sort_active = False
+            self.result_sort_column = None
+            self.result_sort_reverse = False
+            self.result_page_sort_restore_order = []
+            self.result_page_sort_restore_column = None
+            self.result_page_sort_restore_reverse = False
         if self.result_sort_column == column:
             self.result_sort_reverse = not self.result_sort_reverse
         else:
@@ -529,6 +918,7 @@ class OmniClipDesktopApp:
         detail_index = 0
         if self.root.winfo_children():
             self._capture_layout_state()
+        self._cancel_all_deferred_ui_callbacks()
 
         if hasattr(self, "main_tabs"):
             try:
@@ -655,11 +1045,11 @@ class OmniClipDesktopApp:
         tk.Label(footer, textvariable=self.result_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="e").grid(row=0, column=1, sticky="e", padx=12, pady=7)
 
     def _bind_layout_tracking(self) -> None:
-        self.root.bind("<Configure>", self._capture_window_geometry, add="+")
+        self.root.bind("<Configure>", self._capture_window_geometry)
         for pane_name in ("right_pane", "results_pane"):
             pane = getattr(self, pane_name, None)
             if pane is not None:
-                pane.bind("<ButtonRelease-1>", self._capture_layout_state, add="+")
+                pane.bind("<ButtonRelease-1>", self._capture_layout_state)
 
     def _capture_window_geometry(self, _event=None) -> None:
         try:
@@ -784,6 +1174,32 @@ class OmniClipDesktopApp:
         target.bind("<Enter>", _bind)
         target.bind("<Leave>", _unbind)
 
+    def _configure_canvas_window_sync(self, canvas: tk.Canvas, inner: tk.Widget, window_id: int, *, key_prefix: str) -> None:
+        def _sync_scrollregion() -> None:
+            try:
+                if not int(canvas.winfo_exists()) or not int(inner.winfo_exists()):
+                    return
+                bbox = canvas.bbox('all')
+            except Exception:
+                return
+            if bbox:
+                canvas.configure(scrollregion=bbox)
+
+        def _sync_width() -> None:
+            try:
+                if not int(canvas.winfo_exists()):
+                    return
+                width = int(canvas.winfo_width())
+            except Exception:
+                return
+            if width > 1:
+                canvas.itemconfigure(window_id, width=width)
+
+        inner.bind('<Configure>', lambda _event: self._schedule_deferred_ui_callback(f'{key_prefix}:scroll', _sync_scrollregion), add='+')
+        canvas.bind('<Configure>', lambda _event: self._schedule_deferred_ui_callback(f'{key_prefix}:width', _sync_width), add='+')
+        self._schedule_deferred_ui_callback(f'{key_prefix}:init-scroll', _sync_scrollregion, delay_ms=0)
+        self._schedule_deferred_ui_callback(f'{key_prefix}:init-width', _sync_width, delay_ms=0)
+
     def _make_scrollable_tab(self, notebook: ttk.Notebook) -> tuple[tk.Frame, tk.Frame]:
         outer = tk.Frame(notebook, bg=self.colors["card"])
         outer.grid_columnconfigure(0, weight=1)
@@ -797,9 +1213,7 @@ class OmniClipDesktopApp:
 
         inner = tk.Frame(canvas, bg=self.colors["card"])
         window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-        inner.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+        self._configure_canvas_window_sync(canvas, inner, window_id, key_prefix=f'scroll-tab:{str(canvas)}')
         self._bind_mousewheel(canvas, outer)
         return outer, inner
 
@@ -828,15 +1242,18 @@ class OmniClipDesktopApp:
 
         start_tab, start_body = self._make_scrollable_tab(self.left_tabs)
         settings_tab, settings_body = self._make_scrollable_tab(self.left_tabs)
+        ui_tab, ui_body = self._make_scrollable_tab(self.left_tabs)
         retrieval_tab, retrieval_body = self._make_scrollable_tab(self.left_tabs)
         data_tab, data_body = self._make_scrollable_tab(self.left_tabs)
         self.left_tabs.add(start_tab, text=self._tr("left_tab_start"))
         self.left_tabs.add(settings_tab, text=self._tr("left_tab_settings"))
+        self.left_tabs.add(ui_tab, text=self._tr("left_tab_ui"))
         self.left_tabs.add(retrieval_tab, text=self._tr("left_tab_retrieval"))
         self.left_tabs.add(data_tab, text=self._tr("left_tab_data"))
 
         self._build_quick_start_card(start_body)
         self._build_settings_card(settings_body)
+        self._build_ui_card(ui_body)
         self._build_retrieval_card(retrieval_body)
         self._build_data_card(data_body)
 
@@ -860,41 +1277,38 @@ class OmniClipDesktopApp:
         toggle_row = tk.Frame(guide_panel, bg=self.colors["soft_2"])
         toggle_row.grid(row=1, column=0, sticky="ew", padx=16)
         toggle_row.grid_columnconfigure(0, weight=1)
-        quick_start_button = ttk.Button(
+        self.quick_start_button = ttk.Button(
             toggle_row,
-            text=self._tr("quick_start_show") if not self.quick_start_expanded_var.get() else self._tr("quick_start_hide"),
+            textvariable=self.quick_start_button_var,
             style="Secondary.TButton",
             command=self._toggle_quick_start,
         )
-        quick_start_button.grid(row=0, column=0, sticky="w")
-        self._attach_tooltip(quick_start_button, "quick_start_toggle")
+        self.quick_start_button.grid(row=0, column=0, sticky="w")
+        self._attach_tooltip(self.quick_start_button, "quick_start_toggle")
 
-        if self.quick_start_expanded_var.get():
-            steps = tk.Frame(guide_panel, bg=self.colors["soft_2"])
-            steps.grid(row=2, column=0, sticky="ew", padx=16, pady=(12, 0))
-            for index, key in enumerate(("step_1", "step_2", "step_3")):
-                badge = tk.Label(steps, text=str(index + 1), bg=self.colors["accent_soft"], fg=self.colors["accent_dark"], font=self.fonts["chip"], width=2, pady=3)
-                badge.grid(row=index, column=0, sticky="nw")
-                tk.Label(
-                    steps,
-                    text=self._tr(key),
-                    bg=self.colors["soft_2"],
-                    fg=self.colors["ink"],
-                    font=self.fonts["body"],
-                    anchor="w",
-                    justify="left",
-                    wraplength=360,
-                ).grid(row=index, column=1, sticky="w", padx=(8, 0), pady=(0 if index == 0 else 8, 0))
-            chip_row = 3
-        else:
-            chip_row = 2
+        self.quick_start_steps = tk.Frame(guide_panel, bg=self.colors["soft_2"])
+        self.quick_start_steps.grid(row=2, column=0, sticky="ew", padx=16, pady=(12, 0))
+        for index, key in enumerate(("step_1", "step_2", "step_3")):
+            badge = tk.Label(self.quick_start_steps, text=str(index + 1), bg=self.colors["accent_soft"], fg=self.colors["accent_dark"], font=self.fonts["chip"], width=2, pady=3)
+            badge.grid(row=index, column=0, sticky="nw")
+            tk.Label(
+                self.quick_start_steps,
+                text=self._tr(key),
+                bg=self.colors["soft_2"],
+                fg=self.colors["ink"],
+                font=self.fonts["body"],
+                anchor="w",
+                justify="left",
+                wraplength=self._scaled_px(360, minimum=240),
+            ).grid(row=index, column=1, sticky="w", padx=(8, 0), pady=(0 if index == 0 else 8, 0))
 
         chips = tk.Frame(guide_panel, bg=self.colors["soft_2"])
-        chips.grid(row=chip_row, column=0, sticky="ew", padx=16, pady=(14, 14))
+        chips.grid(row=3, column=0, sticky="ew", padx=16, pady=(14, 14))
         chips.grid_columnconfigure((0, 1, 2), weight=1)
         self.vault_chip = self._chip(chips, self.vault_state_var, 0)
         self.model_chip = self._chip(chips, self.model_state_var, 1)
         self.index_chip = self._chip(chips, self.index_state_var, 2)
+        self._refresh_quick_start_visibility()
 
         paths_panel = self._panel(parent, 1, columnspan=2, pady=(12, 0))
         form = tk.Frame(paths_panel, bg=self.colors["soft_2"])
@@ -1020,24 +1434,63 @@ class OmniClipDesktopApp:
         save_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
         self._attach_tooltip(save_button, "save_config")
 
-        toggle_button = ttk.Button(action_panel, text=self._tr("advanced_hide") if self.show_advanced_var.get() else self._tr("advanced_show"), style="Secondary.TButton", command=self._toggle_advanced)
+        toggle_button = ttk.Button(action_panel, textvariable=self.advanced_button_var, style="Secondary.TButton", command=self._toggle_advanced)
         toggle_button.grid(row=1, column=0, sticky="ew", padx=16, pady=(12, 0))
 
-        if self.show_advanced_var.get():
-            advanced = tk.Frame(action_panel, bg=self.colors["soft_2"])
-            advanced.grid(row=2, column=0, sticky="ew", padx=16, pady=(10, 0))
-            local_only = ttk.Checkbutton(advanced, text=self._tr("local_only_label"), variable=self.local_only_var, style="Plain.TCheckbutton")
-            local_only.grid(row=0, column=0, sticky="w")
-            self._attach_tooltip(local_only, "local_only")
-            force = ttk.Checkbutton(advanced, text=self._tr("force_label"), variable=self.force_var, style="Plain.TCheckbutton")
-            force.grid(row=1, column=0, sticky="w", pady=(6, 0))
-            self._attach_tooltip(force, "force")
-            polling = ttk.Checkbutton(advanced, text=self._tr("polling_label"), variable=self.polling_var, style="Plain.TCheckbutton")
-            polling.grid(row=2, column=0, sticky="w", pady=(6, 0))
-            self._attach_tooltip(polling, "polling")
+        self.advanced_panel = tk.Frame(action_panel, bg=self.colors["soft_2"])
+        self.advanced_panel.grid(row=2, column=0, sticky="ew", padx=16, pady=(10, 0))
+        local_only = ttk.Checkbutton(self.advanced_panel, text=self._tr("local_only_label"), variable=self.local_only_var, style="Plain.TCheckbutton")
+        local_only.grid(row=0, column=0, sticky="w")
+        self._attach_tooltip(local_only, "local_only")
+        force = ttk.Checkbutton(self.advanced_panel, text=self._tr("force_label"), variable=self.force_var, style="Plain.TCheckbutton")
+        force.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._attach_tooltip(force, "force")
+        polling = ttk.Checkbutton(self.advanced_panel, text=self._tr("polling_label"), variable=self.polling_var, style="Plain.TCheckbutton")
+        polling.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self._attach_tooltip(polling, "polling")
+        self._refresh_advanced_visibility()
 
         refresh_button = ttk.Button(action_panel, text=self._tr("refresh_button"), style="Secondary.TButton", command=self._refresh)
         refresh_button.grid(row=3, column=0, sticky="ew", padx=16, pady=(14, 14))
+
+    def _build_ui_card(self, parent: tk.Widget) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+
+        ui_panel = self._panel(parent, 0)
+        ui_subtitle = tk.Label(ui_panel, text=self._tr("ui_subtitle"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left")
+        ui_subtitle.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+        self._configure_responsive_wrap(ui_subtitle, padding=20, min_wrap=260, max_wrap=760)
+
+        form = tk.Frame(ui_panel, bg=self.colors["soft_2"])
+        form.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
+        form.grid_columnconfigure(1, weight=1)
+
+        scale_label = tk.Label(form, text=self._tr("ui_scale_label"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        scale_label.grid(row=0, column=0, sticky="w")
+        self._attach_tooltip(scale_label, "ui_scale")
+        self.ui_scale_entry = ttk.Entry(form, textvariable=self.ui_scale_var, style="Field.TEntry")
+        self.ui_scale_entry.grid(row=0, column=1, sticky="ew")
+        self._attach_tooltip(self.ui_scale_entry, "ui_scale")
+        self.ui_scale_entry.bind("<Return>", lambda _event: self._apply_ui_preferences())
+
+        theme_label = tk.Label(form, text=self._tr("ui_theme_label"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w")
+        theme_label.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self._attach_tooltip(theme_label, "ui_theme")
+        self.ui_theme_combo = ttk.Combobox(form, textvariable=self.ui_theme_var, values=self._ui_theme_choices(), state="readonly", style="Field.TCombobox")
+        self.ui_theme_combo.grid(row=1, column=1, sticky="ew", pady=(10, 0))
+        self._attach_tooltip(self.ui_theme_combo, "ui_theme")
+
+        scale_hint = tk.Label(ui_panel, text=self._tr("ui_scale_hint"), bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left")
+        scale_hint.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self._configure_responsive_wrap(scale_hint, padding=20, min_wrap=260, max_wrap=760)
+
+        action_row = tk.Frame(ui_panel, bg=self.colors["soft_2"])
+        action_row.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
+        action_row.grid_columnconfigure(0, weight=1)
+        apply_button = ttk.Button(action_row, text=self._tr("apply_ui_button"), style="Primary.TButton", command=self._apply_ui_preferences)
+        apply_button.grid(row=0, column=1, sticky="e")
+        self._attach_tooltip(apply_button, "apply_ui")
+
     def _build_retrieval_card(self, parent: tk.Widget) -> None:
         parent.grid_columnconfigure(0, weight=1)
 
@@ -1154,6 +1607,17 @@ class OmniClipDesktopApp:
         self.limit_entry_tooltip = self._attach_tooltip(limit_entry, "limit")
         tk.Label(query_meta, textvariable=self.query_limit_hint_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left").grid(row=1, column=0, columnspan=5, sticky="w", pady=(8, 0))
 
+        self.query_status_shell = tk.Frame(search_card, bg=self.colors["query_idle_bg"], highlightbackground=self.colors["query_idle_border"], highlightthickness=1)
+        self.query_status_shell.grid(row=4, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 14))
+        self.query_status_shell.grid_columnconfigure(0, weight=1)
+        self.query_status_title_label = tk.Label(self.query_status_shell, textvariable=self.query_status_title_var, bg=self.colors["query_idle_bg"], fg=self.colors["query_idle_fg"], font=self.fonts["chip"], anchor="w")
+        self.query_status_title_label.grid(row=0, column=0, sticky="w", padx=14, pady=(12, 4))
+        self.query_status_detail_label = tk.Label(self.query_status_shell, textvariable=self.query_status_detail_var, bg=self.colors["query_idle_bg"], fg=self.colors["query_idle_fg"], font=self.fonts["small"], anchor="w", justify="left")
+        self.query_status_detail_label.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 12))
+        self._configure_responsive_wrap(self.query_status_detail_label, padding=28, min_wrap=260, max_wrap=760)
+        self._apply_query_status_style()
+        self._refresh_query_status_banner()
+
         result_card = self._card(self.results_host, self._tr("results_title"), self._tr("results_subtitle"), 0)
         result_card.grid_rowconfigure(2, weight=1)
         result_card.grid_columnconfigure(1, weight=1)
@@ -1169,12 +1633,15 @@ class OmniClipDesktopApp:
 
         result_toolbar = tk.Frame(result_card, bg=self.colors["card"])
         result_toolbar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 10))
-        result_toolbar.grid_columnconfigure(2, weight=1)
+        result_toolbar.grid_columnconfigure(3, weight=1)
         self.context_toggle_button = ttk.Button(result_toolbar, textvariable=self.context_toggle_var, style="Secondary.TButton", command=self._toggle_all_hit_selection)
         self.context_toggle_button.grid(row=0, column=0, sticky="w")
         self._attach_tooltip(self.context_toggle_button, "context_select_toggle")
-        tk.Label(result_toolbar, textvariable=self.page_blocklist_summary_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=0, column=1, sticky="w", padx=(12, 18))
-        tk.Label(result_toolbar, textvariable=self.context_selection_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=0, column=2, sticky="w")
+        self.page_sort_button = ttk.Button(result_toolbar, textvariable=self.page_sort_var, style="Secondary.TButton", command=self._toggle_page_sort)
+        self.page_sort_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self._attach_tooltip(self.page_sort_button, "page_sort")
+        tk.Label(result_toolbar, textvariable=self.page_blocklist_summary_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=0, column=2, sticky="w", padx=(12, 18))
+        tk.Label(result_toolbar, textvariable=self.context_selection_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w").grid(row=0, column=3, sticky="w")
 
         self.results_pane = ttk.Panedwindow(result_card, orient="vertical")
         self.results_pane.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=16, pady=(0, 14))
@@ -1310,7 +1777,7 @@ class OmniClipDesktopApp:
             text_row = 1
 
         frame.grid_rowconfigure(text_row, weight=1)
-        text_widget = tk.Text(frame, wrap="word", relief="flat", borderwidth=0, highlightthickness=0, background="#FFFFFF", foreground=self.colors["ink"], insertbackground=self.colors["ink"], font=("Segoe UI", 10), padx=14, pady=12)
+        text_widget = tk.Text(frame, wrap="word", relief="flat", borderwidth=0, highlightthickness=0, background=self.colors["input_bg"], foreground=self.colors["input_fg"], insertbackground=self.colors["input_fg"], font=self.fonts["body"], padx=self._scaled_px(14, minimum=10), pady=self._scaled_px(12, minimum=9))
         text_widget.grid(row=text_row, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=text_widget.yview)
         scroll.grid(row=text_row, column=1, sticky="ns")
@@ -1356,7 +1823,7 @@ class OmniClipDesktopApp:
 
         widget.configure(state="normal")
         widget.tag_configure("search_match", background=self.colors["accent_soft"], foreground=self.colors["ink"])
-        widget.tag_configure("search_current", background="#FDE68A", foreground=self.colors["ink"])
+        widget.tag_configure("search_current", background=self.colors["search_current_bg"], foreground=self.colors["ink"])
         widget.tag_remove("search_match", "1.0", "end")
         widget.tag_remove("search_current", "1.0", "end")
 
@@ -1482,15 +1949,17 @@ class OmniClipDesktopApp:
         except Exception:
             return
 
-        def _update(_event=None) -> None:
+        callback_key = f'wrap:{str(widget)}'
+
+        def _apply_wrap() -> None:
             try:
                 if not int(widget.winfo_exists()) or not int(parent.winfo_exists()):
                     return
                 width = parent.winfo_width()
             except Exception:
                 return
-            available = max(0, int(width) - padding)
-            wraplength = 0 if available < min_wrap else min(max_wrap, available)
+            available = max(0, int(width) - self._scaled_px(padding, minimum=max(int(padding * 0.6), 8)))
+            wraplength = 0 if available < self._scaled_px(min_wrap, minimum=min_wrap) else min(self._scaled_px(max_wrap, minimum=max_wrap), available)
             try:
                 current = int(widget.cget("wraplength"))
             except Exception:
@@ -1498,8 +1967,10 @@ class OmniClipDesktopApp:
             if current != wraplength:
                 widget.configure(wraplength=wraplength)
 
-        parent.bind("<Configure>", _update, add="+")
-        _update()
+        if not getattr(widget, '_omniclip_wrap_bound', False):
+            parent.bind("<Configure>", lambda _event: self._schedule_deferred_ui_callback(callback_key, _apply_wrap), add="+")
+            setattr(widget, '_omniclip_wrap_bound', True)
+        self._schedule_deferred_ui_callback(callback_key, _apply_wrap, delay_ms=0)
 
     def _attach_tooltip(self, widget: tk.Widget, key: str, **kwargs) -> ToolTip | None:
         tip_text = self._tip(key, **kwargs)
@@ -1559,6 +2030,135 @@ class OmniClipDesktopApp:
         self.query_limit_recommendation = recommendation or None
         self._refresh_query_limit_guidance()
 
+    def _query_stage_label(self, payload: dict[str, object] | None) -> str:
+        stage_code = str((payload or {}).get('stage_status') or 'prepare').strip().lower() or 'prepare'
+        key = f'query_stage_{stage_code}'
+        try:
+            return self._tr(key)
+        except KeyError:
+            return stage_code
+
+    def _query_progress_detail(self, payload: dict[str, object] | None) -> str:
+        stage = self._query_stage_label(payload)
+        data = payload or {}
+        current = max(0, int(data.get('candidates') or data.get('hits') or 0))
+        total = max(0, int(data.get('limit') or 0))
+        if current > 0 and total > 0:
+            return self._tr('query_status_running_detail_counts', stage=stage, current=current, total=total)
+        return self._tr('query_status_running_detail', stage=stage)
+
+    def _apply_query_status_style(self, mode: str | None = None) -> None:
+        if not hasattr(self, 'query_status_shell'):
+            return
+        current_mode = mode or getattr(self, 'query_status_mode', 'idle')
+        prefix = {
+            'idle': 'query_idle',
+            'blocked': 'query_blocked',
+            'running': 'query_running',
+            'done': 'query_done',
+        }.get(current_mode, 'query_idle')
+        bg = self.colors[f'{prefix}_bg']
+        fg = self.colors[f'{prefix}_fg']
+        border = self.colors[f'{prefix}_border']
+        self.query_status_shell.configure(bg=bg, highlightbackground=border)
+        self.query_status_title_label.configure(bg=bg, fg=fg)
+        self.query_status_detail_label.configure(bg=bg, fg=fg)
+
+    def _set_query_status(self, mode: str, title: str, detail: str) -> None:
+        self.query_status_mode = mode
+        self.query_status_title_var.set(title)
+        self.query_status_detail_var.set(detail)
+        self._apply_query_status_style(mode)
+
+    def _refresh_query_status_banner(self) -> None:
+        if self.busy and self.active_task_key == 'search_button':
+            payload = self.latest_task_progress if isinstance(self.latest_task_progress, dict) else {}
+            percent = float((payload or {}).get('overall_percent') or 0.0)
+            self._set_query_status(
+                'running',
+                self._tr('query_status_running_title', percent=percent),
+                self._query_progress_detail(payload),
+            )
+            return
+        if self.watch_thread and self.watch_thread.is_alive():
+            self._set_query_status(
+                'blocked',
+                self._tr('query_status_blocked_title'),
+                self._tr('query_status_blocked_detail_watch'),
+            )
+            return
+        if self.busy and self.active_task_key:
+            self._set_query_status(
+                'blocked',
+                self._tr('query_status_blocked_title'),
+                self._tr('query_status_blocked_detail_task', task=self._tr(self.active_task_key)),
+            )
+            return
+        if self.query_last_completed_at > 0:
+            title_key = 'query_status_done_title_copied' if self.query_last_copied else 'query_status_done_title'
+            completed_at = time.strftime('%H:%M', time.localtime(self.query_last_completed_at))
+            self._set_query_status(
+                'done',
+                self._tr(title_key, time=completed_at),
+                self._tr('query_status_done_detail', count=self.query_last_result_count),
+            )
+            return
+        self._set_query_status(
+            'idle',
+            self._tr('query_status_idle_title'),
+            self._tr('query_status_idle_detail'),
+        )
+
+    def _refresh_quick_start_visibility(self) -> None:
+        expanded = self.quick_start_expanded_var.get()
+        self.quick_start_button_var.set(self._tr('quick_start_hide') if expanded else self._tr('quick_start_show'))
+        panel = getattr(self, 'quick_start_steps', None)
+        if panel is None:
+            return
+        if expanded:
+            panel.grid()
+        else:
+            panel.grid_remove()
+
+    def _refresh_advanced_visibility(self) -> None:
+        expanded = self.show_advanced_var.get()
+        self.advanced_button_var.set(self._tr('advanced_hide') if expanded else self._tr('advanced_show'))
+        panel = getattr(self, 'advanced_panel', None)
+        if panel is None:
+            return
+        if expanded:
+            panel.grid()
+        else:
+            panel.grid_remove()
+
+    def _apply_ui_preferences_from_controls(self, *, rebuild_ui: bool, persist: bool = False) -> tuple[str, int]:
+        theme_code = self._ui_theme_code(self.ui_theme_var.get())
+        scale_percent = self._parse_ui_scale_percent(self.ui_scale_var.get())
+        self.ui_theme_var.set(self._ui_theme_label(theme_code))
+        self.ui_scale_var.set(str(scale_percent))
+        self._apply_visual_preferences(theme_code=theme_code, scale_percent=scale_percent, rebuild_ui=rebuild_ui)
+        if persist:
+            active_vault = self.vault_var.get().strip() or None
+            paths = ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()), active_vault)
+            config = load_config(paths)
+            if config is None:
+                config = AppConfig(vault_path=normalize_vault_path(active_vault or ''), data_root=str(paths.global_root))
+            config.ui_language = self.language_code
+            config.ui_theme = theme_code
+            config.ui_scale_percent = scale_percent
+            save_config(config, paths)
+        return theme_code, scale_percent
+
+    def _apply_ui_preferences(self) -> None:
+        try:
+            self._apply_ui_preferences_from_controls(rebuild_ui=True, persist=True)
+        except Exception as exc:
+            messagebox.showerror(self._tr('cannot_start_title'), str(exc), parent=self.root)
+            return
+        self.status_var.set(self._tr('status_ui_applied'))
+        self._append_log(self._tr('status_ui_applied'))
+        self._refresh_query_status_banner()
+
     def _collect_vault_paths(self, active_vault: str = "") -> list[str]:
         ordered: list[str] = []
         seen: set[str] = set()
@@ -1595,6 +2195,13 @@ class OmniClipDesktopApp:
         self.current_hits = []
         self.current_query_text = ""
         self.selected_chunk_ids.clear()
+        self.result_sort_column = None
+        self.result_sort_reverse = False
+        self.result_page_sort_active = False
+        self.result_page_sort_restore_order = []
+        self.result_page_sort_restore_column = None
+        self.result_page_sort_restore_reverse = False
+        self._cancel_scheduled_context_refresh()
         self.current_context = ""
         self.current_report = None
         self.latest_preflight_snapshot = None
@@ -1603,12 +2210,16 @@ class OmniClipDesktopApp:
         self.context_jump_options = []
         self.context_jump_summary_var.set(self._tr("context_jump_summary_empty"))
         self.resume_prompt_workspace_id = None
+        self.query_last_completed_at = 0.0
+        self.query_last_result_count = 0
+        self.query_last_copied = False
         self.files_var.set("0")
         self.chunks_var.set("0")
         self.refs_var.set("0")
         self.preflight_var.set(self._tr("preflight_empty"))
         self.result_var.set(self._tr("result_empty"))
         self._update_context_selection_summary()
+        self._refresh_query_status_banner()
 
     def _refresh_workspace_summary(self) -> None:
         vault = normalize_vault_path(self.vault_var.get().strip())
@@ -1683,6 +2294,8 @@ class OmniClipDesktopApp:
             if is_local_reranker_ready(config, paths):
                 return self._tr("task_eta_bootstrap_cached"), self._tr("task_detail_reranker_cached")
             return self._tr("task_eta_bootstrap_download"), self._tr("task_detail_reranker_download", model=config.reranker_model)
+        if label_key == "search_button":
+            return self._tr("task_eta_query"), self._tr("task_detail_query")
         if label_key in {"rebuild_button", "resume_rebuild_task"}:
             return self._tr("task_eta_rebuild"), self._tr("task_detail_rebuild")
         if label_key == "refresh_button":
@@ -1785,6 +2398,7 @@ class OmniClipDesktopApp:
             self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
             self.task_progress.start(12)
         self._tick_task_feedback()
+        self._refresh_query_status_banner()
 
     def _tick_task_feedback(self) -> None:
         if self.task_after_id is not None:
@@ -1825,6 +2439,7 @@ class OmniClipDesktopApp:
         self.task_elapsed_var.set(self._tr("task_elapsed", value="00:00"))
         self.task_eta_var.set(self._tr("task_eta_idle"))
         self._update_rebuild_pause_button()
+        self._refresh_query_status_banner()
 
     def _update_task_progress(self, payload: dict[str, object]) -> None:
         if not hasattr(self, "task_progress"):
@@ -1856,9 +2471,14 @@ class OmniClipDesktopApp:
             else:
                 self.task_progress.stop()
                 self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
+            self._refresh_query_status_banner()
             return
 
-        if stage == "indexing" and total > 0:
+        if stage == 'query':
+            self.task_progress.stop()
+            self.task_progress.configure(mode='determinate', maximum=100, value=min(current, 100))
+            self.task_detail_var.set(self._query_progress_detail(payload))
+        elif stage == "indexing" and total > 0:
             self.task_progress.stop()
             self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
             current_path = str(payload.get("current_path") or self._tr("none_value"))
@@ -1892,6 +2512,7 @@ class OmniClipDesktopApp:
                 detail = self._tr("task_detail_rebuild_vectorizing", total=total)
                 tuning = self._render_vector_tuning(payload)
                 self.task_detail_var.set(f"{detail}\n{tuning}" if tuning else detail)
+        self._refresh_query_status_banner()
 
     def _render_vector_tuning(self, payload: dict[str, object]) -> str:
         encode_batch = int(payload.get('encode_batch_size', 0) or 0)
@@ -1950,17 +2571,15 @@ class OmniClipDesktopApp:
         self._update_watch_button_state()
         self._update_context_selection_summary()
         self._update_page_blocklist_summary()
+        self._update_page_sort_button()
+        self._refresh_query_status_banner()
 
     def _current_preview_text(self) -> str:
         if not self.current_hits:
             return self._tr("preview_empty")
-        selection = self.tree.selection() if hasattr(self, "tree") else ()
-        if selection:
-            try:
-                index = int(selection[0])
-            except ValueError:
-                index = 0
-        else:
+        selected_chunk_id = self._selected_tree_chunk_id()
+        index = self._find_hit_index(selected_chunk_id)
+        if index is None:
             index = 0
         index = max(0, min(index, len(self.current_hits) - 1))
         hit = self.current_hits[index]
@@ -1974,27 +2593,34 @@ class OmniClipDesktopApp:
             f"{self._tr('preview_full_label')}\n{hit.display_text or hit.rendered_text}"
         )
 
+    def _hit_row_values(self, hit) -> tuple[str, str, str, str, str]:
+        include_value = '[x]' if hit.chunk_id in self.selected_chunk_ids else '[ ]'
+        return (include_value, hit.title, hit.reason or self._tr('reason_fallback'), hit.anchor, f"{hit.score:.1f}")
+
     def _render_hits(self, selected_chunk_id: str | None = None) -> None:
         if not hasattr(self, "tree"):
             return
         if selected_chunk_id is None:
             selected_chunk_id = self._selected_tree_chunk_id()
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        selected_index = 0
+        desired_ids = [hit.chunk_id for hit in self.current_hits]
+        desired_id_set = set(desired_ids)
+        existing_ids = set(self.tree.get_children())
+        for stale_id in existing_ids - desired_id_set:
+            self.tree.delete(stale_id)
         for index, hit in enumerate(self.current_hits):
-            include_value = '[x]' if hit.chunk_id in self.selected_chunk_ids else '[ ]'
-            self.tree.insert(
-                "",
-                "end",
-                iid=str(index),
-                values=(include_value, hit.title, hit.reason or self._tr('reason_fallback'), hit.anchor, f"{hit.score:.1f}"),
-            )
-            if selected_chunk_id and hit.chunk_id == selected_chunk_id:
-                selected_index = index
+            values = self._hit_row_values(hit)
+            if self.tree.exists(hit.chunk_id):
+                if tuple(self.tree.item(hit.chunk_id, 'values')) != values:
+                    self.tree.item(hit.chunk_id, values=values)
+                self.tree.move(hit.chunk_id, '', index)
+            else:
+                self.tree.insert('', index, iid=hit.chunk_id, values=values)
         self._refresh_tree_headings()
-        if self.current_hits:
-            self.tree.selection_set(str(selected_index))
+        self._update_page_sort_button()
+        if selected_chunk_id and self.tree.exists(selected_chunk_id):
+            self.tree.selection_set(selected_chunk_id)
+        elif self.current_hits:
+            self.tree.selection_set(self.current_hits[0].chunk_id)
 
     def _on_result_tree_click(self, event) -> str | None:
         if not hasattr(self, 'tree'):
@@ -2002,9 +2628,12 @@ class OmniClipDesktopApp:
         row_id = self.tree.identify_row(event.y)
         column_id = self.tree.identify_column(event.x)
         if row_id and column_id == '#1':
-            self._toggle_hit_selection(int(row_id))
+            hit_index = self._find_hit_index(row_id)
+            if hit_index is None:
+                return 'break'
+            self._toggle_hit_selection(hit_index)
             self.tree.selection_set(row_id)
-            self._show_hit(int(row_id))
+            self._show_hit(hit_index)
             return 'break'
         return None
 
@@ -2017,19 +2646,22 @@ class OmniClipDesktopApp:
         else:
             self.selected_chunk_ids.add(hit.chunk_id)
         self._render_hits(selected_chunk_id=hit.chunk_id)
-        self._rebuild_context_view()
+        self._update_context_selection_summary()
+        self._request_context_refresh()
 
     def _toggle_all_hit_selection(self) -> None:
         if not self.current_hits:
             return
+        selected_chunk_id = self._selected_tree_chunk_id()
         current_ids = {hit.chunk_id for hit in self.current_hits}
         selected_ids = current_ids & self.selected_chunk_ids
         if selected_ids and len(selected_ids) == len(current_ids):
             self.selected_chunk_ids.difference_update(current_ids)
         else:
             self.selected_chunk_ids.update(current_ids)
-        self._render_hits(selected_chunk_id=self._selected_tree_chunk_id())
-        self._rebuild_context_view()
+        self._render_hits(selected_chunk_id=selected_chunk_id)
+        self._update_context_selection_summary()
+        self._request_context_refresh()
 
     def _update_page_blocklist_summary(self) -> None:
         rules = _deserialize_page_filter_rules(self.page_blocklist_rules_var.get())
@@ -2118,8 +2750,7 @@ class OmniClipDesktopApp:
         list_body = tk.Frame(canvas, bg=self.colors['soft_2'])
         list_body.grid_columnconfigure(0, weight=1)
         window_id = canvas.create_window((0, 0), window=list_body, anchor='nw')
-        list_body.bind('<Configure>', lambda _event: canvas.configure(scrollregion=canvas.bbox('all')))
-        canvas.bind('<Configure>', lambda event: canvas.itemconfigure(window_id, width=event.width))
+        self._configure_canvas_window_sync(canvas, list_body, window_id, key_prefix=f'page-blocklist:{str(canvas)}')
 
         header = tk.Frame(list_body, bg=self.colors['soft_2'])
         header.grid(row=0, column=0, sticky='ew')
@@ -2217,7 +2848,7 @@ class OmniClipDesktopApp:
         self._attach_tooltip(extended_check, 'rag_filter_extended')
         custom_label = tk.Label(body, text=self._tr('rag_filter_custom_label'), bg=self.colors['soft_2'], fg=self.colors['muted'], font=self.fonts['small'], anchor='w', justify='left', wraplength=640)
         custom_label.grid(row=2, column=0, sticky='w', padx=16, pady=(12, 0))
-        custom_text = tk.Text(body, wrap='word', relief='flat', borderwidth=0, highlightbackground=self.colors['border'], highlightthickness=1, background='#FFFFFF', foreground=self.colors['ink'], insertbackground=self.colors['ink'], font=('Segoe UI', 10), height=8)
+        custom_text = tk.Text(body, wrap='word', relief='flat', borderwidth=0, highlightbackground=self.colors['input_border'], highlightthickness=1, background=self.colors['input_bg'], foreground=self.colors['input_fg'], insertbackground=self.colors['input_fg'], font=self.fonts['body'], height=8)
         custom_text.grid(row=3, column=0, sticky='nsew', padx=16, pady=(6, 0))
         custom_text.insert('1.0', self.rag_filter_custom_rules_var.get())
         self._attach_tooltip(custom_text, 'rag_filter_custom_rules')
@@ -2290,6 +2921,15 @@ class OmniClipDesktopApp:
     def _refresh_localized_runtime_state(self) -> None:
         self._refresh_workspace_summary()
         self._refresh_device_options()
+        self.ui_theme_var.set(self._ui_theme_label(self.ui_theme))
+        self.ui_scale_var.set(str(self.ui_scale_percent))
+        ui_theme_combo = getattr(self, 'ui_theme_combo', None)
+        if ui_theme_combo is not None:
+            try:
+                if int(ui_theme_combo.winfo_exists()):
+                    ui_theme_combo.configure(values=self._ui_theme_choices())
+            except tk.TclError:
+                pass
         if self.current_report is not None:
             self.preflight_var.set(summarize_preflight(self.current_report, self.language_code))
         elif self.latest_preflight_snapshot is not None:
@@ -2348,6 +2988,9 @@ class OmniClipDesktopApp:
         else:
             self.result_var.set(self._tr("result_empty"))
         self._update_context_selection_summary()
+        self._refresh_quick_start_visibility()
+        self._refresh_advanced_visibility()
+        self._refresh_query_status_banner()
 
     def _apply_recommended(self) -> None:
         self.backend_var.set("lancedb")
@@ -2387,11 +3030,11 @@ class OmniClipDesktopApp:
 
     def _toggle_quick_start(self) -> None:
         self.quick_start_expanded_var.set(not self.quick_start_expanded_var.get())
-        self._render_ui()
+        self._refresh_quick_start_visibility()
 
     def _toggle_advanced(self) -> None:
         self.show_advanced_var.set(not self.show_advanced_var.get())
-        self._render_ui()
+        self._refresh_advanced_visibility()
 
     def _open_help_and_updates(self) -> None:
         if not messagebox.askyesno(self._tr("help_updates_confirm_title"), self._tr("help_updates_confirm_body"), parent=self.root):
@@ -2456,6 +3099,13 @@ class OmniClipDesktopApp:
         self.page_blocklist_rules_var.set(_merge_page_filter_defaults(config.page_blocklist_rules))
         self._update_page_blocklist_summary()
         self.quick_start_expanded_var.set(config.ui_quick_start_expanded)
+        self.ui_theme_var.set(self._ui_theme_label(getattr(config, 'ui_theme', self.ui_theme)))
+        self.ui_scale_var.set(str(getattr(config, 'ui_scale_percent', self.ui_scale_percent)))
+        visual_changed = self._apply_visual_preferences(
+            theme_code=getattr(config, 'ui_theme', self.ui_theme),
+            scale_percent=getattr(config, 'ui_scale_percent', self.ui_scale_percent),
+            rebuild_ui=False,
+        )
         self.ui_window_geometry = config.ui_window_geometry or self.ui_window_geometry
         self.ui_main_sash = self._coerce_layout_value(config.ui_main_sash, self.ui_main_sash)
         self.ui_right_sash = self._coerce_layout_value(config.ui_right_sash, self.ui_right_sash)
@@ -2472,7 +3122,7 @@ class OmniClipDesktopApp:
                 pass
         self._refresh_query_limit_guidance()
         self._append_log(self._tr("log_loaded_config", path=paths.config_file))
-        if language_changed:
+        if language_changed or visual_changed:
             self._render_ui()
         self._refresh_state_chips()
         self._refresh_localized_runtime_state()
@@ -2520,6 +3170,8 @@ class OmniClipDesktopApp:
             rag_filter_custom_rules=self.rag_filter_custom_rules_var.get().strip(),
             page_blocklist_rules=self.page_blocklist_rules_var.get().strip(),
             ui_language=self.language_code,
+            ui_theme=self.ui_theme,
+            ui_scale_percent=self.ui_scale_percent,
             ui_quick_start_expanded=self.quick_start_expanded_var.get(),
             ui_window_geometry=self.ui_window_geometry,
             ui_main_sash=int(self.ui_main_sash),
@@ -2530,6 +3182,7 @@ class OmniClipDesktopApp:
 
     def _save_only(self) -> None:
         try:
+            self._apply_ui_preferences_from_controls(rebuild_ui=True, persist=False)
             config, paths = self._config(False)
             self._sync_runtime_layout_to_config(config)
             save_config(config, paths)
@@ -2981,7 +3634,12 @@ class OmniClipDesktopApp:
                 "query": query,
                 "copied": copy_result,
                 "score_threshold": score_threshold,
-                "payload": service.query(query, copy_result=copy_result, score_threshold=score_threshold),
+                "payload": service.query(
+                    query,
+                    copy_result=copy_result,
+                    score_threshold=score_threshold,
+                    on_progress=lambda progress: self.queue.put(("progress", progress)),
+                ),
             },
             self._after_query,
             ensure_model=True,
@@ -3011,6 +3669,7 @@ class OmniClipDesktopApp:
                 self.watch_stop.set()
             self.status_var.set(self._tr("status_watch_stopping"))
             self._append_log(self._tr("log_watch_requested_stop"))
+            self._refresh_query_status_banner()
             return
         if self.busy:
             messagebox.showinfo(self._tr("busy_title"), self._tr("busy_body"), parent=self.root)
@@ -3054,6 +3713,7 @@ class OmniClipDesktopApp:
 
         self.watch_thread = threading.Thread(target=worker, daemon=True)
         self.watch_thread.start()
+        self._refresh_query_status_banner()
 
     def _after_preflight(self, payload) -> None:
         report = payload["report"]
@@ -3133,6 +3793,13 @@ class OmniClipDesktopApp:
         self.selected_chunk_ids = {hit.chunk_id for hit in hits}
         self.result_sort_column = None
         self.result_sort_reverse = False
+        self.result_page_sort_active = False
+        self.result_page_sort_restore_order = []
+        self.result_page_sort_restore_column = None
+        self.result_page_sort_restore_reverse = False
+        self.query_last_completed_at = time.time()
+        self.query_last_result_count = len(hits)
+        self.query_last_copied = copied
         selected_chunk_id = hits[0].chunk_id if hits else None
         self._render_hits(selected_chunk_id=selected_chunk_id)
         self._rebuild_context_view()
@@ -3145,6 +3812,7 @@ class OmniClipDesktopApp:
         self.result_var.set(self._tr("query_hits", count=len(hits)))
         self.status_var.set(self._tr("status_query_copied") if copied else self._tr("status_query_done"))
         self._append_log(self._tr("log_query_done", query=query, count=len(hits)))
+        self._refresh_query_status_banner()
         if result.insights.reranker is not None and result.insights.reranker.enabled:
             if result.insights.reranker.applied:
                 self._append_log(self._tr('log_reranker_applied', device=result.insights.reranker.resolved_device, count=result.insights.reranker.reranked_count))
@@ -3196,7 +3864,9 @@ class OmniClipDesktopApp:
     def _select_hit(self, _event=None) -> None:
         selection = self.tree.selection()
         if selection:
-            self._show_hit(int(selection[0]))
+            hit_index = self._find_hit_index(selection[0])
+            if hit_index is not None:
+                self._show_hit(hit_index)
 
     def _show_hit(self, index: int) -> None:
         if index < 0 or index >= len(self.current_hits):
@@ -3266,7 +3936,10 @@ class OmniClipDesktopApp:
             return
         self.log_lines.append(message)
         if hasattr(self, "log_text"):
-            self._set_text(self.log_text, "\n".join(self.log_lines))
+            if len(self.log_lines) == 1:
+                self._set_text(self.log_text, message)
+            else:
+                self._append_text(self.log_text, message)
             self.log_text.see("end")
 
     def _append_watch_events(self, events: list[dict[str, object]]) -> None:
@@ -3304,6 +3977,12 @@ class OmniClipDesktopApp:
         widget.configure(state="disabled")
         self._refresh_text_search_state(widget)
 
+    def _append_text(self, widget: tk.Text, text_value: str) -> None:
+        widget.configure(state="normal")
+        widget.insert("end", f"\n{text_value}")
+        widget.configure(state="disabled")
+        self._refresh_text_search_state(widget)
+
     def _update_watch_button_state(self) -> None:
         if not hasattr(self, "watch_button"):
             return
@@ -3313,11 +3992,14 @@ class OmniClipDesktopApp:
             self.watch_button.configure(text=self._tr("watch_start"), style="Primary.TButton")
 
     def _drain_queue(self) -> None:
-        while True:
+        processed = 0
+        latest_progress_payload = None
+        while processed < UI_QUEUE_BATCH_SIZE:
             try:
                 item = self.queue.get_nowait()
             except queue.Empty:
                 break
+            processed += 1
             kind = item[0]
             if kind == "success":
                 _, label_key, _label, payload, callback = item
@@ -3353,7 +4035,7 @@ class OmniClipDesktopApp:
                 messagebox.showerror(label, self._friendly_task_error(label_key, label, tb), parent=self.root)
             elif kind == "progress":
                 _, payload = item
-                self._update_task_progress(payload)
+                latest_progress_payload = payload
             elif kind == "watch-update":
                 _, payload = item
                 stats = payload.get("stats", {})
@@ -3388,13 +4070,20 @@ class OmniClipDesktopApp:
                 self.watch_thread = None
                 self.watch_stop = None
                 self._update_watch_button_state()
+        if latest_progress_payload is not None:
+            self._update_task_progress(latest_progress_payload)
+        self._refresh_query_status_banner()
         if self.root.winfo_exists():
-            self.queue_after_id = self.root.after(120, self._drain_queue)
+            has_backlog = processed >= UI_QUEUE_BATCH_SIZE or not self.queue.empty()
+            delay_ms = UI_QUEUE_FAST_POLL_MS if has_backlog else UI_QUEUE_IDLE_POLL_MS
+            self.queue_after_id = self.root.after(delay_ms, self._drain_queue)
 
     def _on_close(self) -> None:
         if self.watch_stop is not None:
             self.watch_stop.set()
         self._stop_task_feedback()
+        self._cancel_scheduled_context_refresh()
+        self._cancel_all_deferred_ui_callbacks()
         if self.queue_after_id is not None:
             try:
                 self.root.after_cancel(self.queue_after_id)
@@ -3415,6 +4104,7 @@ class OmniClipDesktopApp:
             self.capture_after_id = None
         self._capture_layout_state()
         try:
+            self._apply_ui_preferences_from_controls(rebuild_ui=False, persist=False)
             config, paths = self._config(False)
             self._sync_runtime_layout_to_config(config)
             save_config(config, paths)

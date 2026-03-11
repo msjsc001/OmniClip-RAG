@@ -266,6 +266,51 @@ class GuiTests(unittest.TestCase):
         finally:
             app._on_close()
 
+    def test_page_sort_groups_hits_by_page_average_and_restores(self) -> None:
+        app = self._build_app()
+        try:
+            app.current_query_text = 'test query'
+            app.current_hits = [
+                SearchHit(score=62.0, title='Page A', anchor='A-1', source_path='pages/a.md', rendered_text='Alpha 1', chunk_id='a1', preview_text='Alpha 1', reason='正文命中'),
+                SearchHit(score=40.0, title='Page C', anchor='C-1', source_path='pages/c.md', rendered_text='Gamma 1', chunk_id='c1', preview_text='Gamma 1', reason='正文命中'),
+                SearchHit(score=81.0, title='Page B', anchor='B-1', source_path='pages/b.md', rendered_text='Beta 1', chunk_id='b1', preview_text='Beta 1', reason='正文命中'),
+                SearchHit(score=78.0, title='Page A', anchor='A-2', source_path='pages/a.md', rendered_text='Alpha 2', chunk_id='a2', preview_text='Alpha 2', reason='正文命中'),
+            ]
+            app.selected_chunk_ids = {'a1', 'a2', 'b1', 'c1'}
+            app._render_hits(selected_chunk_id='a1')
+
+            app._toggle_page_sort()
+            self.assertTrue(app.result_page_sort_active)
+            self.assertEqual([hit.chunk_id for hit in app.current_hits], ['b1', 'a1', 'a2', 'c1'])
+            self.assertEqual(app.page_sort_var.get(), app._tr('page_sort_restore_button'))
+
+            app._toggle_page_sort()
+            self.assertFalse(app.result_page_sort_active)
+            self.assertEqual([hit.chunk_id for hit in app.current_hits], ['a1', 'c1', 'b1', 'a2'])
+            self.assertEqual(app.page_sort_var.get(), app._tr('page_sort_button'))
+        finally:
+            app._on_close()
+
+    def test_sort_header_exits_page_sort_mode(self) -> None:
+        app = self._build_app()
+        try:
+            app.current_query_text = 'test query'
+            app.current_hits = [
+                SearchHit(score=62.0, title='Page A', anchor='A-1', source_path='pages/a.md', rendered_text='Alpha 1', chunk_id='a1', preview_text='Alpha 1', reason='正文命中'),
+                SearchHit(score=40.0, title='Page C', anchor='C-1', source_path='pages/c.md', rendered_text='Gamma 1', chunk_id='c1', preview_text='Gamma 1', reason='正文命中'),
+                SearchHit(score=81.0, title='Page B', anchor='B-1', source_path='pages/b.md', rendered_text='Beta 1', chunk_id='b1', preview_text='Beta 1', reason='正文命中'),
+            ]
+            app.selected_chunk_ids = {'a1', 'b1', 'c1'}
+            app._render_hits()
+            app._toggle_page_sort()
+
+            app._sort_hits_by('title')
+            self.assertFalse(app.result_page_sort_active)
+            self.assertEqual([hit.title for hit in app.current_hits], ['Page A', 'Page B', 'Page C'])
+            self.assertEqual(app.page_sort_var.get(), app._tr('page_sort_button'))
+        finally:
+            app._on_close()
+
     def test_pause_rebuild_button_toggles_event_and_label(self) -> None:
         app = self._build_app()
         try:
@@ -384,6 +429,107 @@ class GuiTests(unittest.TestCase):
             })
             self.assertEqual(app.reranker_state_var.get(), app._tr('reranker_ready'))
             self.assertIsNotNone(app.reranker_state_label)
+        finally:
+            app._on_close()
+
+    def test_config_left_tabs_include_ui(self) -> None:
+        app = self._build_app()
+        try:
+            tabs = app.left_tabs.tabs()
+            labels = [app.left_tabs.tab(tab, 'text') for tab in tabs]
+            self.assertIn(app._tr('left_tab_ui'), labels)
+        finally:
+            app._on_close()
+
+    def test_toggle_quick_start_is_local_refresh(self) -> None:
+        app = self._build_app()
+        try:
+            app.root.update_idletasks()
+            with patch.object(app, '_render_ui') as render_mock:
+                self.assertTrue(app.quick_start_steps.winfo_ismapped())
+                app._toggle_quick_start()
+                app.root.update_idletasks()
+                render_mock.assert_not_called()
+                self.assertFalse(app.quick_start_steps.winfo_ismapped())
+                self.assertEqual(app.quick_start_button_var.get(), app._tr('quick_start_show'))
+                app._toggle_quick_start()
+                app.root.update_idletasks()
+                self.assertTrue(app.quick_start_steps.winfo_ismapped())
+                self.assertEqual(app.quick_start_button_var.get(), app._tr('quick_start_hide'))
+        finally:
+            app._on_close()
+
+    def test_toggle_advanced_is_local_refresh(self) -> None:
+        app = self._build_app()
+        try:
+            app.root.update_idletasks()
+            with patch.object(app, '_render_ui') as render_mock:
+                self.assertTrue(app.advanced_panel.winfo_ismapped())
+                app._toggle_advanced()
+                app.root.update_idletasks()
+                render_mock.assert_not_called()
+                self.assertFalse(app.advanced_panel.winfo_ismapped())
+                self.assertEqual(app.advanced_button_var.get(), app._tr('advanced_show'))
+                app._toggle_advanced()
+                app.root.update_idletasks()
+                self.assertTrue(app.advanced_panel.winfo_ismapped())
+                self.assertEqual(app.advanced_button_var.get(), app._tr('advanced_hide'))
+        finally:
+            app._on_close()
+
+    def test_query_status_banner_transitions(self) -> None:
+        app = self._build_app()
+        try:
+            class _AliveWatch:
+                def is_alive(self) -> bool:
+                    return True
+
+            app._refresh_query_status_banner()
+            self.assertEqual(app.query_status_mode, 'idle')
+            self.assertEqual(app.query_status_title_var.get(), app._tr('query_status_idle_title'))
+
+            app.busy = True
+            app.active_task_key = 'search_button'
+            app.latest_task_progress = {
+                'stage': 'query',
+                'stage_status': 'rank',
+                'overall_percent': 52.0,
+                'candidates': 8,
+                'limit': 15,
+                'current': 52,
+                'total': 100,
+            }
+            app._refresh_query_status_banner()
+            self.assertEqual(app.query_status_mode, 'running')
+            self.assertIn('52', app.query_status_title_var.get())
+            self.assertIn(app._tr('query_stage_rank'), app.query_status_detail_var.get())
+
+            app.busy = False
+            app.active_task_key = None
+            app.query_last_completed_at = time.time()
+            app.query_last_result_count = 3
+            app.query_last_copied = True
+            app._refresh_query_status_banner()
+            self.assertEqual(app.query_status_mode, 'done')
+            self.assertIn('3', app.query_status_detail_var.get())
+
+            app.query_last_completed_at = 0.0
+            app.watch_thread = _AliveWatch()
+            app._refresh_query_status_banner()
+            self.assertEqual(app.query_status_mode, 'blocked')
+            self.assertEqual(app.query_status_title_var.get(), app._tr('query_status_blocked_title'))
+        finally:
+            app._on_close()
+
+    def test_apply_ui_preferences_from_controls_updates_theme_and_scale(self) -> None:
+        app = self._build_app()
+        try:
+            app.ui_theme_var.set(app._tr('ui_theme_dark'))
+            app.ui_scale_var.set('125')
+            app._apply_ui_preferences_from_controls(rebuild_ui=False, persist=False)
+            self.assertEqual(app.ui_theme, 'dark')
+            self.assertEqual(app.effective_ui_theme, 'dark')
+            self.assertEqual(app.ui_scale_percent, 125)
         finally:
             app._on_close()
 
