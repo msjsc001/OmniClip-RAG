@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import queue
 import re
@@ -57,6 +58,16 @@ class _VectorCandidate:
 
 _EMBEDDER_CACHE: dict[tuple[str, str, str], Embedder] = {}
 _ACCELERATION_CACHE: dict[str, object] | None = None
+_ACCELERATION_LOCK = threading.Lock()
+_WRITE_BATCH_ROW_CAPS = {
+    'cpu': {'quiet': 64, 'balanced': 96, 'peak': 128},
+    'cuda': {'quiet': 64, 'balanced': 96, 'peak': 128},
+}
+_WRITE_BATCH_MEMORY_BUDGET_BYTES = {
+    'cpu': 8 * 1024 * 1024,
+    'cuda': 12 * 1024 * 1024,
+}
+_MIN_SAFE_WRITE_BATCH_ROWS = 32
 
 
 class NullVectorIndex:
@@ -91,6 +102,47 @@ class NullVectorIndex:
             "resolved_device": resolve_vector_device("cpu"),
             **acceleration,
         }
+
+    def reset(self) -> None:
+        return None
+
+
+class MissingRuntimeVectorIndex:
+    def __init__(self, config: AppConfig, paths: DataPaths, *, backend: str, reason: BaseException | None = None) -> None:
+        self.config = config
+        self.paths = paths
+        self.backend = backend
+        self.reason = reason
+        detail = ''
+        if reason is not None:
+            detail = f'\n\n底层缺失：{type(reason).__name__}: {reason}'
+        self._message = runtime_dependency_message(config.vector_runtime, config.vector_device) + detail
+
+    def _raise_runtime(self) -> None:
+        raise RuntimeDependencyError(self._message)
+
+    def rebuild(
+        self,
+        documents: Iterable[dict[str, str]],
+        *,
+        total: int | None = None,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        self._raise_runtime()
+
+    def upsert(self, documents: list[dict[str, str]]) -> None:
+        self._raise_runtime()
+
+    def delete(self, chunk_ids: list[str]) -> None:
+        self._raise_runtime()
+
+    def search(self, query_text: str, limit: int) -> list[_VectorCandidate]:
+        return []
+
+    def warmup(self) -> dict[str, object]:
+        self._raise_runtime()
 
     def reset(self) -> None:
         return None
@@ -159,13 +211,19 @@ class LanceDbVectorIndex:
         writer_stop = threading.Event()
         writer_thread: threading.Thread | None = None
 
+        def progress_display_current() -> int:
+            return min(total, processed) if total and total > 0 else processed
+
+        def pipeline_progress_current() -> int:
+            return min(total, max(processed, encoded)) if total and total > 0 else max(processed, encoded)
+
         def current_progress_ratio() -> float:
-            return (processed / total) if total and total > 0 else 0.0
+            return (pipeline_progress_current() / total) if total and total > 0 else 0.0
 
         def emit_vector_progress(snapshot, *, stage_status: str | None = None) -> None:
             payload: dict[str, object] = {
                 'stage': 'vectorizing',
-                'current': processed,
+                'current': progress_display_current(),
                 'total': total,
                 'encoded_count': encoded,
                 'written_count': processed,
@@ -179,6 +237,8 @@ class LanceDbVectorIndex:
             }
             if stage_status:
                 payload['stage_status'] = stage_status
+            elif encoded > processed:
+                payload['stage_status'] = 'writing' if encoded >= total else 'encoding'
             payload.update(snapshot.to_progress_payload())
             _emit_progress(on_progress, payload)
 
@@ -186,25 +246,39 @@ class LanceDbVectorIndex:
             table = None
             staged_documents: list[dict[str, str]] = []
             staged_vectors: list[object] = []
+            vector_dimension_hint = int(self._vector_dimension or 0)
 
             def flush(force: bool = False) -> None:
-                nonlocal table, staged_documents, staged_vectors
-                while staged_documents and (force or len(staged_documents) >= max(controller.current_write_batch_size, 1)):
-                    target = min(max(controller.current_write_batch_size, 1), len(staged_documents))
+                nonlocal table, staged_documents, staged_vectors, vector_dimension_hint
+                while staged_documents:
+                    target_size = self._safe_write_batch_limit(
+                        controller.current_write_batch_size,
+                        resolved_device=resolved_device,
+                        profile=controller.profile,
+                        vector_dimension=vector_dimension_hint,
+                    )
+                    if not force and len(staged_documents) < target_size:
+                        break
+                    target = min(max(target_size, 1), len(staged_documents))
                     batch_documents = staged_documents[:target]
                     batch_vectors = staged_vectors[:target]
                     del staged_documents[:target]
                     del staged_vectors[:target]
                     if not batch_documents:
                         break
+                    if vector_dimension_hint <= 0:
+                        vector_dimension_hint = self._infer_vector_dimension(batch_vectors)
                     prepare_started = time.perf_counter()
                     rows = self._materialize_rows(batch_documents, batch_vectors)
                     prepare_elapsed_ms = max((time.perf_counter() - prepare_started) * 1000.0, 0.0)
-                    if table is None:
+                    if rows and vector_dimension_hint <= 0:
+                        vector_dimension_hint = len(rows[0]['vector'])
+                    if table is None and rows:
                         self._ensure_table(len(rows[0]['vector']))
                         table = self._table()
                     write_started = time.perf_counter()
-                    table.add(rows)
+                    if rows:
+                        table.add(rows)
                     write_elapsed_ms = max((time.perf_counter() - write_started) * 1000.0, 0.0)
                     completion_queue.put(
                         (
@@ -218,6 +292,7 @@ class LanceDbVectorIndex:
                             },
                         )
                     )
+                    del rows
 
             try:
                 while True:
@@ -234,8 +309,11 @@ class LanceDbVectorIndex:
                         writer_stop.set()
                     else:
                         batch_documents, batch_vectors = item
+                        vector_batch = list(batch_vectors)
+                        if vector_dimension_hint <= 0:
+                            vector_dimension_hint = self._infer_vector_dimension(vector_batch)
                         staged_documents.extend(batch_documents)
-                        staged_vectors.extend(list(batch_vectors))
+                        staged_vectors.extend(vector_batch)
                     flush(force=force)
                     if force:
                         break
@@ -338,7 +416,7 @@ class LanceDbVectorIndex:
                         break
                     except RuntimeError as exc:
                         if _is_oom_error(exc) and controller.current_encode_batch_size > controller.min_encode_batch_size:
-                            _clear_cuda_cache()
+                            _release_vector_memory(clear_cuda=True)
                             tuning = controller.note_oom()
                             emit_vector_progress(tuning)
                             continue
@@ -348,6 +426,7 @@ class LanceDbVectorIndex:
                 encoded += len(batch)
                 encode_elapsed_total_ms += encode_elapsed_ms
                 dispatch_encoded_batch(batch, vectors)
+                del vectors
                 drained_prepare_ms, drained_write_ms = drain_write_completions()
                 tuning = controller.observe(
                     encode_elapsed_ms=encode_elapsed_ms,
@@ -359,7 +438,9 @@ class LanceDbVectorIndex:
                 )
                 emit_vector_progress(tuning)
 
+            _release_vector_memory(clear_cuda=resolved_device == 'cuda')
             while True:
+                _wait_for_controls(pause_event, cancel_event)
                 try:
                     write_queue.put(None, timeout=0.15)
                     break
@@ -367,6 +448,7 @@ class LanceDbVectorIndex:
                     drained_prepare_ms, drained_write_ms = drain_write_completions(wait_for_one=True)
                     observe_write_feedback(drained_prepare_ms, drained_write_ms)
             while (writer_thread is not None and writer_thread.is_alive()) or processed < encoded:
+                _wait_for_controls(pause_event, cancel_event)
                 drained_prepare_ms, drained_write_ms = drain_write_completions(wait_for_one=True)
                 observe_write_feedback(drained_prepare_ms, drained_write_ms)
             remaining_prepare_ms, remaining_write_ms = drain_write_completions()
@@ -380,6 +462,7 @@ class LanceDbVectorIndex:
                     pass
                 writer_thread.join(timeout=1.0)
             drain_write_completions()
+            _release_vector_memory(clear_cuda=resolved_device == 'cuda')
 
     def upsert(self, documents: list[dict[str, str]]) -> None:
         if not documents:
@@ -434,6 +517,33 @@ class LanceDbVectorIndex:
         table_dir = self._db_dir / f"{self._table_name}.lance"
         if table_dir.exists():
             shutil.rmtree(table_dir, ignore_errors=True)
+
+    @staticmethod
+    def _infer_vector_dimension(vectors) -> int:
+        try:
+            if len(vectors) <= 0:
+                return 0
+            first = vectors[0]
+        except Exception:
+            return 0
+        try:
+            return max(int(len(first)), 0)
+        except Exception:
+            try:
+                return max(int(len(LanceDbVectorIndex._coerce_vector(first))), 0)
+            except Exception:
+                return 0
+
+    @staticmethod
+    def _safe_write_batch_limit(desired_rows: int, *, resolved_device: str, profile: str, vector_dimension: int) -> int:
+        device_key = 'cuda' if (resolved_device or '').strip().lower() == 'cuda' else 'cpu'
+        hard_cap = int(_WRITE_BATCH_ROW_CAPS[device_key].get(str(profile or 'balanced').strip().lower() or 'balanced', _WRITE_BATCH_ROW_CAPS[device_key]['balanced']))
+        safe_desired = max(int(desired_rows or 0), _MIN_SAFE_WRITE_BATCH_ROWS)
+        if vector_dimension <= 0:
+            return min(safe_desired, hard_cap)
+        raw_bytes_per_row = max(int(vector_dimension), 1) * 4
+        budget_rows = max(_MIN_SAFE_WRITE_BATCH_ROWS, int(_WRITE_BATCH_MEMORY_BUDGET_BYTES[device_key] / max(raw_bytes_per_row, 1)))
+        return max(_MIN_SAFE_WRITE_BATCH_ROWS, min(safe_desired, hard_cap, budget_rows))
 
     def _ensure_table(self, dimension: int) -> None:
         if self._table_exists():
@@ -561,7 +671,10 @@ def create_vector_index(
     if backend in {"", "disabled", "none", "off"}:
         return NullVectorIndex()
     if backend in {"lancedb", "lance", "lance-db"}:
-        return LanceDbVectorIndex(config, paths, embedder_factory=embedder_factory)
+        try:
+            return LanceDbVectorIndex(config, paths, embedder_factory=embedder_factory)
+        except (ImportError, ModuleNotFoundError, OSError) as exc:
+            return MissingRuntimeVectorIndex(config, paths, backend=backend, reason=exc)
     raise NotImplementedError(f"当前向量后端尚未接入：{config.vector_backend}")
 
 
@@ -573,85 +686,169 @@ def is_local_model_ready(config: AppConfig, paths: DataPaths) -> bool:
     return _is_model_dir_ready(get_local_model_dir(config, paths), config.vector_runtime)
 
 
-def detect_acceleration() -> dict[str, object]:
-    global _ACCELERATION_CACHE
-    if _ACCELERATION_CACHE is not None:
-        return dict(_ACCELERATION_CACHE)
+_RUNTIME_REQUIRED_MARKERS = {
+    '_runtime_bootstrap.json': '_runtime_bootstrap.json',
+    'torch': 'torch',
+    'sentence_transformers': 'sentence-transformers',
+    'transformers': 'transformers',
+    'huggingface_hub': 'huggingface-hub',
+    'safetensors': 'safetensors',
+    'lancedb': 'lancedb',
+    'onnxruntime': 'onnxruntime',
+    'pyarrow': 'pyarrow',
+    'numpy': 'numpy',
+    'pandas': 'pandas',
+    'scipy': 'scipy',
+}
+_CUDA_SETUP_GUIDE_URL = 'https://pytorch.org/get-started/locally/'
 
-    payload: dict[str, object] = {
-        "torch_available": False,
-        "torch_version": "",
-        "torch_error": "",
-        "sentence_transformers_available": False,
-        "sentence_transformers_error": "",
-        "cuda_available": False,
-        "cuda_device_count": 0,
-        "cuda_name": "",
-        "gpu_present": False,
-        "gpu_name": "",
-        "nvcc_available": False,
-        "nvcc_version": "",
-        "device_options": ["auto", "cpu"],
-        "recommended_device": "cpu",
-        "runtime_status": "missing",
+
+def _application_root_dir() -> Path:
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+def _runtime_dir_path() -> Path:
+    return _application_root_dir() / 'runtime'
+
+
+def _install_runtime_script_path() -> Path:
+    app_dir = _application_root_dir()
+    if getattr(sys, 'frozen', False):
+        return app_dir / 'InstallRuntime.ps1'
+    return app_dir / 'scripts' / 'install_runtime.ps1'
+
+
+def _install_runtime_script_relative() -> str:
+    if getattr(sys, 'frozen', False):
+        return '.\\InstallRuntime.ps1'
+    return '.\\scripts\\install_runtime.ps1'
+
+
+def _powershell_literal(value: str) -> str:
+    return str(value).replace("'", "''")
+
+
+def _runtime_marker_exists(runtime_dir: Path, marker: str) -> bool:
+    candidate = runtime_dir / marker
+    if candidate.exists():
+        return True
+    return any(runtime_dir.glob(f'{marker}-*.dist-info'))
+
+
+def inspect_runtime_environment() -> dict[str, object]:
+    runtime_dir = _runtime_dir_path()
+    runtime_dir_exists = runtime_dir.exists() and runtime_dir.is_dir()
+    runtime_dir_has_content = False
+    if runtime_dir_exists:
+        try:
+            runtime_dir_has_content = any(runtime_dir.iterdir())
+        except OSError:
+            runtime_dir_has_content = False
+    missing_items = [
+        display_name
+        for marker, display_name in _RUNTIME_REQUIRED_MARKERS.items()
+        if not _runtime_marker_exists(runtime_dir, marker)
+    ] if runtime_dir_exists else list(_RUNTIME_REQUIRED_MARKERS.values())
+    return {
+        'runtime_dir': runtime_dir,
+        'runtime_exists': runtime_dir_exists,
+        'runtime_has_content': runtime_dir_has_content,
+        'runtime_complete': runtime_dir_exists and runtime_dir_has_content and not missing_items,
+        'runtime_missing_items': missing_items,
     }
 
-    gpu_names = _detect_nvidia_gpus()
-    if gpu_names:
-        payload["gpu_present"] = True
-        payload["gpu_name"] = gpu_names[0]
 
-    nvcc_version = _detect_nvcc_version()
-    if nvcc_version:
-        payload["nvcc_available"] = True
-        payload["nvcc_version"] = nvcc_version
+def detect_acceleration(*, force_refresh: bool = False) -> dict[str, object]:
+    global _ACCELERATION_CACHE
+    if not force_refresh and _ACCELERATION_CACHE is not None:
+        return dict(_ACCELERATION_CACHE)
 
-    try:
-        import torch
-    except Exception as exc:
-        payload["torch_error"] = f"{type(exc).__name__}: {exc}"
-        torch = None
+    with _ACCELERATION_LOCK:
+        if not force_refresh and _ACCELERATION_CACHE is not None:
+            return dict(_ACCELERATION_CACHE)
 
-    if torch is not None:
-        payload["torch_available"] = True
-        payload["torch_version"] = getattr(torch, "__version__", "")
-        payload["runtime_status"] = "cpu"
+        runtime_state = inspect_runtime_environment()
+        payload: dict[str, object] = {
+            "torch_available": False,
+            "torch_version": "",
+            "torch_error": "",
+            "sentence_transformers_available": False,
+            "sentence_transformers_error": "",
+            "cuda_available": False,
+            "cuda_device_count": 0,
+            "cuda_name": "",
+            "gpu_present": False,
+            "gpu_name": "",
+            "nvcc_available": False,
+            "nvcc_version": "",
+            "device_options": ["auto", "cpu"],
+            "recommended_device": "cpu",
+            "runtime_status": "missing",
+            'runtime_exists': runtime_state['runtime_exists'],
+            'runtime_complete': runtime_state['runtime_complete'],
+            'runtime_missing_items': list(runtime_state['runtime_missing_items']),
+        }
+
+        gpu_names = _detect_nvidia_gpus()
+        if gpu_names:
+            payload["gpu_present"] = True
+            payload["gpu_name"] = gpu_names[0]
+
+        nvcc_version = _detect_nvcc_version()
+        if nvcc_version:
+            payload["nvcc_available"] = True
+            payload["nvcc_version"] = nvcc_version
+
         try:
-            cuda_available = bool(torch.cuda.is_available())
-        except Exception:
-            cuda_available = False
-        payload["cuda_available"] = cuda_available
-        if cuda_available:
+            import torch
+        except Exception as exc:
+            payload["torch_error"] = f"{type(exc).__name__}: {exc}"
+            torch = None
+
+        if torch is not None:
+            payload["torch_available"] = True
+            payload["torch_version"] = getattr(torch, "__version__", "")
+            payload["runtime_status"] = "cpu"
             try:
-                device_count = int(torch.cuda.device_count())
+                cuda_available = bool(torch.cuda.is_available())
             except Exception:
-                device_count = 0
-            payload["cuda_device_count"] = device_count
-            if device_count > 0:
+                cuda_available = False
+            payload["cuda_available"] = cuda_available
+            if cuda_available:
                 try:
-                    payload["cuda_name"] = str(torch.cuda.get_device_name(0))
+                    device_count = int(torch.cuda.device_count())
                 except Exception:
-                    payload["cuda_name"] = ""
-            payload["device_options"] = ["auto", "cpu", "cuda"]
-            payload["recommended_device"] = "cuda"
-            payload["runtime_status"] = "cuda"
-        elif gpu_names:
-            payload["recommended_device"] = "cpu"
+                    device_count = 0
+                payload["cuda_device_count"] = device_count
+                if device_count > 0:
+                    try:
+                        payload["cuda_name"] = str(torch.cuda.get_device_name(0))
+                    except Exception:
+                        payload["cuda_name"] = ""
+                payload["device_options"] = ["auto", "cpu", "cuda"]
+                payload["recommended_device"] = "cuda"
+                payload["runtime_status"] = "cuda"
+            elif gpu_names:
+                payload["recommended_device"] = "cpu"
 
-    try:
-        import sentence_transformers  # noqa: F401
-    except Exception as exc:
-        payload["sentence_transformers_error"] = f"{type(exc).__name__}: {exc}"
-    else:
-        payload["sentence_transformers_available"] = True
+        try:
+            import sentence_transformers  # noqa: F401
+        except Exception as exc:
+            payload["sentence_transformers_error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            payload["sentence_transformers_available"] = True
 
-    _ACCELERATION_CACHE = dict(payload)
-    return dict(payload)
-
+        _ACCELERATION_CACHE = dict(payload)
+        return dict(payload)
 
 def get_device_options() -> list[str]:
-    options = detect_acceleration().get("device_options") or ["auto", "cpu"]
-    return [str(item) for item in options]
+    acceleration = detect_acceleration()
+    options = [str(item) for item in (acceleration.get("device_options") or ["auto", "cpu"])]
+    if acceleration.get('gpu_present') and 'cuda' not in options:
+        options.append('cuda')
+    return options
 
 
 def resolve_vector_device(device_name: str | None) -> str:
@@ -682,105 +879,146 @@ def _detect_nvcc_version() -> str:
     return output.splitlines()[-1].strip() if output else ""
 
 
-def _runtime_dependency_message(runtime_name: str | None, device_name: str | None) -> str:
-    acceleration = detect_acceleration()
-    gpu_name = str(acceleration.get("gpu_name") or acceleration.get("cuda_name") or "").strip()
-    nvcc_version = str(acceleration.get("nvcc_version") or "").strip()
-    requested = (device_name or "auto").strip().lower() or "auto"
-    runtime_name = (runtime_name or "torch").strip().lower() or "torch"
-    wants_gpu = requested in {"auto", "gpu", "cuda"} and acceleration.get("gpu_present")
-    recommended_profile = "cuda" if wants_gpu else "cpu"
-
-    if getattr(sys, "frozen", False):
-        app_dir = Path(sys.executable).resolve().parent
-        install_script = app_dir / "InstallRuntime.ps1"
-        setup_doc = app_dir / "RUNTIME_SETUP.md"
-        relative_script = install_script.name if install_script.exists() else "InstallRuntime.ps1"
+def runtime_guidance_context(
+    runtime_name: str | None,
+    device_name: str | None,
+    *,
+    force_refresh: bool = False,
+    extra_detail: str = '',
+) -> dict[str, object]:
+    acceleration = detect_acceleration(force_refresh=force_refresh)
+    runtime_state = inspect_runtime_environment()
+    requested = (device_name or 'auto').strip().lower() or 'auto'
+    runtime_name = (runtime_name or 'torch').strip().lower() or 'torch'
+    wants_gpu = requested in {'auto', 'gpu', 'cuda'} and bool(acceleration.get('gpu_present'))
+    recommended_profile = 'cuda' if wants_gpu else 'cpu'
+    app_dir = _application_root_dir()
+    runtime_dir = Path(runtime_state['runtime_dir'])
+    install_script = _install_runtime_script_path()
+    relative_script = _install_runtime_script_relative()
+    app_dir_literal = _powershell_literal(str(app_dir))
+    command = (
+        "PowerShell -ExecutionPolicy Bypass -NoProfile -Command "
+        f"\"Set-Location -LiteralPath '{app_dir_literal}'; & '{relative_script}' -Profile {recommended_profile}\""
+    )
+    gpu_name = str(acceleration.get('gpu_name') or acceleration.get('cuda_name') or '').strip()
+    nvcc_version = str(acceleration.get('nvcc_version') or '').strip()
+    if recommended_profile == 'cuda':
+        disk_usage = '约 4.3 GB - 4.6 GB'
+        download_usage = '约 3 GB - 5 GB'
     else:
-        app_dir = Path(__file__).resolve().parents[1]
-        install_script = app_dir / "scripts" / "install_runtime.ps1"
-        setup_doc = app_dir / "RUNTIME_SETUP.md"
-        relative_script = ".\\scripts\\install_runtime.ps1"
+        disk_usage = '约 1.3 GB - 2.0 GB'
+        download_usage = '约 1 GB - 2 GB'
 
-    direct_command = f'PowerShell -ExecutionPolicy Bypass -File "{install_script}" -Profile {recommended_profile}'
-    in_place_command = f'PowerShell -ExecutionPolicy Bypass -File "{relative_script}" -Profile {recommended_profile}'
-    cpu_command = f'PowerShell -ExecutionPolicy Bypass -File "{install_script}" -Profile cpu'
-    cuda_command = f'PowerShell -ExecutionPolicy Bypass -File "{install_script}" -Profile cuda'
-
-    if recommended_profile == "cuda":
-        disk_usage = "约 4.3 GB - 4.6 GB"
-        download_usage = "约 3 GB - 5 GB"
+    if acceleration.get('cuda_available'):
+        cuda_step_status = '已检测到可用 CUDA 环境'
+    elif acceleration.get('gpu_present') and nvcc_version:
+        cuda_step_status = f'已检测到系统 CUDA 工具链（{nvcc_version}）'
+    elif acceleration.get('gpu_present'):
+        cuda_step_status = '已检测到 NVIDIA 显卡，但还没检测到可用 CUDA 条件'
     else:
-        disk_usage = "约 1.3 GB - 2.0 GB"
-        download_usage = "约 1 GB - 2 GB"
+        cuda_step_status = '未检测到 NVIDIA 显卡或可用 CUDA 条件'
 
-    state_lines: list[str] = []
-    if acceleration.get("gpu_present"):
-        state_lines.append(f"- 显卡：{gpu_name or 'NVIDIA GPU'}")
-        if nvcc_version:
-            state_lines.append(f"- 系统 CUDA：{nvcc_version}")
+    missing_items = list(runtime_state['runtime_missing_items'])
+    if runtime_state['runtime_complete']:
+        runtime_step_status = 'runtime 已完整'
+    elif runtime_state['runtime_exists'] and runtime_state['runtime_has_content']:
+        runtime_step_status = 'runtime 已存在，但内容还不完整'
+    elif runtime_state['runtime_exists']:
+        runtime_step_status = 'runtime 文件夹已创建，但还是空的'
     else:
-        state_lines.append("- 显卡：未检测到 NVIDIA GPU")
+        runtime_step_status = '还没有检测到 runtime 文件夹'
 
-    if acceleration.get("torch_available"):
-        state_lines.append(f"- 程序内 PyTorch：已安装（{acceleration.get('torch_version') or 'unknown'}）")
-    else:
-        state_lines.append("- 程序内 PyTorch：未安装")
-
-    if acceleration.get("sentence_transformers_available"):
-        state_lines.append("- 程序内 sentence-transformers：已安装")
-    else:
-        state_lines.append("- 程序内 sentence-transformers：未安装")
-
-    state_lines.append(f"- 当前设备选择：{requested}")
-    state_lines.append(f"- 当前实际设备：{resolve_vector_device(requested)}")
-    if acceleration.get("torch_error"):
-        state_lines.append(f"- PyTorch 导入失败：{acceleration.get('torch_error')}")
-    if acceleration.get("sentence_transformers_error"):
-        state_lines.append(f"- sentence-transformers 导入失败：{acceleration.get('sentence_transformers_error')}")
-
-    setup_hint = f"说明文档：\n{setup_doc}" if setup_doc.exists() else "说明文档：RUNTIME_SETUP.md"
-
-    lines = [
-        "当前还不能开始本地语义建库或向量查询。",
-        "",
-        "原因",
-        f"- 这个轻量发布包没有内置 {runtime_name} / sentence-transformers 这类大型运行时。",
-        "- 现在缺少的不是模型目录，而是把文本编码成向量的本地运行时。",
-        "",
-        "当前状态",
-        *state_lines,
-        "",
-        "怎么安装",
-        "如果你已经在程序目录：",
-        in_place_command,
-        "",
-        "如果你现在不在程序目录，直接复制完整路径命令：",
-        direct_command,
-        "",
-        "安装后会发生什么",
-        f"- 会在下列目录创建 runtime 文件夹：{app_dir}",
-        "- 会安装 PyTorch、sentence-transformers 和相关依赖。",
-        "- 安装完成后，重启程序，再执行全量建库、模型预热或向量查询即可。",
-        "",
-        "大约需要多少空间",
-        f"- 最终落盘：{disk_usage}",
-        f"- 网络下载：{download_usage}",
-        "",
-        "如果你暂时只想走 CPU",
-        f"- 不需要把向量后端改成 disabled，直接安装 CPU 运行时即可：{cpu_command}",
+    current_status_lines = [
+        f"- 显卡：{gpu_name or '未检测到 NVIDIA GPU'}" if acceleration.get('gpu_present') else '- 显卡：未检测到 NVIDIA GPU',
+        f'- 系统 CUDA：{nvcc_version}' if nvcc_version else '- 系统 CUDA：未检测到',
+        f"- 程序内 PyTorch：已加载（{acceleration.get('torch_version') or 'unknown'}）" if acceleration.get('torch_available') else '- 程序内 PyTorch：未加载',
+        '- 程序内 sentence-transformers：已加载' if acceleration.get('sentence_transformers_available') else '- 程序内 sentence-transformers：未加载',
+        f'- 当前设备选择：{requested}',
+        f'- 当前实际设备：{resolve_vector_device(requested)}',
+        f"- runtime 文件夹：{'已检测到' if runtime_state['runtime_exists'] else '未检测到'}",
+        f"- runtime 完整性：{'完整' if runtime_state['runtime_complete'] else '不完整'}",
     ]
-    if acceleration.get("gpu_present") and recommended_profile != "cuda":
-        lines.extend([
-            "- 如果你以后想启用显卡，再改用这条命令：",
-            cuda_command,
-            "",
-        ])
-    lines.extend([
-        setup_hint,
-        "如果你现在完全不想安装运行时，才把“向量后端”改成 disabled，这会临时关闭向量检索。",
-    ])
-    return "\n".join(lines)
+    if missing_items:
+        current_status_lines.append(f"- runtime 缺少项：{', '.join(missing_items)}")
+    if acceleration.get('torch_error'):
+        current_status_lines.append(f"- PyTorch 导入失败：{acceleration.get('torch_error')}")
+    if acceleration.get('sentence_transformers_error'):
+        current_status_lines.append(f"- sentence-transformers 导入失败：{acceleration.get('sentence_transformers_error')}")
+
+    detail = str(extra_detail or '').strip()
+    problem_line = '- 你当前选择的是 CUDA(N卡GPU)，但显卡加速这部分还没准备好。' if requested == 'cuda' else '- 当前本地语义运行环境还没准备好，所以现在还不能执行本地语义建库或向量查询。'
+    cuda_step_title = '第一步：安装或确认 CUDA 环境' if requested == 'cuda' or recommended_profile == 'cuda' else '第一步：如果你以后想启用 CUDA(N卡GPU)，先安装或确认 CUDA 环境'
+    plain_lines = [
+        '当前还不能开始本地语义建库或向量查询。',
+        '',
+        '怎么了',
+        problem_line,
+        '- 现在要么还没检测到可直接使用的 CUDA 条件，要么当前程序目录下的 runtime 还没安装完整。',
+        '',
+        '为什么',
+        f'- 这个轻量发布包没有内置 {runtime_name}、PyTorch、LanceDB、sentence-transformers、pyarrow 这类大型运行时。',
+        '- 主程序可以先打开，但要做本地语义建库或向量查询，还需要把外置运行时补齐；如果你想走 GPU，还要另外满足 CUDA 条件。',
+        '',
+        '怎么做',
+        f'{cuda_step_title}（状态：{cuda_step_status}）',
+        f'- 官方链接（可复制）：{_CUDA_SETUP_GUIDE_URL}',
+        '- 做完后会发生什么：程序就能识别到系统里的 NVIDIA / CUDA 条件；如果第二步还没做，本地向量功能仍然不能直接运行。',
+        '',
+        f'第二步：在 Windows 终端里安装 runtime（状态：{runtime_step_status}）',
+        f'- 命令（可复制）：{command}',
+        f'- 会安装到：{runtime_dir}',
+        '- 安装后会发生什么：会补齐 PyTorch、LanceDB、sentence-transformers、pyarrow、onnxruntime 等本地运行时；重启程序后就能正常执行本地语义建库、向量查询和 GPU 加速。',
+        f'- 预计落盘：{disk_usage}；预计下载：{download_usage}',
+        '',
+        '当前状态',
+        *current_status_lines,
+        '',
+        '如果只使用CPU',
+        '- 也可以继续选择 lancedb，只是不走 CUDA 加速。',
+        '- 如果后面仍要使用本地语义建库或向量查询，还是先完成上面的 runtime 安装步骤。',
+    ]
+    if detail:
+        plain_lines.extend(['', '补充信息', detail])
+    return {
+        'runtime_name': runtime_name,
+        'requested_device': requested,
+        'recommended_profile': recommended_profile,
+        'app_dir': app_dir,
+        'runtime_dir': runtime_dir,
+        'install_script': install_script,
+        'install_command': command,
+        'cuda_guide_url': _CUDA_SETUP_GUIDE_URL,
+        'gpu_present': bool(acceleration.get('gpu_present')),
+        'gpu_name': gpu_name,
+        'nvcc_available': bool(acceleration.get('nvcc_available')),
+        'nvcc_version': nvcc_version,
+        'cuda_available': bool(acceleration.get('cuda_available')),
+        'torch_available': bool(acceleration.get('torch_available')),
+        'torch_version': str(acceleration.get('torch_version') or ''),
+        'torch_error': str(acceleration.get('torch_error') or ''),
+        'sentence_transformers_available': bool(acceleration.get('sentence_transformers_available')),
+        'sentence_transformers_error': str(acceleration.get('sentence_transformers_error') or ''),
+        'runtime_exists': bool(runtime_state['runtime_exists']),
+        'runtime_complete': bool(runtime_state['runtime_complete']),
+        'runtime_missing_items': missing_items,
+        'cuda_step_status': cuda_step_status,
+        'runtime_step_status': runtime_step_status,
+        'resolved_device': resolve_vector_device(requested),
+        'disk_usage': disk_usage,
+        'download_usage': download_usage,
+        'current_status_lines': current_status_lines,
+        'extra_detail': detail,
+        'plain_text': '\n'.join(plain_lines),
+    }
+
+
+def _runtime_dependency_message(runtime_name: str | None, device_name: str | None) -> str:
+    return str(runtime_guidance_context(runtime_name, device_name, force_refresh=True).get('plain_text') or '')
+
+
+def runtime_dependency_message(runtime_name: str | None, device_name: str | None) -> str:
+    return _runtime_dependency_message(runtime_name, device_name)
 
 def _configure_huggingface_environment(hf_home_dir: Path) -> None:
     hub_dir = hf_home_dir / "hub"
@@ -831,6 +1069,15 @@ def _clear_cuda_cache() -> None:
         return
 
 
+def _release_vector_memory(*, clear_cuda: bool = False) -> None:
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    if clear_cuda:
+        _clear_cuda_cache()
+
+
 def _distance_to_score(distance: float) -> float:
     return 1.0 / (1.0 + max(float(distance), 0.0))
 
@@ -858,6 +1105,37 @@ def _is_model_dir_ready(path: Path, runtime: str) -> bool:
 
 
 def _detect_nvidia_gpus() -> list[str]:
+    import os
+    if os.name == 'nt':
+        # On Windows + Python 3.13 + PySide6, subprocess.run can cause fatal
+        # 0x8001010d COM Access Violations when called from background threads.
+        # We bypass subprocess entirely and use NVML via ctypes if available.
+        try:
+            import ctypes
+            nvml = ctypes.WinDLL(r"C:\Windows\System32\nvml.dll")
+            nvml.nvmlInit_v2.restype = ctypes.c_int
+            if nvml.nvmlInit_v2() != 0:
+                return []
+            
+            count = ctypes.c_uint()
+            nvml.nvmlDeviceGetCount_v2(ctypes.byref(count))
+            
+            names = []
+            for i in range(count.value):
+                handle = ctypes.c_void_p()
+                nvml.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(handle))
+                
+                name_buf = ctypes.create_string_buffer(256)
+                nvml.nvmlDeviceGetName(handle, name_buf, 256)
+                names.append(name_buf.value.decode('utf-8', errors='replace'))
+                
+            nvml.nvmlShutdown()
+            return names
+        except Exception:
+            # Fallback to safe but empty if NVML fails (better than crash)
+            return []
+    
+    # Non-Windows safe path
     try:
         result = run_hidden(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -866,9 +1144,10 @@ def _detect_nvidia_gpus() -> list[str]:
             check=True,
             timeout=3,
         )
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+    except Exception:
         return []
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
 
 
 def _emit_progress(on_progress: Callable[[dict[str, object]], None] | None, payload: dict[str, object]) -> None:

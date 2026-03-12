@@ -4,11 +4,11 @@ from pathlib import Path
 
 
 _handles = []
-base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
 app_dir = Path(getattr(sys, "executable", base_dir)).resolve().parent if getattr(sys, "frozen", False) else base_dir
 runtime_dir = app_dir / "runtime"
 
-for candidate in (runtime_dir,):
+for candidate in (runtime_dir, base_dir / ".packages", base_dir / ".vendor"):
     if candidate.exists():
         candidate_path = str(candidate)
         if candidate_path not in sys.path:
@@ -22,18 +22,32 @@ search_dirs = [
     runtime_dir / "scipy.libs",
     runtime_dir / "torch" / "lib",
     runtime_dir / "onnxruntime",
+    runtime_dir / "onnxruntime" / "capi",
+    runtime_dir / "PySide6",
+    runtime_dir / "PySide6" / "plugins",
+    runtime_dir / "shiboken6",
+    runtime_dir / "tokenizers",
+    runtime_dir / "safetensors",
     base_dir,
-    base_dir / "pyarrow",
-    base_dir / "pyarrow.libs",
-    base_dir / "numpy.libs",
-    base_dir / "scipy.libs",
-    base_dir / "torch" / "lib",
+    base_dir / "PySide6",
+    base_dir / "PySide6" / "plugins",
+    base_dir / "shiboken6",
     base_dir / ".packages",
+    base_dir / ".packages" / "PySide6",
+    base_dir / ".packages" / "shiboken6",
     base_dir / ".packages" / "pyarrow",
     base_dir / ".packages" / "pyarrow.libs",
     base_dir / ".packages" / "numpy.libs",
     base_dir / ".packages" / "scipy.libs",
     base_dir / ".packages" / "torch" / "lib",
+    base_dir / "pyarrow",
+    base_dir / "pyarrow.libs",
+    base_dir / "numpy.libs",
+    base_dir / "scipy.libs",
+    base_dir / "torch" / "lib",
+    base_dir / "onnxruntime" / "capi",
+    base_dir / "tokenizers",
+    base_dir / "safetensors",
 ]
 existing = [str(path) for path in search_dirs if path.exists()]
 if existing:

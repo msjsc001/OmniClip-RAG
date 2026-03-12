@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .clipboard import copy_text
-from .config import AppConfig, DataPaths
+from .config import AppConfig, DataPaths, normalize_watch_resource_peak_percent
 from .errors import BuildCancelledError
 from .models import QueryInsights, QueryResult, SearchHit, SpaceEstimate
 from .parser import BLOCK_REF_RE, BULLET_RE, EMBED_RE, PAGE_REF_RE, PROPERTY_RE
@@ -49,9 +49,37 @@ WATCH_DELETE_CONFIRM_SECONDS = 3.0
 WATCH_REPAIR_INTERVAL_SECONDS = 20.0
 WATCH_STATE_VERSION = 1
 REBUILD_STATE_VERSION = 1
-REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS = 0.25
+INDEX_STATE_VERSION = 1
+REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS = 0.05
+REBUILD_PROGRESS_EMIT_ROW_INTERVAL = 4
 RENDER_UPDATE_BATCH_SIZE = 1024
 VECTOR_UPSERT_BATCH_SIZE = 256
+WATCH_READY_BATCH_LIMITS = {
+    5: 1,
+    10: 2,
+    15: 4,
+    20: 6,
+    30: 8,
+    40: 12,
+    50: 16,
+    60: 24,
+    70: 32,
+    80: 48,
+    90: 64,
+}
+WATCH_BATCH_COOLDOWNS = {
+    5: 1.1,
+    10: 0.9,
+    15: 0.75,
+    20: 0.6,
+    30: 0.45,
+    40: 0.32,
+    50: 0.24,
+    60: 0.16,
+    70: 0.1,
+    80: 0.05,
+    90: 0.0,
+}
 SENSITIVE_PLACEHOLDER = '[被RAG过滤/Filtered by RAG]'
 LOGSEQ_HIDDEN_PROPERTIES = {'id', 'collapsed'}
 LABELED_SECRET_PATTERNS = [
@@ -78,6 +106,7 @@ class OmniClipService:
         self.vector_index = create_vector_index(config, paths)
         self._rebuild_state_file = self.paths.state_dir / 'rebuild_state.json'
         self._watch_state_file = self.paths.state_dir / 'watch_state.json'
+        self._index_state_file = self.paths.state_dir / 'index_state.json'
         self._build_history_file = build_history_file(self.paths.state_dir)
         self._query_runtime_file = self.paths.state_dir / 'query_runtime.json'
         self._query_runtime_advisor = QueryRuntimeAdvisor(self._query_runtime_file)
@@ -89,6 +118,36 @@ class OmniClipService:
     def save_runtime_config(self) -> None:
         payload = asdict(self.config)
         self.paths.config_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    def _watch_peak_percent(self) -> int:
+        return normalize_watch_resource_peak_percent(getattr(self.config, 'watch_resource_peak_percent', 15), 15)
+
+    def _watch_batch_limit(self) -> int:
+        return WATCH_READY_BATCH_LIMITS.get(self._watch_peak_percent(), 16)
+
+    def _watch_post_batch_cooldown(self) -> float:
+        return WATCH_BATCH_COOLDOWNS.get(self._watch_peak_percent(), 0.24)
+
+    def _index_state(self, *, pending: dict[str, object] | None = None) -> str:
+        active_pending = self.pending_rebuild() if pending is None else pending
+        if isinstance(active_pending, dict):
+            return 'pending'
+        return 'ready' if self._read_index_state() is not None else 'missing'
+
+    def _index_ready(self, *, pending: dict[str, object] | None = None) -> bool:
+        return self._index_state(pending=pending) == 'ready'
+
+    def _require_ready_index(self, *, action: str) -> None:
+        state = self._index_state()
+        if state == 'ready':
+            return
+        if action == 'watch':
+            if state == 'pending':
+                raise RuntimeError('热监听不能接在未完成的全量建库后面。请先继续或重新完成全量建库。')
+            raise RuntimeError('索引还没建立，暂时不能启动热监听。请先完成一次全量建库。')
+        if state == 'pending':
+            raise RuntimeError('当前索引未完成，暂时不能查询。请先继续或重新完成全量建库。')
+        raise RuntimeError('索引还没建立，暂时不能查询。请先完成一次全量建库。')
 
     # Why: 真正影响速度的是目录遍历是否剪枝，而不是后面解析器里再过滤一次。
     def scan_vault(self) -> list[Path]:
@@ -105,8 +164,20 @@ class OmniClipService:
                 files.append((current_root / filename).resolve())
         return sorted(files)
 
-    def estimate_space(self) -> SpaceEstimate:
-        report = estimate_storage_for_vault(self.config, self.paths, files=self.scan_vault())
+    def estimate_space(
+        self,
+        *,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> SpaceEstimate:
+        report = estimate_storage_for_vault(
+            self.config,
+            self.paths,
+            on_progress=on_progress,
+            pause_event=pause_event,
+            cancel_event=cancel_event,
+        )
         self.store.record_preflight(report, str(self.config.vault_dir))
         return report
 
@@ -137,6 +208,7 @@ class OmniClipService:
         if state is None or not self._can_resume_rebuild_state(state, manifest):
             if resume and self._rebuild_state_file.exists():
                 self.discard_pending_rebuild()
+            self._clear_index_state()
             self._start_fresh_rebuild_state(manifest)
             self.store.reset_all()
             self.vector_index.reset()
@@ -319,6 +391,7 @@ class OmniClipService:
         )
         self._clear_rebuild_state()
         self._clear_watch_state()
+        self._write_index_state(stats)
         return stats
 
     def reindex_paths(self, changed_relative_paths: list[str], deleted_relative_paths: list[str]) -> dict[str, object]:
@@ -439,6 +512,7 @@ class OmniClipService:
         score_threshold: float | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
     ) -> QueryResult:
+        self._require_ready_index(action='query')
         started_at = time.perf_counter()
         limit = max(int(limit or self.config.query_limit or 0), 1)
         profile = build_query_profile(query_text, limit)
@@ -598,6 +672,7 @@ class OmniClipService:
         force_polling: bool = False,
         on_update: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
+        self._require_ready_index(action='watch')
         interval = interval or self.config.poll_interval_seconds
         if not force_polling and WATCHDOG_AVAILABLE:
             self._watch_with_watchdog(interval, stop_event, on_update)
@@ -616,6 +691,9 @@ class OmniClipService:
                 'run_at': latest['run_at'],
             }
         pending = self.pending_rebuild()
+        index_state = self._index_state(pending=pending)
+        index_ready = index_state == 'ready'
+        index_status = self._read_index_state()
         resolved_vault = str(self.config.vault_dir) if self.config.vault_path else ''
         query_recommendation = asdict(self._query_runtime_advisor.current_recommendation(resolve_vector_device(self.config.vector_device), getattr(self.config, 'reranker_enabled', False)))
         return {
@@ -632,6 +710,11 @@ class OmniClipService:
             'latest_preflight': latest_preflight,
             'watchdog_available': WATCHDOG_AVAILABLE,
             'pending_rebuild': pending,
+            'index_state': index_state,
+            'index_ready': index_ready,
+            'watch_allowed': index_ready,
+            'query_allowed': index_ready,
+            'index_completed_at': str((index_status or {}).get('completed_at') or ''),
             'query_limit_recommendation': query_recommendation,
         }
 
@@ -654,6 +737,7 @@ class OmniClipService:
         self.store.reset_all()
         self._clear_rebuild_state()
         self._clear_watch_state()
+        self._clear_index_state()
 
     def open_data_dir(self) -> None:
         import os as _os
@@ -684,6 +768,7 @@ class OmniClipService:
                 self.paths.sqlite_file.unlink()
             self._clear_rebuild_state()
             self._clear_watch_state()
+            self._clear_index_state()
             self.store = MetadataStore(self.paths.sqlite_file)
         if clear_logs:
             _clear_directory(self.paths.logs_dir)
@@ -734,6 +819,8 @@ class OmniClipService:
         previous_snapshot, offline_reason = self._snapshot_safe()
         buffer = _LiveWatchBuffer(WATCH_STABLE_FILE_SECONDS, WATCH_DELETE_CONFIRM_SECONDS)
         last_repair_at = 0.0
+        batch_limit = max(self._watch_batch_limit(), 1)
+        batch_cooldown = max(self._watch_post_batch_cooldown(), 0.0)
 
         if previous_snapshot is None:
             previous_snapshot = self.store.fetch_file_manifest()
@@ -802,6 +889,19 @@ class OmniClipService:
 
             ready_changed, ready_deleted = buffer.pop_ready(current_snapshot, now)
             if ready_changed or ready_deleted:
+                deferred_changed: list[str] = []
+                deferred_deleted: list[str] = []
+                if (len(ready_changed) + len(ready_deleted)) > batch_limit:
+                    budget = batch_limit
+                    limited_changed = ready_changed[:budget]
+                    budget = max(budget - len(limited_changed), 0)
+                    limited_deleted = ready_deleted[:budget]
+                    deferred_changed = ready_changed[len(limited_changed):]
+                    deferred_deleted = ready_deleted[len(limited_deleted):]
+                    ready_changed = limited_changed
+                    ready_deleted = limited_deleted
+                    if deferred_changed or deferred_deleted:
+                        buffer.requeue(deferred_changed, deferred_deleted, current_snapshot, now, ready=True)
                 try:
                     stats = self.reindex_paths(ready_changed, ready_deleted)
                 except Exception as exc:
@@ -828,6 +928,9 @@ class OmniClipService:
                 _emit_watch_update(on_update, mode, [], [], self.store.stats(), events=events, note_only=True)
 
             previous_snapshot = current_snapshot
+            if batch_cooldown > 0.0 and (ready_changed or ready_deleted):
+                if stop_event.wait(batch_cooldown):
+                    break
 
     def _snapshot(self) -> dict[str, tuple[float, int]]:
         snapshot, _ = self._snapshot_safe()
@@ -930,7 +1033,7 @@ class OmniClipService:
                 self.store.update_rendered_chunks(payloads)
                 payloads = []
             now = time.time()
-            if index == total_rows or (now - last_emit_at) >= REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS:
+            if index == total_rows or (index % REBUILD_PROGRESS_EMIT_ROW_INTERVAL) == 0 or (now - last_emit_at) >= REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS:
                 last_emit_at = now
                 eta_seconds, overall_percent = (eta_tracker.estimate(
                     stage='rendering',
@@ -1068,6 +1171,43 @@ class OmniClipService:
 
     def _write_rebuild_state(self, state: dict[str, object]) -> None:
         _write_json_atomic(self._rebuild_state_file, state)
+
+    def _default_index_state(self) -> dict[str, object]:
+        return {
+            'version': INDEX_STATE_VERSION,
+            'vault_path': str(self.config.vault_dir),
+            'completed_at': _utc_now(),
+        }
+
+    def _read_index_state(self) -> dict[str, object] | None:
+        if not self._index_state_file.exists():
+            return None
+        try:
+            state = json.loads(self._index_state_file.read_text(encoding='utf-8'))
+        except Exception:
+            return None
+        if int(state.get('version', 0) or 0) != INDEX_STATE_VERSION:
+            return None
+        if state.get('vault_path') != str(self.config.vault_dir):
+            return None
+        return state
+
+    def _write_index_state(self, stats: dict[str, object] | None = None) -> None:
+        state = self._default_index_state()
+        if isinstance(stats, dict):
+            state['stats'] = {
+                'files': int(stats.get('files', 0) or 0),
+                'chunks': int(stats.get('chunks', 0) or 0),
+                'refs': int(stats.get('refs', 0) or 0),
+            }
+        _write_json_atomic(self._index_state_file, state)
+
+    def _clear_index_state(self) -> None:
+        if self._index_state_file.exists():
+            try:
+                self._index_state_file.unlink()
+            except OSError:
+                pass
 
     def _default_watch_state(self) -> dict[str, object]:
         return {
@@ -1229,18 +1369,22 @@ class _LiveWatchBuffer:
         deleted: list[str],
         snapshot: dict[str, tuple[float, int]],
         now: float | None = None,
+        *,
+        ready: bool = False,
     ) -> None:
         recorded_at = time.time() if now is None else now
+        changed_seen_at = recorded_at - self.stable_seconds if ready else recorded_at
+        deleted_seen_at = recorded_at - self.delete_confirm_seconds if ready else recorded_at
         for relative_path in changed:
             metadata = snapshot.get(relative_path)
             if metadata is None:
                 continue
-            self._changed[relative_path] = {'first_seen': recorded_at, 'metadata': metadata}
+            self._changed[relative_path] = {'first_seen': changed_seen_at, 'metadata': metadata}
             self._deleted.pop(relative_path, None)
         for relative_path in deleted:
             if relative_path in snapshot:
                 continue
-            self._deleted[relative_path] = recorded_at
+            self._deleted[relative_path] = deleted_seen_at
             self._changed.pop(relative_path, None)
 
 

@@ -18,4 +18,5 @@ if ($env:PYTHONPATH) {
     $env:PYTHONPATH = $joined
 }
 
-& $python -m omniclip_rag.gui @args
+& $python launcher.py @args
+

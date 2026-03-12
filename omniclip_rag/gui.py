@@ -20,12 +20,14 @@ from .config import (
     AppConfig,
     UI_SCALE_PERCENT_MAX,
     UI_SCALE_PERCENT_MIN,
+    WATCH_RESOURCE_PEAK_OPTIONS,
     default_data_root,
     ensure_data_paths,
     load_config,
     normalize_ui_scale_percent,
     normalize_ui_theme,
     normalize_vault_path,
+    normalize_watch_resource_peak_percent,
     save_config,
 )
 from .errors import BuildCancelledError, RuntimeDependencyError
@@ -39,7 +41,7 @@ from .reranker import get_local_reranker_dir, is_local_reranker_ready
 from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.1.11"
+APP_VERSION = "V0.2.0"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 _CONTEXT_PAGE_RE = re.compile(r'^# 笔记名：(.*)$')
 _CONTEXT_FRAGMENT_RE = re.compile(r'^笔记片段\d+：$')
@@ -49,6 +51,8 @@ UI_QUEUE_IDLE_POLL_MS = 120
 UI_CONTEXT_DEFER_MS = 45
 UI_CONTEXT_DEFER_HIT_THRESHOLD = 8
 UI_LAYOUT_DEFER_MS = 24
+UI_WINDOW_INTERACTION_SETTLE_MS = 140
+UI_NOTEBOOK_LAYOUT_DEFER_MS = 18
 UI_DEFAULT_SCALE_PERCENT = 100
 DEFAULT_PAGE_FILTER_RULES: tuple[tuple[bool, str], ...] = (
     (True, r"^2026-.*\.android$"),
@@ -340,6 +344,7 @@ class OmniClipDesktopApp:
             'card_title': ('Segoe UI Semibold', self._scaled_size(12, minimum=10)),
             'body': ('Segoe UI', self._scaled_size(10)),
             'small': ('Segoe UI', self._scaled_size(9)),
+            'small_bold': ('Segoe UI Semibold', self._scaled_size(9)),
             'chip': ('Segoe UI Semibold', self._scaled_size(9)),
             'value': ('Segoe UI Semibold', self._scaled_size(15, minimum=11)),
         }
@@ -475,9 +480,10 @@ class OmniClipDesktopApp:
         self.device_summary_var = tk.StringVar(value="")
         self.limit_var = tk.StringVar(value="15")
         self.limit_var.trace_add('write', lambda *_args: self._refresh_query_limit_guidance())
-        self.score_threshold_var = tk.StringVar(value="20")
+        self.score_threshold_var = tk.StringVar(value="35")
         self.interval_var = tk.StringVar(value="2.0")
         self.build_resource_profile_var = tk.StringVar(value=self._build_profile_label('balanced'))
+        self.watch_resource_peak_var = tk.StringVar(value=self._watch_peak_label(15))
         self.query_var = tk.StringVar()
         self.query_status_title_var = tk.StringVar(value=self._tr("query_status_idle_title"))
         self.query_status_detail_var = tk.StringVar(value=self._tr("query_status_idle_detail"))
@@ -523,7 +529,9 @@ class OmniClipDesktopApp:
         self.clear_cache_var = tk.BooleanVar(value=False)
         self.clear_exports_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value=self._tr("status_ready"))
+        self.ui_layout_has_user_state = False
         self.preflight_var = tk.StringVar(value=self._tr("preflight_empty"))
+        self.preflight_notice_var = tk.StringVar(value="")
         self.watch_var = tk.StringVar(value=self._default_watch_summary())
         self.files_var = tk.StringVar(value="0")
         self.chunks_var = tk.StringVar(value="0")
@@ -552,10 +560,18 @@ class OmniClipDesktopApp:
         self.context_after_id: str | None = None
         self.layout_after_id: str | None = None
         self.capture_after_id: str | None = None
+        self.ui_interaction_after_id: str | None = None
         self.deferred_ui_after_ids: dict[str, str] = {}
+        self.notebook_layout_states: dict[str, dict[str, object]] = {}
+        self.canvas_sync_states: dict[str, dict[str, object]] = {}
+        self.responsive_wrap_groups: dict[str, dict[str, object]] = {}
+        self.ui_interaction_active = False
+        self.last_root_size: tuple[int, int] = (0, 0)
         self.active_task_key: str | None = None
         self.active_task_config: AppConfig | None = None
         self.resume_prompt_workspace_id: str | None = None
+        self.status_snapshot: dict[str, object] | None = None
+        self.watch_stop_requested = False
         self.current_query_text = ""
         self.selected_chunk_ids: set[str] = set()
         self.device_options = get_device_options()
@@ -563,6 +579,7 @@ class OmniClipDesktopApp:
         self.ui_main_sash = 900
         self.ui_right_sash = 280
         self.ui_results_sash = 300
+        self.ui_layout_has_user_state = False
 
     def _tr(self, key: str, **kwargs) -> str:
         return text(self.language_code, key, **kwargs)
@@ -592,6 +609,56 @@ class OmniClipDesktopApp:
             self._build_profile_label('balanced'),
             self._build_profile_label('peak'),
         ]
+
+    def _watch_peak_label(self, value: object) -> str:
+        normalized = normalize_watch_resource_peak_percent(value, 15)
+        return self._tr('watch_peak_option', value=normalized)
+
+    def _watch_peak_choices(self) -> list[str]:
+        return [self._watch_peak_label(value) for value in WATCH_RESOURCE_PEAK_OPTIONS]
+
+    def _watch_peak_value(self, label: str) -> int:
+        normalized = str(label or '').strip()
+        for value in WATCH_RESOURCE_PEAK_OPTIONS:
+            localized = self._watch_peak_label(value)
+            if normalized == localized or normalized == str(value):
+                return int(value)
+        return normalize_watch_resource_peak_percent(normalized, 15)
+
+    def _current_index_state(self, payload: dict[str, object] | None = None) -> str:
+        source = payload if isinstance(payload, dict) else (self.status_snapshot if isinstance(self.status_snapshot, dict) else {})
+        raw = str(source.get('index_state') or '').strip().lower()
+        if raw in {'ready', 'missing', 'pending'}:
+            return raw
+        if isinstance(source.get('pending_rebuild'), dict):
+            return 'pending'
+        if bool(source.get('index_ready')):
+            return 'ready'
+        stats = source.get('stats') or {}
+        return 'ready' if int(stats.get('chunks', 0) or 0) > 0 else 'missing'
+
+    def _index_ready(self, payload: dict[str, object] | None = None) -> bool:
+        return self._current_index_state(payload) == 'ready'
+
+    def _watch_allowed(self, payload: dict[str, object] | None = None) -> bool:
+        source = payload if isinstance(payload, dict) else self.status_snapshot
+        if isinstance(source, dict) and 'watch_allowed' in source:
+            return bool(source.get('watch_allowed'))
+        return self._index_ready(payload)
+
+    def _refresh_preflight_notice(self) -> None:
+        show_notice = self.current_report is not None or self.latest_preflight_snapshot is not None
+        self.preflight_notice_var.set(self._tr('preflight_success_notice_plain') if show_notice else '')
+        label = getattr(self, 'preflight_notice_label', None)
+        if label is not None:
+            if show_notice:
+                label.grid()
+            else:
+                label.grid_remove()
+
+    def _open_preflight_log(self) -> None:
+        if self.preflight_notice_var.get().strip():
+            self._show_query_workspace(2)
 
     def _default_watch_summary(self) -> str:
         watch_text = self._tr("watch_ready") if WATCHDOG_AVAILABLE else self._tr("watch_fallback")
@@ -662,6 +729,34 @@ class OmniClipDesktopApp:
         for key in list(self.deferred_ui_after_ids):
             self._cancel_deferred_ui_callback(key)
 
+    def _cancel_window_geometry_capture(self) -> None:
+        if self.capture_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self.capture_after_id)
+        except Exception:
+            pass
+        self.capture_after_id = None
+
+    def _cancel_ui_interaction_timer(self) -> None:
+        if self.ui_interaction_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self.ui_interaction_after_id)
+        except Exception:
+            pass
+        self.ui_interaction_after_id = None
+
+    def _effective_ui_delay(self, key: str, delay_ms: int) -> int:
+        delay = max(int(delay_ms), 0)
+        if self.ui_interaction_active and (
+            key.startswith('wrap-group:')
+            or key.startswith('canvas-sync:')
+            or key == 'window-layout:refresh'
+        ):
+            return max(delay, UI_WINDOW_INTERACTION_SETTLE_MS)
+        return delay
+
     def _schedule_deferred_ui_callback(self, key: str, callback, *, delay_ms: int = UI_LAYOUT_DEFER_MS) -> None:
         self._cancel_deferred_ui_callback(key)
         if not self.root.winfo_exists():
@@ -671,7 +766,236 @@ class OmniClipDesktopApp:
             self.deferred_ui_after_ids.pop(key, None)
             callback()
 
-        self.deferred_ui_after_ids[key] = self.root.after(max(int(delay_ms), 0), _run)
+        self.deferred_ui_after_ids[key] = self.root.after(self._effective_ui_delay(key, delay_ms), _run)
+
+    def _queue_window_geometry_capture(self, *, delay_ms: int = UI_WINDOW_INTERACTION_SETTLE_MS) -> None:
+        self._cancel_window_geometry_capture()
+        if not self.root.winfo_exists():
+            return
+        self.capture_after_id = self.root.after(max(int(delay_ms), 0), self._capture_window_geometry)
+
+    def _begin_ui_interaction(self, *, settle_ms: int = UI_WINDOW_INTERACTION_SETTLE_MS) -> None:
+        if not self.root.winfo_exists():
+            return
+        self.ui_interaction_active = True
+        self._cancel_ui_interaction_timer()
+        self.ui_interaction_after_id = self.root.after(max(int(settle_ms), 0), self._end_ui_interaction)
+
+    def _end_ui_interaction(self) -> None:
+        self.ui_interaction_after_id = None
+        self.ui_interaction_active = False
+        self._capture_window_geometry()
+        self._schedule_deferred_ui_callback('window-layout:refresh', self._refresh_visible_ui_layout, delay_ms=0)
+
+    def _widget_is_viewable(self, widget: tk.Widget | None) -> bool:
+        if widget is None:
+            return False
+        try:
+            return bool(int(widget.winfo_exists()) and int(widget.winfo_viewable()))
+        except Exception:
+            return False
+
+    def _is_widget_descendant(self, widget: tk.Widget | None, ancestor: tk.Widget | None) -> bool:
+        if widget is None or ancestor is None:
+            return False
+        current = widget
+        while current is not None:
+            if current is ancestor:
+                return True
+            try:
+                parent_name = current.winfo_parent()
+            except Exception:
+                return False
+            if not parent_name:
+                return False
+            try:
+                current = current.nametowidget(parent_name)
+            except Exception:
+                return False
+        return False
+
+    def _schedule_wrap_group_refresh(self, group_key: str, *, delay_ms: int = UI_LAYOUT_DEFER_MS, force: bool = False) -> None:
+        group = self.responsive_wrap_groups.get(group_key)
+        if group is None:
+            return
+        group['force'] = bool(group.get('force')) or force
+        self._schedule_deferred_ui_callback(
+            str(group.get('callback_key') or f'wrap-group:{group_key}'),
+            lambda key=group_key: self._apply_wrap_group(key),
+            delay_ms=delay_ms,
+        )
+
+    def _apply_wrap_group(self, group_key: str) -> None:
+        group = self.responsive_wrap_groups.get(group_key)
+        if group is None:
+            return
+        parent = group.get('parent')
+        try:
+            if not int(parent.winfo_exists()):
+                raise tk.TclError
+            width = int(parent.winfo_width())
+        except Exception:
+            self.responsive_wrap_groups.pop(group_key, None)
+            return
+
+        force = bool(group.get('force'))
+        group['force'] = False
+        widgets = group.get('widgets')
+        if not isinstance(widgets, dict):
+            self.responsive_wrap_groups.pop(group_key, None)
+            return
+
+        for widget_key, spec in list(widgets.items()):
+            widget = spec.get('widget')
+            try:
+                if not int(widget.winfo_exists()):
+                    raise tk.TclError
+            except Exception:
+                widgets.pop(widget_key, None)
+                continue
+            if width <= 1 or (not force and not self._widget_is_viewable(widget)):
+                continue
+
+            padding = int(spec.get('padding', 24) or 24)
+            min_wrap = int(spec.get('min_wrap', 220) or 220)
+            max_wrap = int(spec.get('max_wrap', 980) or 980)
+            available = max(0, width - self._scaled_px(padding, minimum=max(int(padding * 0.6), 8)))
+            wraplength = 0 if available < self._scaled_px(min_wrap, minimum=min_wrap) else min(self._scaled_px(max_wrap, minimum=max_wrap), available)
+            if spec.get('last_wraplength') != wraplength:
+                try:
+                    widget.configure(wraplength=wraplength)
+                except Exception:
+                    continue
+                spec['last_wraplength'] = wraplength
+
+        if not widgets:
+            self.responsive_wrap_groups.pop(group_key, None)
+
+    def _flush_canvas_sync(self, canvas_key: str) -> None:
+        state = self.canvas_sync_states.get(canvas_key)
+        if state is None:
+            return
+        canvas = state.get('canvas')
+        inner = state.get('inner')
+        try:
+            if not int(canvas.winfo_exists()) or not int(inner.winfo_exists()):
+                raise tk.TclError
+        except Exception:
+            self.canvas_sync_states.pop(canvas_key, None)
+            return
+
+        force = bool(state.get('force'))
+        pending_width = bool(state.get('pending_width'))
+        pending_scroll = bool(state.get('pending_scroll'))
+        state['force'] = False
+        state['pending_width'] = False
+        state['pending_scroll'] = False
+        viewable = self._widget_is_viewable(canvas) and self._widget_is_viewable(inner)
+
+        if pending_width:
+            if force or viewable:
+                try:
+                    width = int(canvas.winfo_width())
+                except Exception:
+                    width = 0
+                if width > 1 and state.get('last_width') != width:
+                    try:
+                        canvas.itemconfigure(int(state.get('window_id')), width=width)
+                    except Exception:
+                        pass
+                    else:
+                        state['last_width'] = width
+            else:
+                state['pending_width'] = True
+
+        if pending_scroll:
+            if force or viewable:
+                try:
+                    bbox = canvas.bbox('all')
+                except Exception:
+                    bbox = None
+                normalized_bbox = tuple(int(value) for value in bbox) if bbox else None
+                if normalized_bbox and state.get('last_scrollregion') != normalized_bbox:
+                    try:
+                        canvas.configure(scrollregion=normalized_bbox)
+                    except Exception:
+                        pass
+                    else:
+                        state['last_scrollregion'] = normalized_bbox
+            else:
+                state['pending_scroll'] = True
+
+    def _refresh_wrap_groups(self, *, root_widget: tk.Widget | None = None, force: bool = False) -> None:
+        for group_key, group in list(self.responsive_wrap_groups.items()):
+            parent = group.get('parent')
+            if root_widget is not None and not self._is_widget_descendant(parent, root_widget):
+                continue
+            group['force'] = bool(group.get('force')) or force
+            self._apply_wrap_group(group_key)
+
+    def _refresh_canvas_syncs(self, *, root_widget: tk.Widget | None = None, force: bool = False) -> None:
+        for canvas_key, state in list(self.canvas_sync_states.items()):
+            canvas = state.get('canvas')
+            if root_widget is not None and not self._is_widget_descendant(canvas, root_widget):
+                continue
+            state['pending_width'] = True
+            state['pending_scroll'] = True
+            state['force'] = bool(state.get('force')) or force
+            self._flush_canvas_sync(canvas_key)
+
+    def _refresh_visible_ui_layout(self) -> None:
+        self._refresh_wrap_groups(force=False)
+        self._refresh_canvas_syncs(force=False)
+
+    def _bind_notebook_layout_refresh(self, notebook: ttk.Notebook) -> None:
+        notebook_key = str(notebook)
+        state = self.notebook_layout_states.get(notebook_key)
+        if state is None or state.get('notebook') is not notebook:
+            self.notebook_layout_states[notebook_key] = {'notebook': notebook, 'force': False}
+        if not getattr(notebook, '_omniclip_layout_bound', False):
+            notebook.bind('<<NotebookTabChanged>>', lambda _event, ref=notebook: self._on_notebook_tab_changed(ref), add='+')
+            setattr(notebook, '_omniclip_layout_bound', True)
+        self._schedule_notebook_layout_refresh(notebook, delay_ms=0, force=True)
+
+    def _on_notebook_tab_changed(self, notebook: ttk.Notebook) -> None:
+        self._begin_ui_interaction(settle_ms=max(UI_NOTEBOOK_LAYOUT_DEFER_MS * 3, 48))
+        self._schedule_notebook_layout_refresh(notebook, delay_ms=0, force=True)
+
+    def _schedule_notebook_layout_refresh(self, notebook: ttk.Notebook, *, delay_ms: int = UI_NOTEBOOK_LAYOUT_DEFER_MS, force: bool = False) -> None:
+        notebook_key = str(notebook)
+        state = self.notebook_layout_states.get(notebook_key)
+        if state is None or state.get('notebook') is not notebook:
+            state = {'notebook': notebook, 'force': False}
+            self.notebook_layout_states[notebook_key] = state
+        state['force'] = bool(state.get('force')) or force
+        self._schedule_deferred_ui_callback(
+            f'notebook-layout:{notebook_key}',
+            lambda key=notebook_key: self._flush_notebook_layout(key),
+            delay_ms=delay_ms,
+        )
+
+    def _flush_notebook_layout(self, notebook_key: str) -> None:
+        state = self.notebook_layout_states.get(notebook_key)
+        if state is None:
+            return
+        notebook = state.get('notebook')
+        try:
+            if not int(notebook.winfo_exists()):
+                raise tk.TclError
+            selected_tab = notebook.select()
+        except Exception:
+            self.notebook_layout_states.pop(notebook_key, None)
+            return
+        force = bool(state.get('force'))
+        state['force'] = False
+        if not selected_tab:
+            return
+        try:
+            selected_widget = notebook.nametowidget(selected_tab)
+        except Exception:
+            return
+        self._refresh_wrap_groups(root_widget=selected_widget, force=force)
+        self._refresh_canvas_syncs(root_widget=selected_widget, force=force)
 
     def _cancel_scheduled_context_refresh(self) -> None:
         if self.context_after_id is None:
@@ -919,6 +1243,12 @@ class OmniClipDesktopApp:
         if self.root.winfo_children():
             self._capture_layout_state()
         self._cancel_all_deferred_ui_callbacks()
+        self._cancel_window_geometry_capture()
+        self._cancel_ui_interaction_timer()
+        self.ui_interaction_active = False
+        self.notebook_layout_states.clear()
+        self.canvas_sync_states.clear()
+        self.responsive_wrap_groups.clear()
 
         if hasattr(self, "main_tabs"):
             try:
@@ -1018,6 +1348,7 @@ class OmniClipDesktopApp:
 
         self.main_tabs.add(self.left, text=self._tr("main_tab_query"))
         self.main_tabs.add(self.right, text=self._tr("main_tab_config"))
+        self._bind_notebook_layout_refresh(self.main_tabs)
 
         self.right_pane = ttk.Panedwindow(self.left, orient="vertical")
         self.right_pane.grid(row=0, column=0, sticky="nsew")
@@ -1045,13 +1376,41 @@ class OmniClipDesktopApp:
         tk.Label(footer, textvariable=self.result_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="e").grid(row=0, column=1, sticky="e", padx=12, pady=7)
 
     def _bind_layout_tracking(self) -> None:
-        self.root.bind("<Configure>", self._capture_window_geometry)
+        self.last_root_size = (max(int(self.root.winfo_width()), 0), max(int(self.root.winfo_height()), 0))
+        self.root.bind("<Configure>", self._on_root_configure)
         for pane_name in ("right_pane", "results_pane"):
             pane = getattr(self, pane_name, None)
             if pane is not None:
-                pane.bind("<ButtonRelease-1>", self._capture_layout_state)
+                pane.bind("<ButtonPress-1>", self._on_pane_interaction, add='+')
+                pane.bind("<B1-Motion>", self._on_pane_interaction, add='+')
+                pane.bind("<ButtonRelease-1>", self._on_pane_interaction_end, add='+')
+
+    def _on_root_configure(self, event=None) -> None:
+        if event is not None:
+            try:
+                if event.widget is not self.root:
+                    return
+            except Exception:
+                return
+            width = max(int(getattr(event, 'width', 0) or 0), 0)
+            height = max(int(getattr(event, 'height', 0) or 0), 0)
+            if width > 1 and height > 1:
+                current_size = (width, height)
+                if current_size != self.last_root_size:
+                    self.last_root_size = current_size
+                    self._begin_ui_interaction()
+        self._queue_window_geometry_capture()
+
+    def _on_pane_interaction(self, _event=None) -> None:
+        self._begin_ui_interaction()
+
+    def _on_pane_interaction_end(self, _event=None) -> None:
+        self._capture_layout_state()
+        self._schedule_deferred_ui_callback('layout:persist', self._persist_layout_state_snapshot, delay_ms=180)
+        self._begin_ui_interaction(settle_ms=max(UI_NOTEBOOK_LAYOUT_DEFER_MS * 3, 48))
 
     def _capture_window_geometry(self, _event=None) -> None:
+        self.capture_after_id = None
         try:
             if self.root.winfo_exists():
                 self.ui_window_geometry = self.root.geometry()
@@ -1063,6 +1422,7 @@ class OmniClipDesktopApp:
             self.ui_window_geometry = self.root.geometry()
         except Exception:
             pass
+        captured = False
         for attr_name, state_name in (("main_pane", "ui_main_sash"), ("right_pane", "ui_right_sash"), ("results_pane", "ui_results_sash")):
             pane = getattr(self, attr_name, None)
             if pane is None:
@@ -1073,6 +1433,56 @@ class OmniClipDesktopApp:
                 continue
             if position > 0:
                 setattr(self, state_name, position)
+                captured = True
+        if captured:
+            self.ui_layout_has_user_state = True
+
+    def _legacy_layout_value(self, state_name: str) -> int | None:
+        return {
+            'ui_right_sash': 280,
+            'ui_results_sash': 300,
+        }.get(state_name)
+
+    def _pane_default_position(self, pane, state_name: str, requested: int) -> int:
+        total = pane.winfo_width() if str(pane.cget('orient')) == 'horizontal' else pane.winfo_height()
+        if total <= 1:
+            return max(int(requested or 1), 1)
+        if state_name == 'ui_right_sash':
+            preferred = max(int(getattr(self, 'search_host', pane).winfo_reqheight()), self._scaled_px(250, minimum=220))
+            return min(preferred, max(total - self._scaled_px(180, minimum=160), self._scaled_px(220, minimum=180)))
+        if state_name == 'ui_results_sash':
+            preferred = int(round(total * 0.48))
+            preferred = max(preferred, self._scaled_px(150, minimum=120))
+            return preferred
+        return int(requested or 1)
+
+    def _resolve_layout_position(self, pane, state_name: str, requested: int, *, min_first: int, min_second: int) -> int:
+        desired = int(requested or 0)
+        if desired <= 0:
+            desired = self._pane_default_position(pane, state_name, requested)
+        elif desired == self._legacy_layout_value(state_name):
+            desired = self._pane_default_position(pane, state_name, requested)
+        return self._clamp_sash_position(pane, desired, min_first=min_first, min_second=min_second)
+
+    def _persist_layout_state_snapshot(self) -> None:
+        try:
+            active_vault = normalize_vault_path(self.vault_var.get().strip())
+            paths = ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()), active_vault or None)
+            config = load_config(paths)
+            if config is None:
+                config = AppConfig(
+                    vault_path=active_vault,
+                    vault_paths=self._collect_vault_paths(active_vault),
+                    data_root=str(paths.global_root),
+                )
+            else:
+                config.vault_path = active_vault
+                config.vault_paths = self._collect_vault_paths(active_vault)
+                config.data_root = str(paths.global_root)
+            self._sync_runtime_layout_to_config(config)
+            save_config(config, paths)
+        except Exception:
+            pass
 
     def _apply_layout_state(self) -> None:
         geometry = (self.ui_window_geometry or '').strip()
@@ -1084,27 +1494,41 @@ class OmniClipDesktopApp:
 
         pane_specs = (
             ("main_pane", "ui_main_sash", 760, 420),
-            ("right_pane", "ui_right_sash", 260, 420),
-            ("results_pane", "ui_results_sash", 260, 280),
+            ("right_pane", "ui_right_sash", 220, 140),
+            ("results_pane", "ui_results_sash", 96, 40),
         )
 
         def restore(attempt: int = 0) -> None:
             self.layout_after_id = None
             pending = False
+            needs_followup = False
             for attr_name, state_name, min_first, min_second in pane_specs:
                 pane = getattr(self, attr_name, None)
                 position = getattr(self, state_name, 0)
-                if pane is None or not position:
+                if pane is None:
                     continue
                 if pane.winfo_width() <= 1 and pane.winfo_height() <= 1:
                     pending = True
                     continue
                 try:
-                    pane.sashpos(0, self._clamp_sash_position(pane, int(position), min_first=min_first, min_second=min_second))
+                    target = self._resolve_layout_position(pane, state_name, int(position), min_first=min_first, min_second=min_second)
+                    pane.sashpos(0, target)
+                    if attr_name == 'right_pane':
+                        try:
+                            self.root.update_idletasks()
+                        except Exception:
+                            pass
+                    try:
+                        current = int(pane.sashpos(0))
+                    except Exception:
+                        current = target
+                    if abs(current - target) > 2:
+                        needs_followup = True
                 except Exception:
                     pending = True
-            if pending and attempt < 8 and self.root.winfo_exists():
-                self.layout_after_id = self.root.after(80, lambda: restore(attempt + 1))
+            if (pending or needs_followup) and attempt < 10 and self.root.winfo_exists():
+                delay = 80 if pending else 120
+                self.layout_after_id = self.root.after(delay, lambda: restore(attempt + 1))
 
         if self.layout_after_id is not None:
             try:
@@ -1113,6 +1537,8 @@ class OmniClipDesktopApp:
                 pass
             self.layout_after_id = None
         self.layout_after_id = self.root.after(0, restore)
+        self._schedule_deferred_ui_callback('layout:settle-restore', lambda: restore(0), delay_ms=320)
+        self._schedule_deferred_ui_callback('layout:late-restore', lambda: restore(0), delay_ms=680)
 
     def _sync_runtime_layout_to_config(self, config: AppConfig) -> None:
         self._capture_layout_state()
@@ -1136,8 +1562,10 @@ class OmniClipDesktopApp:
         total = pane.winfo_width() if orient == "horizontal" else pane.winfo_height()
         if total <= 1:
             return max(1, requested)
-        safe_first = max(80, min(min_first, max(total - 140, 80)))
-        safe_second = max(140, min(min_second, max(total - 80, 140)))
+        floor_first = self._scaled_px(64, minimum=56)
+        floor_second = self._scaled_px(40, minimum=36)
+        safe_first = max(floor_first, min(int(min_first), max(total - floor_second, floor_first)))
+        safe_second = max(floor_second, min(int(min_second), max(total - floor_first, floor_second)))
         upper = max(safe_first, total - safe_second)
         return max(safe_first, min(int(requested), upper))
 
@@ -1175,30 +1603,39 @@ class OmniClipDesktopApp:
         target.bind("<Leave>", _unbind)
 
     def _configure_canvas_window_sync(self, canvas: tk.Canvas, inner: tk.Widget, window_id: int, *, key_prefix: str) -> None:
-        def _sync_scrollregion() -> None:
-            try:
-                if not int(canvas.winfo_exists()) or not int(inner.winfo_exists()):
-                    return
-                bbox = canvas.bbox('all')
-            except Exception:
-                return
-            if bbox:
-                canvas.configure(scrollregion=bbox)
+        state = self.canvas_sync_states.get(key_prefix)
+        if state is None or state.get('canvas') is not canvas:
+            state = {
+                'canvas': canvas,
+                'inner': inner,
+                'window_id': window_id,
+                'pending_width': False,
+                'pending_scroll': False,
+                'force': False,
+                'last_width': None,
+                'last_scrollregion': None,
+            }
+            self.canvas_sync_states[key_prefix] = state
 
-        def _sync_width() -> None:
-            try:
-                if not int(canvas.winfo_exists()):
-                    return
-                width = int(canvas.winfo_width())
-            except Exception:
+        def _request(*, sync_width: bool = False, sync_scroll: bool = False, delay_ms: int = UI_LAYOUT_DEFER_MS, force: bool = False) -> None:
+            current = self.canvas_sync_states.get(key_prefix)
+            if current is None:
                 return
-            if width > 1:
-                canvas.itemconfigure(window_id, width=width)
+            if sync_width:
+                current['pending_width'] = True
+            if sync_scroll:
+                current['pending_scroll'] = True
+            current['force'] = bool(current.get('force')) or force
+            self._schedule_deferred_ui_callback(
+                f'canvas-sync:{key_prefix}',
+                lambda key=key_prefix: self._flush_canvas_sync(key),
+                delay_ms=delay_ms,
+            )
 
-        inner.bind('<Configure>', lambda _event: self._schedule_deferred_ui_callback(f'{key_prefix}:scroll', _sync_scrollregion), add='+')
-        canvas.bind('<Configure>', lambda _event: self._schedule_deferred_ui_callback(f'{key_prefix}:width', _sync_width), add='+')
-        self._schedule_deferred_ui_callback(f'{key_prefix}:init-scroll', _sync_scrollregion, delay_ms=0)
-        self._schedule_deferred_ui_callback(f'{key_prefix}:init-width', _sync_width, delay_ms=0)
+        inner.bind('<Configure>', lambda _event: _request(sync_scroll=True), add='+')
+        canvas.bind('<Configure>', lambda _event: _request(sync_width=True, sync_scroll=True), add='+')
+        canvas.bind('<Map>', lambda _event: _request(sync_width=True, sync_scroll=True, delay_ms=0, force=True), add='+')
+        _request(sync_width=True, sync_scroll=True, delay_ms=0, force=True)
 
     def _make_scrollable_tab(self, notebook: ttk.Notebook) -> tuple[tk.Frame, tk.Frame]:
         outer = tk.Frame(notebook, bg=self.colors["card"])
@@ -1250,6 +1687,7 @@ class OmniClipDesktopApp:
         self.left_tabs.add(ui_tab, text=self._tr("left_tab_ui"))
         self.left_tabs.add(retrieval_tab, text=self._tr("left_tab_retrieval"))
         self.left_tabs.add(data_tab, text=self._tr("left_tab_data"))
+        self._bind_notebook_layout_refresh(self.left_tabs)
 
         self._build_quick_start_card(start_body)
         self._build_settings_card(settings_body)
@@ -1359,12 +1797,16 @@ class OmniClipDesktopApp:
         preflight_label = tk.Label(status_panel, textvariable=self.preflight_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", anchor="w")
         preflight_label.grid(row=1, column=0, sticky="ew", padx=16, pady=(14, 4))
         self._configure_responsive_wrap(preflight_label, padding=20, min_wrap=220, max_wrap=520)
+        self.preflight_notice_label = tk.Label(status_panel, textvariable=self.preflight_notice_var, bg=self.colors["soft_2"], fg=self.colors["accent_dark"], font=self.fonts["small_bold"], justify="left", anchor="w", cursor="hand2")
+        self.preflight_notice_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 4))
+        self.preflight_notice_label.bind("<Button-1>", lambda _event: self._open_preflight_log())
+        self._configure_responsive_wrap(self.preflight_notice_label, padding=20, min_wrap=220, max_wrap=520)
         watch_label = tk.Label(status_panel, textvariable=self.watch_var, bg=self.colors["soft_2"], fg=self.colors["muted"], font=self.fonts["small"], justify="left", anchor="w")
-        watch_label.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+        watch_label.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 8))
         self._configure_responsive_wrap(watch_label, padding=20, min_wrap=220, max_wrap=520)
 
         task_panel = tk.Frame(status_panel, bg=self.colors["soft_2"], highlightbackground=self.colors["border"], highlightthickness=1)
-        task_panel.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 14))
+        task_panel.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 14))
         task_panel.grid_columnconfigure(0, weight=1)
         tk.Label(task_panel, text=self._tr("task_panel_title"), bg=self.colors["soft_2"], fg=self.colors["ink"], font=self.fonts["small"], anchor="w").grid(row=0, column=0, sticky="w", padx=12, pady=(10, 6))
         self.task_progress = ttk.Progressbar(task_panel, mode="indeterminate")
@@ -1418,6 +1860,7 @@ class OmniClipDesktopApp:
         self.device_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_device_options())
         self._entry_row(form, 3, self._tr("interval_label"), self.interval_var, tooltip_key="interval")
         self.build_profile_combo = self._combo_row(form, 4, self._tr("build_resource_profile_label"), self.build_resource_profile_var, self._build_profile_choices(), tooltip_key="build_resource_profile")
+        self.watch_peak_combo = self._combo_row(form, 5, self._tr("watch_resource_peak_label"), self.watch_resource_peak_var, self._watch_peak_choices(), tooltip_key="watch_resource_peak")
 
         action_panel = self._panel(parent, 1, pady=(12, 0))
         action_row = tk.Frame(action_panel, bg=self.colors["soft_2"])
@@ -1572,6 +2015,17 @@ class OmniClipDesktopApp:
         self.results_host.grid_rowconfigure(0, weight=1)
 
         search_card = self._card(self.search_host, self._tr("search_title"), self._tr("search_subtitle"), 0)
+        self.query_status_shell = tk.Frame(search_card, bg=self.colors["query_idle_bg"], highlightbackground=self.colors["query_idle_border"], highlightthickness=1)
+        self.query_status_shell.grid(row=0, column=1, sticky="ne", padx=(12, 16), pady=(12, 10))
+        self.query_status_shell.grid_columnconfigure(0, weight=1)
+        self.query_status_title_label = tk.Label(self.query_status_shell, textvariable=self.query_status_title_var, bg=self.colors["query_idle_bg"], fg=self.colors["query_idle_fg"], font=self.fonts["chip"], anchor="w")
+        self.query_status_title_label.grid(row=0, column=0, sticky="w", padx=14, pady=(10, 3))
+        self.query_status_detail_label = tk.Label(self.query_status_shell, textvariable=self.query_status_detail_var, bg=self.colors["query_idle_bg"], fg=self.colors["query_idle_fg"], font=self.fonts["small"], anchor="w", justify="left")
+        self.query_status_detail_label.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 10))
+        self._configure_responsive_wrap(self.query_status_detail_label, padding=28, min_wrap=220, max_wrap=320)
+        self._apply_query_status_style()
+        self._refresh_query_status_banner()
+
         tk.Label(search_card, text=self._tr("query_hint"), bg=self.colors["card"], fg=self.colors["accent_dark"], font=self.fonts["small"], anchor="w").grid(row=1, column=0, columnspan=2, sticky="w", padx=16)
         query_row = tk.Frame(search_card, bg=self.colors["card"])
         query_row.grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(10, 6))
@@ -1606,17 +2060,6 @@ class OmniClipDesktopApp:
         limit_entry.grid(row=0, column=3, sticky="w", padx=(8, 14))
         self.limit_entry_tooltip = self._attach_tooltip(limit_entry, "limit")
         tk.Label(query_meta, textvariable=self.query_limit_hint_var, bg=self.colors["card"], fg=self.colors["muted"], font=self.fonts["small"], anchor="w", justify="left").grid(row=1, column=0, columnspan=5, sticky="w", pady=(8, 0))
-
-        self.query_status_shell = tk.Frame(search_card, bg=self.colors["query_idle_bg"], highlightbackground=self.colors["query_idle_border"], highlightthickness=1)
-        self.query_status_shell.grid(row=4, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 14))
-        self.query_status_shell.grid_columnconfigure(0, weight=1)
-        self.query_status_title_label = tk.Label(self.query_status_shell, textvariable=self.query_status_title_var, bg=self.colors["query_idle_bg"], fg=self.colors["query_idle_fg"], font=self.fonts["chip"], anchor="w")
-        self.query_status_title_label.grid(row=0, column=0, sticky="w", padx=14, pady=(12, 4))
-        self.query_status_detail_label = tk.Label(self.query_status_shell, textvariable=self.query_status_detail_var, bg=self.colors["query_idle_bg"], fg=self.colors["query_idle_fg"], font=self.fonts["small"], anchor="w", justify="left")
-        self.query_status_detail_label.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 12))
-        self._configure_responsive_wrap(self.query_status_detail_label, padding=28, min_wrap=260, max_wrap=760)
-        self._apply_query_status_style()
-        self._refresh_query_status_banner()
 
         result_card = self._card(self.results_host, self._tr("results_title"), self._tr("results_subtitle"), 0)
         result_card.grid_rowconfigure(2, weight=1)
@@ -1679,6 +2122,7 @@ class OmniClipDesktopApp:
         self.tabs.add(preview_tab, text=self._tr("tab_preview"))
         self.tabs.add(context_tab, text=self._tr("tab_context"))
         self.tabs.add(log_tab, text=self._tr("tab_log"))
+        self._bind_notebook_layout_refresh(self.tabs)
         self.preview_text = self._text(preview_tab, "preview")
         self.context_text = self._text(context_tab, "context", top_builder=self._build_context_jump_controls)
         self.log_text = self._text(log_tab, "log")
@@ -1949,28 +2393,32 @@ class OmniClipDesktopApp:
         except Exception:
             return
 
-        callback_key = f'wrap:{str(widget)}'
+        group_key = str(parent)
+        group = self.responsive_wrap_groups.get(group_key)
+        if group is None or group.get('parent') is not parent:
+            group = {
+                'parent': parent,
+                'callback_key': f'wrap-group:{group_key}',
+                'widgets': {},
+                'force': False,
+                'bound': False,
+            }
+            self.responsive_wrap_groups[group_key] = group
 
-        def _apply_wrap() -> None:
-            try:
-                if not int(widget.winfo_exists()) or not int(parent.winfo_exists()):
-                    return
-                width = parent.winfo_width()
-            except Exception:
-                return
-            available = max(0, int(width) - self._scaled_px(padding, minimum=max(int(padding * 0.6), 8)))
-            wraplength = 0 if available < self._scaled_px(min_wrap, minimum=min_wrap) else min(self._scaled_px(max_wrap, minimum=max_wrap), available)
-            try:
-                current = int(widget.cget("wraplength"))
-            except Exception:
-                current = -1
-            if current != wraplength:
-                widget.configure(wraplength=wraplength)
+        widgets = group.setdefault('widgets', {})
+        widgets[str(widget)] = {
+            'widget': widget,
+            'padding': padding,
+            'min_wrap': min_wrap,
+            'max_wrap': max_wrap,
+            'last_wraplength': None,
+        }
 
-        if not getattr(widget, '_omniclip_wrap_bound', False):
-            parent.bind("<Configure>", lambda _event: self._schedule_deferred_ui_callback(callback_key, _apply_wrap), add="+")
-            setattr(widget, '_omniclip_wrap_bound', True)
-        self._schedule_deferred_ui_callback(callback_key, _apply_wrap, delay_ms=0)
+        if not group.get('bound'):
+            parent.bind("<Configure>", lambda _event, key=group_key: self._schedule_wrap_group_refresh(key), add="+")
+            parent.bind("<Map>", lambda _event, key=group_key: self._schedule_wrap_group_refresh(key, delay_ms=0, force=True), add="+")
+            group['bound'] = True
+        self._schedule_wrap_group_refresh(group_key, delay_ms=0, force=True)
 
     def _attach_tooltip(self, widget: tk.Widget, key: str, **kwargs) -> ToolTip | None:
         tip_text = self._tip(key, **kwargs)
@@ -2085,6 +2533,13 @@ class OmniClipDesktopApp:
                 'blocked',
                 self._tr('query_status_blocked_title'),
                 self._tr('query_status_blocked_detail_watch'),
+            )
+            return
+        if not self._index_ready():
+            self._set_query_status(
+                'blocked',
+                self._tr('query_status_blocked_title'),
+                self._tr('query_status_blocked_detail_index'),
             )
             return
         if self.busy and self.active_task_key:
@@ -2356,8 +2811,7 @@ class OmniClipDesktopApp:
             self.task_detail_var.set(self._tr("task_detail_rebuild_paused"))
             self.task_eta_var.set(self._tr("task_eta_paused", value=self.task_last_eta_text))
             self.task_elapsed_var.set(self._tr("task_elapsed", value=self._format_elapsed(self._current_task_elapsed_seconds())))
-            if hasattr(self, "task_progress"):
-                self.task_progress.stop()
+            self._set_task_progress_widget(mode="indeterminate", maximum=100, value=0)
         self._update_rebuild_pause_button()
 
     def _cancel_rebuild(self) -> None:
@@ -2376,6 +2830,27 @@ class OmniClipDesktopApp:
         self._append_log(self._tr("log_rebuild_cancel_requested"))
         self._update_rebuild_pause_button()
 
+    def _task_progress_widget(self):
+        widget = getattr(self, "task_progress", None)
+        if widget is None:
+            return None
+        try:
+            return widget if bool(widget.winfo_exists()) else None
+        except Exception:
+            return None
+
+    def _set_task_progress_widget(self, *, mode: str, maximum: int, value: int, start_interval: int | None = None) -> None:
+        widget = self._task_progress_widget()
+        if widget is None:
+            return
+        try:
+            widget.stop()
+            widget.configure(mode=mode, maximum=maximum, value=value)
+            if start_interval is not None and mode == "indeterminate":
+                widget.start(start_interval)
+        except Exception:
+            return
+
     def _start_task_feedback(self, label_key: str, config: AppConfig, paths) -> None:
         eta_text, detail_text = self._task_profile(label_key, config, paths)
         self.active_task_key = label_key
@@ -2393,10 +2868,7 @@ class OmniClipDesktopApp:
         self.task_elapsed_var.set(self._tr("task_elapsed", value="00:00"))
         self.task_eta_var.set(self.task_last_eta_text)
         self._update_rebuild_pause_button()
-        if hasattr(self, "task_progress"):
-            self.task_progress.stop()
-            self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
-            self.task_progress.start(12)
+        self._set_task_progress_widget(mode="indeterminate", maximum=100, value=0, start_interval=12)
         self._tick_task_feedback()
         self._refresh_query_status_banner()
 
@@ -2421,9 +2893,7 @@ class OmniClipDesktopApp:
             except Exception:
                 pass
             self.task_after_id = None
-        if hasattr(self, "task_progress"):
-            self.task_progress.stop()
-            self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
+        self._set_task_progress_widget(mode="indeterminate", maximum=100, value=0)
         self.rebuild_pause_event.clear()
         self.rebuild_cancel_event.clear()
         self.latest_task_progress = None
@@ -2466,49 +2936,37 @@ class OmniClipDesktopApp:
 
         if self.rebuild_pause_event.is_set() and self._is_rebuild_task(self.active_task_key):
             if stage in {"indexing", "rendering", "vectorizing"} and total > 0:
-                self.task_progress.stop()
-                self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
+                self._set_task_progress_widget(mode="determinate", maximum=max(total, 1), value=min(current, total))
             else:
-                self.task_progress.stop()
-                self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
+                self._set_task_progress_widget(mode="indeterminate", maximum=100, value=0)
             self._refresh_query_status_banner()
             return
 
         if stage == 'query':
-            self.task_progress.stop()
-            self.task_progress.configure(mode='determinate', maximum=100, value=min(current, 100))
+            self._set_task_progress_widget(mode='determinate', maximum=100, value=min(current, 100))
             self.task_detail_var.set(self._query_progress_detail(payload))
         elif stage == "indexing" and total > 0:
-            self.task_progress.stop()
-            self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
+            self._set_task_progress_widget(mode="determinate", maximum=max(total, 1), value=min(current, total))
             current_path = str(payload.get("current_path") or self._tr("none_value"))
             self.task_detail_var.set(self._tr("task_detail_rebuild_progress", current=current, total=total, path=current_path))
         elif stage == "rendering":
             if total > 0:
-                self.task_progress.stop()
-                self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
+                self._set_task_progress_widget(mode="determinate", maximum=max(total, 1), value=min(current, total))
                 self.task_detail_var.set(self._tr("task_detail_rebuild_rendering_progress", current=current, total=total))
             else:
-                self.task_progress.stop()
-                self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
-                self.task_progress.start(10)
+                self._set_task_progress_widget(mode="indeterminate", maximum=100, value=0, start_interval=10)
                 self.task_detail_var.set(self._tr("task_detail_rebuild_rendering"))
         elif stage == "vectorizing":
             if stage_status == 'loading_model' and current <= 0:
-                self.task_progress.stop()
-                self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
-                self.task_progress.start(10)
+                self._set_task_progress_widget(mode="indeterminate", maximum=100, value=0, start_interval=10)
                 self.task_detail_var.set(self._tr("task_detail_rebuild_vector_loading"))
             elif total > 0:
-                self.task_progress.stop()
-                self.task_progress.configure(mode="determinate", maximum=max(total, 1), value=min(current, total))
+                self._set_task_progress_widget(mode="determinate", maximum=max(total, 1), value=min(current, total))
                 detail = self._tr("task_detail_rebuild_vectorizing", total=total)
                 tuning = self._render_vector_tuning(payload)
                 self.task_detail_var.set(f"{detail}\n{tuning}" if tuning else detail)
             else:
-                self.task_progress.stop()
-                self.task_progress.configure(mode="indeterminate", maximum=100, value=0)
-                self.task_progress.start(10)
+                self._set_task_progress_widget(mode="indeterminate", maximum=100, value=0, start_interval=10)
                 detail = self._tr("task_detail_rebuild_vectorizing", total=total)
                 tuning = self._render_vector_tuning(payload)
                 self.task_detail_var.set(f"{detail}\n{tuning}" if tuning else detail)
@@ -2893,9 +3351,9 @@ class OmniClipDesktopApp:
         self.model_state_var.set(self._tr("model_ready") if model_ready else self._tr("model_missing"))
         self._set_chip_style(self.model_chip, ok=model_ready, warn=not model_ready)
 
-        index_ready = int(self.chunks_var.get() or "0") > 0
-        self.index_state_var.set(self._tr("index_ready") if index_ready else self._tr("index_missing"))
-        self._set_chip_style(self.index_chip, ok=index_ready, warn=not index_ready)
+        index_state = self._current_index_state()
+        self.index_state_var.set(self._tr(f"index_{index_state}"))
+        self._set_chip_style(self.index_chip, ok=index_state == "ready", warn=index_state == "pending")
 
     def _set_chip_style(self, widget: tk.Label, *, ok: bool = False, warn: bool = False) -> None:
         if ok:
@@ -2998,9 +3456,10 @@ class OmniClipDesktopApp:
         self.runtime_var.set("torch")
         self.device_var.set("auto")
         self.limit_var.set("15")
-        self.score_threshold_var.set("20")
+        self.score_threshold_var.set("35")
         self.interval_var.set("2.0")
         self.build_resource_profile_var.set(self._build_profile_label('balanced'))
+        self.watch_resource_peak_var.set(self._watch_peak_label(15))
         self.local_only_var.set(False)
         self.rag_filter_core_var.set(True)
         self.rag_filter_extended_var.set(False)
@@ -3017,6 +3476,7 @@ class OmniClipDesktopApp:
         self._refresh_device_options()
         profile_code = self._build_profile_code(self.build_resource_profile_var.get())
         self.build_resource_profile_var.set(self._build_profile_label(profile_code))
+        self.watch_resource_peak_var.set(self._watch_peak_label(self._watch_peak_value(self.watch_resource_peak_var.get())))
         build_profile_combo = getattr(self, 'build_profile_combo', None)
         if build_profile_combo is not None:
             try:
@@ -3066,7 +3526,10 @@ class OmniClipDesktopApp:
         config = load_config(paths)
         if config is None:
             self._set_saved_vaults([], active_vault=self.vault_var.get().strip())
+            self.latest_preflight_snapshot = None
+            self.status_snapshot = None
             self.preflight_var.set(self._tr("preflight_empty"))
+            self._refresh_preflight_notice()
             return
         new_language = normalize_language(config.ui_language)
         language_changed = new_language != self.language_code
@@ -3087,6 +3550,7 @@ class OmniClipDesktopApp:
         self.score_threshold_var.set(str(int(threshold_value)) if threshold_value.is_integer() else str(threshold_value))
         self.interval_var.set(str(config.poll_interval_seconds))
         self.build_resource_profile_var.set(self._build_profile_label(getattr(config, 'build_resource_profile', 'balanced')))
+        self.watch_resource_peak_var.set(self._watch_peak_label(getattr(config, 'watch_resource_peak_percent', 15)))
         self.local_only_var.set(config.vector_local_files_only)
         self.reranker_enabled_var.set(getattr(config, 'reranker_enabled', False))
         self.reranker_model_var.set(getattr(config, 'reranker_model', 'BAAI/bge-reranker-v2-m3'))
@@ -3110,6 +3574,10 @@ class OmniClipDesktopApp:
         self.ui_main_sash = self._coerce_layout_value(config.ui_main_sash, self.ui_main_sash)
         self.ui_right_sash = self._coerce_layout_value(config.ui_right_sash, self.ui_right_sash)
         self.ui_results_sash = self._coerce_layout_value(config.ui_results_sash, self.ui_results_sash)
+        self.ui_layout_has_user_state = any(
+            value != self._legacy_layout_value(name)
+            for name, value in (("ui_right_sash", self.ui_right_sash), ("ui_results_sash", self.ui_results_sash))
+        )
         self._refresh_device_options()
         profile_code = self._build_profile_code(self.build_resource_profile_var.get())
         self.build_resource_profile_var.set(self._build_profile_label(profile_code))
@@ -3142,7 +3610,7 @@ class OmniClipDesktopApp:
         paths = ensure_data_paths(self.data_dir_var.get().strip() or str(default_data_root()), vault or None)
         limit = int(self.limit_var.get().strip() or "15")
         interval = float(self.interval_var.get().strip() or "2.0")
-        score_threshold = float(self.score_threshold_var.get().strip() or "20")
+        score_threshold = float(self.score_threshold_var.get().strip() or "35")
         reranker_batch_cpu = int(self.reranker_batch_cpu_var.get().strip() or "4")
         reranker_batch_cuda = int(self.reranker_batch_cuda_var.get().strip() or "8")
         if limit <= 0 or interval <= 0 or score_threshold < 0 or reranker_batch_cpu <= 0 or reranker_batch_cuda <= 0:
@@ -3155,6 +3623,7 @@ class OmniClipDesktopApp:
             query_score_threshold=score_threshold,
             poll_interval_seconds=interval,
             build_resource_profile=self._build_profile_code(self.build_resource_profile_var.get()),
+            watch_resource_peak_percent=self._watch_peak_value(self.watch_resource_peak_var.get()),
             vector_backend=self.backend_var.get().strip() or "disabled",
             vector_model=self.model_var.get().strip() or "BAAI/bge-m3",
             vector_runtime=self.runtime_var.get().strip() or "torch",
@@ -3605,7 +4074,7 @@ class OmniClipDesktopApp:
                 self._start_rebuild(resume=True)
                 return
             self._discard_pending_rebuild(config, paths)
-        if int(self.chunks_var.get() or "0") > 0:
+        if self._index_ready():
             should_rebuild = messagebox.askyesno(
                 self._tr("rebuild_confirm_existing_title"),
                 self._tr("rebuild_confirm_existing_body"),
@@ -3622,6 +4091,9 @@ class OmniClipDesktopApp:
         query = self.query_var.get().strip()
         if not query:
             messagebox.showinfo(self._tr("empty_query_title"), self._tr("empty_query_body"), parent=self.root)
+            return
+        if not self._index_ready():
+            messagebox.showinfo(self._tr("cannot_start_title"), self._tr("query_status_blocked_detail_index"), parent=self.root)
             return
         try:
             score_threshold = float(self.score_threshold_var.get().strip() or "0")
@@ -3667,8 +4139,10 @@ class OmniClipDesktopApp:
         if self.watch_thread and self.watch_thread.is_alive():
             if self.watch_stop is not None:
                 self.watch_stop.set()
+            self.watch_stop_requested = True
             self.status_var.set(self._tr("status_watch_stopping"))
             self._append_log(self._tr("log_watch_requested_stop"))
+            self._update_watch_button_state()
             self._refresh_query_status_banner()
             return
         if self.busy:
@@ -3678,6 +4152,19 @@ class OmniClipDesktopApp:
             config, paths = self._config(True)
         except Exception as exc:
             messagebox.showerror(self._tr("watch_start_failed_title"), str(exc), parent=self.root)
+            return
+        service = OmniClipService(config, paths)
+        try:
+            snapshot = service.status_snapshot()
+        finally:
+            service.close()
+        self._apply_status(snapshot)
+        index_state = self._current_index_state(snapshot)
+        if index_state != "ready":
+            body_key = "watch_start_blocked_pending_body" if index_state == "pending" else "watch_start_blocked_missing_body"
+            message = self._tr(body_key)
+            self.status_var.set(message)
+            messagebox.showinfo(self._tr("watch_start_blocked_title"), message, parent=self.root)
             return
         if self._backend_enabled(config) and not is_local_model_ready(config, paths):
             self._prepare_model_for_followup("watch_start", config, paths, True, self._toggle_watch)
@@ -3689,6 +4176,7 @@ class OmniClipDesktopApp:
             return
 
         self.watch_stop = threading.Event()
+        self.watch_stop_requested = False
         mode = self._watch_mode_label(self.polling_var.get() or not WATCHDOG_AVAILABLE)
         self.status_var.set(self._tr("status_watch_running"))
         self.watch_var.set(self._tr("watch_running", mode=mode, seconds=config.poll_interval_seconds))
@@ -3724,7 +4212,6 @@ class OmniClipDesktopApp:
         self.status_var.set(self._tr("status_preflight_done"))
         self._append_log(self._tr("log_preflight_done"))
         self._append_log(format_space_report(report, self.language_code))
-        self._show_query_workspace(2)
 
     def _after_bootstrap(self, payload) -> None:
         report = payload.get("report")
@@ -3831,7 +4318,10 @@ class OmniClipDesktopApp:
 
     def _apply_status(self, payload) -> None:
         if not isinstance(payload, dict):
+            self.status_snapshot = None
+            self._refresh_preflight_notice()
             return
+        self.status_snapshot = dict(payload)
         recommendation = payload.get("query_limit_recommendation")
         if isinstance(recommendation, dict):
             self._update_query_limit_guidance(recommendation)
@@ -3854,11 +4344,13 @@ class OmniClipDesktopApp:
             self.preflight_var.set(summarize_preflight(self.current_report, self.language_code))
         else:
             self.preflight_var.set(self._tr("preflight_empty"))
+        self._refresh_preflight_notice()
         backend = payload.get("vector_backend") or self.backend_var.get().strip() or "disabled"
         watch_text = self._tr("watch_ready") if payload.get("watchdog_available", WATCHDOG_AVAILABLE) else self._tr("watch_fallback")
         if not (self.watch_thread and self.watch_thread.is_alive()):
             self.watch_var.set(self._tr("vector_watch_summary", backend=backend, watch_text=watch_text))
         self._refresh_state_chips()
+        self._update_watch_button_state()
         self._refresh_reranker_state_summary(payload)
 
     def _select_hit(self, _event=None) -> None:
@@ -3987,9 +4479,11 @@ class OmniClipDesktopApp:
         if not hasattr(self, "watch_button"):
             return
         if self.watch_thread and self.watch_thread.is_alive():
-            self.watch_button.configure(text=self._tr("watch_stop"), style="Danger.TButton")
+            state = "disabled" if self.watch_stop_requested else "normal"
+            self.watch_button.configure(text=self._tr("watch_stop"), style="Danger.TButton", state=state)
         else:
-            self.watch_button.configure(text=self._tr("watch_start"), style="Primary.TButton")
+            state = "normal" if not self.busy else "disabled"
+            self.watch_button.configure(text=self._tr("watch_start"), style="Primary.TButton", state=state)
 
     def _drain_queue(self) -> None:
         processed = 0
@@ -4039,6 +4533,10 @@ class OmniClipDesktopApp:
             elif kind == "watch-update":
                 _, payload = item
                 stats = payload.get("stats", {})
+                if self.status_snapshot is None:
+                    self.status_snapshot = {}
+                self.status_snapshot = dict(self.status_snapshot)
+                self.status_snapshot["stats"] = stats
                 self.files_var.set(str(stats.get("files", 0)))
                 self.chunks_var.set(str(stats.get("chunks", 0)))
                 self.refs_var.set(str(stats.get("refs", 0)))
@@ -4069,6 +4567,7 @@ class OmniClipDesktopApp:
                 self._append_log(self._tr("log_watch_stopped"))
                 self.watch_thread = None
                 self.watch_stop = None
+                self.watch_stop_requested = False
                 self._update_watch_button_state()
         if latest_progress_payload is not None:
             self._update_task_progress(latest_progress_payload)
@@ -4096,12 +4595,9 @@ class OmniClipDesktopApp:
             except Exception:
                 pass
             self.layout_after_id = None
-        if self.capture_after_id is not None:
-            try:
-                self.root.after_cancel(self.capture_after_id)
-            except Exception:
-                pass
-            self.capture_after_id = None
+        self._cancel_window_geometry_capture()
+        self._cancel_ui_interaction_timer()
+        self.ui_interaction_active = False
         self._capture_layout_state()
         try:
             self._apply_ui_preferences_from_controls(rebuild_ui=False, persist=False)

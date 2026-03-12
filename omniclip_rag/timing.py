@@ -67,18 +67,21 @@ class BuildEtaTracker:
 
     def recent_rate(self, stage: str) -> float | None:
         samples = self._samples.get(stage)
+        return self._latest_progress_rate(samples)
+
+    def _latest_progress_rate(self, samples: deque[_ProgressSample] | None) -> float | None:
         if not samples or len(samples) < 2:
             return None
         latest = samples[-1]
-        earliest = None
-        for sample in samples:
+        previous = None
+        for sample in reversed(list(samples)[:-1]):
             if sample.current < latest.current:
-                earliest = sample
+                previous = sample
                 break
-        if earliest is None:
+        if previous is None:
             return None
-        delta_units = latest.current - earliest.current
-        delta_seconds = latest.timestamp - earliest.timestamp
+        delta_units = latest.current - previous.current
+        delta_seconds = latest.timestamp - previous.timestamp
         if delta_units <= 0 or delta_seconds <= 0:
             return None
         return delta_seconds / delta_units
@@ -93,21 +96,7 @@ class BuildEtaTracker:
             samples.clear()
         if not samples or current_value != samples[-1].current or (moment - samples[-1].timestamp) >= 0.25:
             samples.append(_ProgressSample(moment, current_value))
-        if len(samples) < 2:
-            return None
-        latest = samples[-1]
-        earliest = None
-        for sample in samples:
-            if sample.current < latest.current:
-                earliest = sample
-                break
-        if earliest is None:
-            return None
-        delta_units = latest.current - earliest.current
-        delta_seconds = latest.timestamp - earliest.timestamp
-        if delta_units <= 0 or delta_seconds <= 0:
-            return None
-        return delta_seconds / delta_units
+        return self._latest_progress_rate(samples)
 
 
 def build_history_file(state_dir: Path) -> Path:
@@ -138,8 +127,14 @@ def append_build_history(path: Path, entry: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
+def _timing_device_key(config: AppConfig) -> str:
+    requested = (config.vector_device or 'cpu').strip().lower() or 'cpu'
+    if requested in {'auto', 'gpu'}:
+        return resolve_vector_device(requested)
+    return requested
+
 def find_matching_history(path: Path, config: AppConfig) -> dict[str, object] | None:
-    resolved_device = resolve_vector_device(config.vector_device)
+    resolved_device = _timing_device_key(config)
     for entry in reversed(load_build_history(path)):
         if str(entry.get('vector_backend') or '') != str(config.vector_backend or ''):
             continue
@@ -160,7 +155,7 @@ def build_timing_profile(
     vector_enabled: bool,
     model_ready: bool,
 ) -> dict[str, float | bool | str]:
-    resolved_device = resolve_vector_device(config.vector_device)
+    resolved_device = _timing_device_key(config)
     lowered_model = (config.vector_model or '').lower()
     runtime = (config.vector_runtime or 'torch').lower()
 
@@ -297,7 +292,6 @@ def estimate_remaining_build_seconds(
     percent = 100.0 if total_estimate <= 0 else min((elapsed_total / total_estimate) * 100.0, 100.0)
     return int(round(remaining)), percent
 
-
 def _blend_stage_rate(
     default_rate: float,
     observed_rate: float,
@@ -309,21 +303,29 @@ def _blend_stage_rate(
     lower = max(default_rate * 0.2, 0.001)
     upper_multiplier = 8.0 if stage == 'vectorizing' else 6.0
     upper = max(default_rate * upper_multiplier, lower)
+    has_recent_rate = recent_rate is not None and recent_rate > 0
 
-    weighted_sum = default_rate * 0.2
-    total_weight = 0.2
+    if stage == 'vectorizing':
+        default_weight = 0.15 if has_recent_rate else 0.55
+        observed_weight = 0.2 if has_recent_rate else 0.45
+        recent_weight = 0.65
+    else:
+        default_weight = 0.2
+        observed_weight = 0.3 if has_recent_rate else 0.65
+        recent_weight = 0.35
+
+    weighted_sum = default_rate * default_weight
+    total_weight = default_weight
 
     if observed_rate > 0:
         observed = min(max(observed_rate, lower), upper)
-        observed_weight = 0.3 if recent_rate and recent_rate > 0 else 0.65
         weighted_sum += observed * observed_weight
         total_weight += observed_weight
     else:
         observed = 0.0
 
-    if recent_rate and recent_rate > 0:
-        recent = min(max(recent_rate, lower), upper)
-        recent_weight = 0.5 if stage == 'vectorizing' else 0.35
+    if has_recent_rate:
+        recent = min(max(recent_rate or 0.0, lower), upper)
         weighted_sum += recent * recent_weight
         total_weight += recent_weight
     else:
@@ -347,3 +349,4 @@ def _clamp_rate(value: float, fallback: float) -> float:
     lower = max(fallback * 0.2, 0.001)
     upper = max(fallback * 6.0, lower)
     return min(max(value, lower), upper)
+

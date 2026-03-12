@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## V0.2.0 - 2026-03-12
+
+### Added
+
+- Added a rebuilt Qt desktop shell that now owns the packaged app flow, with a persistent `简体中文 / English` language selector in the top bar and full-window language switching.
+- Added a structured CUDA/runtime guidance dialog with copyable status, install steps, and runtime completeness checks instead of relying on a plain message box.
+- Added an independent hot-watch hardware-peak control plus a clickable preflight-success shortcut that jumps straight to the query activity log.
+- Added [RELEASE_NOTES_v0.2.0](releases/RELEASE_NOTES_v0.2.0.md) for the Qt rewrite, state-hardening, and lean-release milestone.
+
+### Changed
+
+- Changed the desktop workflow so `Query` and `Configure` now form one cohesive Qt shell with persisted theme/scale preferences, refined settings copy, and clearer runtime guidance.
+- Changed rebuild/watch progress feedback to use finer-grained backend updates, truthful remaining-time language, and clearer vector-tail progress reporting.
+- Changed the Windows packaging flow back to the historical lean layout under `dist/OmniClipRAG/`, while still preserving any existing local `dist/OmniClipRAG/runtime/` folder across rebuilds.
+- Changed the CUDA device label shown in UI copy to `CUDA(N卡GPU)` while keeping the persisted internal config value stable as `cuda`.
+
+### Fixed
+
+- Fixed index-state pollution so missing or cancelled rebuilds no longer reappear after restart as if a usable index already existed.
+- Fixed hot-watch enable/disable behavior so watch start is blocked honestly when the index is missing or pending, stop signals close the state loop correctly, and blocked starts surface explicit feedback.
+- Fixed large-vault rebuild crashes at the final vector-write tail by bounding late LanceDB write batches and releasing RAM/VRAM pressure before the final drain.
+- Fixed the Qt preflight-success jump, runtime-status refresh chain, and immediate bilingual text refresh so the visible shell now stays aligned with the real backend/app state.
+
+
 ## V0.1.11 - 2026-03-11
 
 ### Added

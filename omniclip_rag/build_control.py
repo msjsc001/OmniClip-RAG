@@ -289,7 +289,7 @@ class BuildPerformanceController:
             if self.profile == 'quiet':
                 return max(self.base_batch_size, 8)
             if self.profile == 'peak':
-                return max(self.base_batch_size * 4, 48)
+                return max(self.base_batch_size * 5, 64)
             return max(self.base_batch_size * 2, 24)
         if self.profile == 'quiet':
             return max(self.base_batch_size // 2, 4)
@@ -302,7 +302,7 @@ class BuildPerformanceController:
             if self.profile == 'quiet':
                 return 512
             if self.profile == 'peak':
-                return 2048
+                return 3072
             return 1024
         if self.profile == 'quiet':
             return 256
@@ -312,12 +312,12 @@ class BuildPerformanceController:
 
     def _max_encode_batch(self) -> int:
         if self.resolved_device == 'cuda':
-            return 192 if self.profile == 'peak' else 128 if self.profile == 'balanced' else 64
+            return 256 if self.profile == 'peak' else 128 if self.profile == 'balanced' else 64
         return 64 if self.profile == 'peak' else 48 if self.profile == 'balanced' else 24
 
     def _max_write_batch(self) -> int:
         if self.resolved_device == 'cuda':
-            return 4096 if self.profile == 'peak' else 2048 if self.profile == 'balanced' else 1024
+            return 6144 if self.profile == 'peak' else 2048 if self.profile == 'balanced' else 1024
         return 2048 if self.profile == 'peak' else 1024 if self.profile == 'balanced' else 512
 
 

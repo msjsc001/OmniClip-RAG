@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from omniclip_rag import parser as parser_module
 from omniclip_rag.config import AppConfig, ensure_data_paths
+from omniclip_rag.errors import BuildCancelledError
 from omniclip_rag.models import SearchHit
 from omniclip_rag.retrieval_policy import build_query_profile
 from omniclip_rag.service import OmniClipService
@@ -153,6 +154,10 @@ class ServiceTests(unittest.TestCase):
             ROOT / ".tmp" / "vector_dirty_data_test",
             ROOT / ".tmp" / "snapshot_offline_vault_test",
             ROOT / ".tmp" / "snapshot_offline_data_test",
+            ROOT / '.tmp' / 'cancelled_rebuild_vault_test',
+            ROOT / '.tmp' / 'cancelled_rebuild_data_test',
+            ROOT / '.tmp' / 'watch_guard_vault_test',
+            ROOT / '.tmp' / 'watch_guard_data_test',
         ):
             if path.exists():
                 shutil.rmtree(path)
@@ -268,7 +273,7 @@ class ServiceTests(unittest.TestCase):
                 "SELECT chunk_id FROM chunks WHERE source_path = 'page_a.md' LIMIT 1"
             ).fetchone()["chunk_id"]
             vector_stub.injected = [SimpleNamespace(chunk_id=page_chunk, score=0.32)]
-            hits, _ = service.query("穿搭风格", limit=3)
+            hits, _ = service.query("穿搭风格", limit=3, score_threshold=12)
             self.assertTrue(hits)
             self.assertGreaterEqual(hits[0].score, 12.0)
             self.assertIn("语义相似", hits[0].reason)
@@ -677,6 +682,52 @@ class ServiceTests(unittest.TestCase):
             self.assertIsNone(resumed.pending_rebuild())
         finally:
             resumed.close()
+
+    def test_cancelled_rebuild_keeps_index_pending(self) -> None:
+        vault_copy = ROOT / '.tmp' / 'cancelled_rebuild_vault_test'
+        data_root = ROOT / '.tmp' / 'cancelled_rebuild_data_test'
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        (vault_copy / 'page_a.md').write_text('- 第一块\n  id:: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n', encoding='utf-8')
+        (vault_copy / 'page_b.md').write_text('- 第二块\n  id:: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root))
+        cancel_event = threading.Event()
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        try:
+            def on_progress(payload: dict[str, object]) -> None:
+                if str(payload.get('stage') or '') == 'indexing' and int(payload.get('current', 0) or 0) >= 1:
+                    cancel_event.set()
+
+            with self.assertRaises(BuildCancelledError):
+                service.rebuild_index(on_progress=on_progress, cancel_event=cancel_event)
+            snapshot = service.status_snapshot()
+            self.assertEqual(snapshot['index_state'], 'pending')
+            self.assertFalse(snapshot['index_ready'])
+            self.assertFalse(snapshot['query_allowed'])
+            self.assertIsNotNone(snapshot['pending_rebuild'])
+            self.assertGreaterEqual(int((snapshot['stats'] or {}).get('chunks', 0) or 0), 1)
+        finally:
+            service.close()
+
+    def test_watch_requires_ready_index_marker(self) -> None:
+        vault_copy = ROOT / '.tmp' / 'watch_guard_vault_test'
+        data_root = ROOT / '.tmp' / 'watch_guard_data_test'
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        (vault_copy / 'page_a.md').write_text('- 第一块\n  id:: cccccccc-cccc-cccc-cccc-cccccccccccc\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        try:
+            with self.assertRaises(RuntimeError):
+                service.watch_until_stopped(threading.Event(), interval=0.01, force_polling=True)
+            snapshot = service.status_snapshot()
+            self.assertEqual(snapshot['index_state'], 'missing')
+            self.assertFalse(snapshot['watch_allowed'])
+            self.assertEqual(snapshot['stats'], {'files': 0, 'chunks': 0, 'refs': 0})
+        finally:
+            service.close()
 
     def test_estimate_space_records_preflight(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT))

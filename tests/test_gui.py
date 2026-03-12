@@ -1,4 +1,5 @@
 from pathlib import Path
+import tkinter as tk
 import shutil
 import time
 import unittest
@@ -41,6 +42,18 @@ class GuiTests(unittest.TestCase):
             run_task_mock.assert_called_once()
         finally:
             app._on_close()
+
+    def test_on_close_ignores_destroyed_task_progress(self) -> None:
+        app = self._build_app()
+        try:
+            app.task_progress.destroy()
+            app._on_close()
+        finally:
+            try:
+                if app.root.winfo_exists():
+                    app.root.destroy()
+            except tk.TclError:
+                pass
 
     def test_start_task_uses_model_prompt_when_model_missing(self) -> None:
         app = self._build_app()
@@ -149,7 +162,7 @@ class GuiTests(unittest.TestCase):
         app = self._build_app()
         try:
             self.assertEqual(app.limit_var.get(), '15')
-            self.assertEqual(app.score_threshold_var.get(), '20')
+            self.assertEqual(app.score_threshold_var.get(), '35')
             self.assertTrue(app.quick_start_expanded_var.get())
             self.assertTrue(app.show_advanced_var.get())
             self.assertIn('1\t^2026-.*\\.android$', app.page_blocklist_rules_var.get())
@@ -163,14 +176,24 @@ class GuiTests(unittest.TestCase):
             app.device_var.set('cpu')
             app._apply_recommended()
             self.assertEqual(app.device_var.get(), 'auto')
-            self.assertEqual(app.score_threshold_var.get(), '20')
+            self.assertEqual(app.score_threshold_var.get(), '35')
+        finally:
+            app._on_close()
+
+
+    def test_config_persists_watch_resource_peak(self) -> None:
+        app = self._build_app()
+        try:
+            app.watch_resource_peak_var.set(app._watch_peak_label(60))
+            config, _paths = app._config(True)
+            self.assertEqual(config.watch_resource_peak_percent, 60)
         finally:
             app._on_close()
 
     def test_rebuild_prompts_before_rebuilding_existing_index(self) -> None:
         app = self._build_app()
         try:
-            app.chunks_var.set('12')
+            app.status_snapshot = {'index_state': 'ready', 'stats': {'files': 1, 'chunks': 12, 'refs': 0}}
             with patch('omniclip_rag.gui.OmniClipService') as service_cls, \
                  patch('omniclip_rag.gui.messagebox.askyesno', return_value=False) as ask_mock, \
                  patch.object(app, '_start_rebuild') as start_mock:
@@ -477,6 +500,40 @@ class GuiTests(unittest.TestCase):
         finally:
             app._on_close()
 
+    def test_query_status_banner_is_placed_in_search_header_right(self) -> None:
+        app = self._build_app()
+        try:
+            info = app.query_status_shell.grid_info()
+            self.assertEqual(int(info['row']), 0)
+            self.assertEqual(int(info['column']), 1)
+        finally:
+            app._on_close()
+
+    def test_query_layout_restores_custom_split_positions(self) -> None:
+        app = self._build_app()
+        try:
+            app.root.update()
+            app.right_pane.sashpos(0, 360)
+            app.results_pane.sashpos(0, 170)
+            for _ in range(4):
+                app.root.update()
+                time.sleep(0.05)
+            expected_right = app.right_pane.sashpos(0)
+            expected_results = app.results_pane.sashpos(0)
+            app._capture_layout_state()
+        finally:
+            app._on_close()
+
+        app = self._build_app()
+        try:
+            for _ in range(18):
+                app.root.update()
+                time.sleep(0.05)
+            self.assertLessEqual(abs(app.right_pane.sashpos(0) - expected_right), 8)
+            self.assertLessEqual(abs(app.results_pane.sashpos(0) - expected_results), 8)
+        finally:
+            app._on_close()
+
     def test_query_status_banner_transitions(self) -> None:
         app = self._build_app()
         try:
@@ -484,6 +541,7 @@ class GuiTests(unittest.TestCase):
                 def is_alive(self) -> bool:
                     return True
 
+            app.status_snapshot = {'index_state': 'ready', 'stats': {'files': 1, 'chunks': 2, 'refs': 0}}
             app._refresh_query_status_banner()
             self.assertEqual(app.query_status_mode, 'idle')
             self.assertEqual(app.query_status_title_var.get(), app._tr('query_status_idle_title'))
@@ -530,6 +588,56 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(app.ui_theme, 'dark')
             self.assertEqual(app.effective_ui_theme, 'dark')
             self.assertEqual(app.ui_scale_percent, 125)
+        finally:
+            app._on_close()
+
+    def test_root_configure_only_starts_interaction_on_size_change(self) -> None:
+        app = self._build_app()
+        try:
+            app.last_root_size = (1560, 1000)
+
+            class _Event:
+                def __init__(self, widget, width: int, height: int) -> None:
+                    self.widget = widget
+                    self.width = width
+                    self.height = height
+
+            with patch.object(app, '_begin_ui_interaction') as begin_mock, \
+                 patch.object(app, '_queue_window_geometry_capture') as capture_mock:
+                app._on_root_configure(_Event(app.root, 1560, 1000))
+                begin_mock.assert_not_called()
+                capture_mock.assert_called_once()
+
+                capture_mock.reset_mock()
+                app._on_root_configure(_Event(app.root, 1640, 1040))
+                begin_mock.assert_called_once()
+                capture_mock.assert_called_once()
+        finally:
+            app._on_close()
+
+    def test_responsive_wrap_reuses_parent_group(self) -> None:
+        app = self._build_app()
+        try:
+            parent = tk.Frame(app.root, bg=app.colors['card'])
+            first = tk.Label(parent, text='Alpha', bg=app.colors['card'])
+            second = tk.Label(parent, text='Beta', bg=app.colors['card'])
+            app._configure_responsive_wrap(first, padding=18, min_wrap=180, max_wrap=420)
+            app._configure_responsive_wrap(second, padding=22, min_wrap=200, max_wrap=440)
+
+            group = app.responsive_wrap_groups[str(parent)]
+            self.assertEqual(len(group['widgets']), 2)
+            self.assertTrue(group['bound'])
+        finally:
+            app._on_close()
+
+    def test_notebook_tab_change_schedules_local_layout_refresh(self) -> None:
+        app = self._build_app()
+        try:
+            with patch.object(app, '_begin_ui_interaction') as begin_mock, \
+                 patch.object(app, '_schedule_notebook_layout_refresh') as refresh_mock:
+                app._on_notebook_tab_changed(app.left_tabs)
+            begin_mock.assert_called_once()
+            refresh_mock.assert_called_once_with(app.left_tabs, delay_ms=0, force=True)
         finally:
             app._on_close()
 

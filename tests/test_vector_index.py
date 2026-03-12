@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import RuntimeDependencyError
-from omniclip_rag.vector_index import LanceDbVectorIndex, create_vector_index, is_local_model_ready
+from omniclip_rag.vector_index import LanceDbVectorIndex, create_vector_index, is_local_model_ready, runtime_guidance_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,11 +71,13 @@ class _FakeTable:
         self.schema = schema
         self.rows: list[dict[str, object]] = []
         self.add_calls = 0
+        self.add_batch_sizes: list[int] = []
 
     def add(self, rows):
         self.add_calls += 1
-        for row in rows:
-            self.rows.append(dict(row))
+        batch_rows = [dict(row) for row in rows]
+        self.add_batch_sizes.append(len(batch_rows))
+        self.rows.extend(batch_rows)
 
     def delete(self, condition: str):
         if "chunk_id IN" not in condition:
@@ -131,6 +133,42 @@ class VectorIndexTests(unittest.TestCase):
         config = AppConfig(vault_path=str(ROOT), data_root=str(data_paths.global_root))
         index = create_vector_index(config, data_paths)
         self.assertEqual(index.search("anything", 5), [])
+
+    def test_factory_returns_runtime_placeholder_when_lancedb_runtime_is_missing(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "missing_runtime"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend="lancedb",
+            vector_runtime="torch",
+            vector_device="cuda",
+        )
+        with patch('omniclip_rag.vector_index.LanceDbVectorIndex', side_effect=ModuleNotFoundError('No module named lancedb')):
+            index = create_vector_index(config, data_paths)
+        self.assertEqual(index.search("anything", 5), [])
+        with self.assertRaises(RuntimeDependencyError) as context:
+            index.warmup()
+        self.assertIn('install_runtime.ps1', str(context.exception).lower())
+
+    def test_runtime_guidance_context_reports_runtime_folder_status(self) -> None:
+        app_root = TEST_DATA_ROOT / 'app_root'
+        runtime_dir = app_root / 'runtime'
+        app_root.mkdir(parents=True, exist_ok=True)
+        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
+             patch('omniclip_rag.vector_index._ACCELERATION_CACHE', None):
+            context = runtime_guidance_context('torch', 'cuda', force_refresh=True)
+            self.assertFalse(context['runtime_exists'])
+            self.assertFalse(context['runtime_complete'])
+            self.assertIn('runtime 文件夹：未检测到', context['plain_text'])
+            self.assertIn('Set-Location -LiteralPath', context['install_command'])
+
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            (runtime_dir / '_runtime_bootstrap.json').write_text('{}', encoding='utf-8')
+            (runtime_dir / 'torch').mkdir(exist_ok=True)
+            incomplete = runtime_guidance_context('torch', 'cuda', force_refresh=True)
+        self.assertTrue(incomplete['runtime_exists'])
+        self.assertFalse(incomplete['runtime_complete'])
+        self.assertTrue(incomplete['runtime_missing_items'])
 
     def test_lancedb_backend_rebuild_search_and_delete(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "main"))
@@ -296,6 +334,33 @@ class VectorIndexTests(unittest.TestCase):
         self.assertGreaterEqual(float(final['prepare_elapsed_total_ms']), 0.0)
         self.assertGreaterEqual(float(final['write_elapsed_total_ms']), 0.0)
 
+
+    def test_lancedb_rebuild_caps_tail_write_batches(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "tail_write_cap"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend="lancedb",
+            vector_batch_size=64,
+            build_resource_profile='peak',
+        )
+        documents = [
+            {
+                "chunk_id": f"cap{index}",
+                "source_path": f"pages/{index}.md",
+                "title": f"T{index}",
+                "anchor": f"A{index}",
+                "rendered_text": f"tail cap chunk {index}",
+            }
+            for index in range(260)
+        ]
+        with patch.dict(sys.modules, _fake_lancedb_modules()):
+            index = LanceDbVectorIndex(config, data_paths, embedder_factory=FakeEmbedder)
+            index.rebuild(documents, on_progress=lambda _payload: None)
+            table = index._table()
+        self.assertGreater(table.add_calls, 1)
+        self.assertLessEqual(max(table.add_batch_sizes), 128)
+
     def test_lancedb_warmup_returns_dimension(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "warmup"))
         config = AppConfig(
@@ -432,9 +497,10 @@ class VectorIndexTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn('install_runtime.ps1', message.lower())
         self.assertIn('sentence-transformers', message)
-        self.assertIn('PowerShell -ExecutionPolicy Bypass -File', message)
-        self.assertIn('不需要把向量后端改成 disabled', message)
-        self.assertNotIn('把“设备”保持', message)
+        self.assertIn('Set-Location -LiteralPath', message)
+        self.assertIn('第二步：在 Windows 终端里安装 runtime', message)
+        self.assertIn('如果只使用CPU', message)
+        self.assertNotIn('说明文档', message)
 
     def test_default_embedder_skips_network_when_local_model_is_ready(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "offline_ready"))

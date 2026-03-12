@@ -632,3 +632,260 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - The query page now renders a dedicated status banner with idle / blocked / running / done modes, and its running state is fed by `service.py::query(..., on_progress=...)` stage payloads.
 - Query task progress is also reflected in the shared background-task panel so the banner and task panel stay consistent.
 - UI theme (`system` / `light` / `dark`) and UI scale percent are persisted in config and applied through the shared style/bootstrap path.
+
+## 2026-03-11 Desktop UI Interaction Throttling
+
+### Decisions
+- Root-window resize, Win snap, and pane-sash dragging are now treated as one class of high-frequency UI interaction. Heavy layout sync is delayed until the interaction settles instead of running every frame.
+- Notebook tab switching must refresh only the newly visible subtree. It is not allowed to trigger broad hidden-tab layout work.
+- Responsive wrap handling is parent-group based rather than one binding per label. Multiple wrapped labels inside the same card now share one configure pipeline.
+- Scroll-canvas sync must be visibility-aware. Hidden tabs keep pending width / scrollregion work queued and only flush it when they become visible.
+
+### Why
+- The remaining lag was no longer caused by whole-window rebuilds alone. It came from resize storms where many labels and canvases all responded to `Configure` independently.
+- Win snap and edge-resize behavior can transiently squeeze Tk containers into unstable intermediate sizes. If every canvas and wrapped label reacts immediately, the user sees blank frames and jitter.
+- Tab switches felt visually unstable because newly selected tabs had to catch up on width and scrollregion state after the fact.
+
+### Implementation Notes
+- `gui.py` now tracks a short-lived UI interaction window for root `<Configure>`, notebook tab changes, and pane drags, then runs a visible-only layout refresh after the interaction settles.
+- Responsive wrap widgets are registered into `responsive_wrap_groups`, so each parent frame owns one deferred wrap recalculation pass instead of many parallel callbacks.
+- Scrollable canvases now store sync state in `canvas_sync_states`, skip redundant width / scrollregion writes, and flush hidden-tab work on `Map` or selected-tab refresh.
+- `main_tabs`, `left_tabs`, and result-detail `tabs` all register notebook-local layout refresh hooks so switching pages refreshes only the selected content tree.
+
+
+## 2026-03-11 Qt UI Migration Phase 1-2
+
+### Decisions
+- The desktop app now has a unified entry layer. New launches default to the Qt shell, while the Tk UI remains available as a separately runnable legacy surface.
+- The first Qt delivery is intentionally limited to the new shell and the query workspace. Settings and secondary tools stay out of scope until the query path proves stable in real use.
+- Query results in Qt must use the Model/View stack (`QTableView + QAbstractTableModel`). The migration is not allowed to recreate the old pattern of coupling retrieval data to ad-hoc widget trees.
+- Long-running query work must execute in a worker thread and report progress through Qt signals. The UI thread is reserved for rendering, selection, and lightweight state updates.
+
+### Why
+- The previous Tk bottlenecks came from layout churn and high-frequency interaction storms in the most frequently used query surface. Revalidating the query path first lowers migration risk before moving the rest of the product.
+- Keeping the legacy UI alive during the first Qt phases preserves a safe rollback path while the new shell hardens.
+- Model/View and threaded workers are the foundation for the long-term goals: smoother sorting, more stable splitters, and a UI that stays responsive under retrieval load.
+
+### Implementation Notes
+- New UI code lives under `omniclip_rag/ui_next_qt/`; the legacy adapter lives under `omniclip_rag/ui_legacy_tk/`; shared query-facing helpers live under `omniclip_rag/ui_shared/`; the launch switchboard lives under `omniclip_rag/app_entry/`.
+- `launcher.py` now routes through the shared desktop entry. `--ui legacy` starts the Tk window explicitly; the default path opens the Qt shell and falls back to Tk if Qt startup is unavailable.
+- `ui_next_qt/main_window.py` owns the phase-1 shell: header, top-level tabs, persisted geometry, persisted splitter state, and the explicit "open legacy UI" bridge.
+- `ui_next_qt/query_workspace.py` owns the phase-2 query surface: status banner, query controls, worker lifecycle, page-average sorting toggle, context selection summary, detail tabs, and context rebuild flow.
+- `ui_next_qt/query_table_model.py` provides checkbox selection, stable sorting, page-average aggregation sort, and restore behavior through a dedicated table model instead of widget mutation.
+- `ui_next_qt/workers.py` wraps `OmniClipService.query(...)` inside a `QObject` worker hosted by `QThread`, and the query banner consumes stage updates from the backend progress callback.
+- Qt-only persisted UI state currently lives in config as `qt_window_geometry`, `qt_query_splitter_state`, and `qt_results_splitter_state` so the new shell can evolve without destabilizing Tk layout memory.
+- Phase 1-2 intentionally leave page-blocklist editing, sensitive filtering dialogs, and the full settings surface on the legacy path. The Qt query workspace exposes explicit bridges back to the legacy UI for those not-yet-migrated tools.
+
+## 2026-03-11 Qt UI Migration Phase 3-4
+
+### Decisions
+- The Qt shell now owns both the query workspace and the full config workspace. The legacy Tk UI remains available only as an explicit fallback surface, not as the primary path for settings or filtering tools.
+- Query splitters must remain user-draggable even when their children have rich nested layouts. The splitter host widgets therefore use an `Ignored` vertical size policy and restore persisted state only when there is real pending state to apply.
+- Query blocking, filter editing, task logs, and theme / scale preferences are routed through explicit Qt signals between workspaces instead of direct cross-widget mutation.
+- Page-title blocklist editing and sensitive-content filtering are now first-class Qt dialogs. They persist back into shared config and can be launched from either the query workspace or the config workspace.
+
+### Why
+- Phase 1-2 proved the Qt query stack was smooth, so keeping config and filtering on Tk would only extend the split-brain period and increase migration risk.
+- The locked-splitter bug came from two combined issues: rich child widgets still advertised large minimum size hints to `QSplitter`, and the query workspace reapplied default/saved splitter state on later show events. Both had to be fixed structurally.
+- Shared blocking and log signals let long-running tasks, hot-watch mode, and query UX stay consistent without coupling the query view to build / watch internals.
+
+### Implementation Notes
+- `ui_next_qt/config_workspace.py` now contains the phase-3 config surface: Start, Settings, UI, Retrieval, and Data tabs, along with threaded service tasks, rebuild pause/cancel controls, watch lifecycle, and config persistence.
+- `ui_next_qt/filter_dialogs.py` and `ui_next_qt/filter_models.py` provide the phase-4 auxiliary tools for page-title blocklist editing and sensitive-filter rule editing.
+- `ui_next_qt/main_window.py` now wires the config workspace into the main shell, forwards runtime config changes to the query workspace, applies theme/scale updates app-wide, and routes filter-dialog requests from the query page into the shared Qt tools.
+- `ui_next_qt/query_workspace.py` now keeps user splitter changes stable across hide/show cycles, only restores saved/default splitter geometry when pending state exists, and uses splitter-child size policies that allow real drag freedom.
+- `tests/test_qt_ui.py` now covers splitter persistence, config-workspace persistence, and filter-model behavior so later migration phases can refactor safely without regressing the Qt core.
+
+## 2026-03-11 Qt Startup Hardening
+
+### Decisions
+- `python launcher.py` must be a first-class launch path. It now bootstraps local `.packages` / `.vendor` dependencies itself instead of relying on the PowerShell wrapper.
+- Interactive Qt startup is no longer allowed to honor a stray `QT_QPA_PLATFORM=offscreen` unless it is explicitly whitelisted for diagnostic runs.
+- The config workspace's initial status refresh is no longer allowed to run synchronously on the UI thread during first paint. Startup status loading now runs later and off-thread.
+- Restored Qt window geometry must be validated against the current screen layout. If the saved window is fully off-screen, the app recenters it instead of silently restoring an invisible window.
+- Qt startup failures and import failures must print full diagnostics to stderr so a blocked launch is observable from the terminal.
+
+### Why
+- The migration introduced a new default launch path, but `python launcher.py` was still weaker than `scripts/run_gui.ps1` because it did not bootstrap the repo-local dependency folders.
+- A hidden or off-screen window is operationally indistinguishable from a hung startup to end users.
+- Even lightweight status probes can be enough to delay the first visible frame when they happen at the wrong point in the event loop.
+- Silent fallback or swallowed startup issues create long debugging loops because the terminal gives no trustworthy clue about what really happened.
+
+### Implementation Notes
+- `launcher.py` now prepends the repo root, `.packages`, and `.vendor` to `sys.path` before importing the desktop entry.
+- `ui_next_qt/app.py` now installs a terminal-visible exception hook, normalizes `QT_QPA_PLATFORM`, raises/activates the main window, and schedules config status loading after the first frame.
+- `ui_next_qt/config_workspace.py` now loads its initial `status_snapshot()` via `ServiceTaskWorker` instead of synchronously inside the first UI event turn.
+- `ui_next_qt/main_window.py` now verifies restored geometry against the available screen rectangles and recenters the window if needed.
+- `app_entry/desktop.py` now prints full traceback details when Qt import fails before falling back to the legacy UI.
+## 2026-03-11 Qt Phase 3-4 Stabilization Pass
+
+### Decisions
+- Preflight estimation is now treated as a real staged background task, not a silent prerequisite before rebuild. Vault scanning and Markdown parsing must both emit progress payloads and obey the same cancel / pause control channel used by rebuild tasks.
+- Rebuild pause and cancel are not allowed to leave the task panel in an indeterminate marquee state. The progress bar must freeze into a determinate visual snapshot as soon as the user pauses or confirms cancellation.
+- The Qt shell should stay visually compact like a classic desktop tool. Header cards and top-level layout margins were tightened, and duplicated padding in the header stylesheet was removed.
+- Tooltip migration is part of functional parity, not optional polish. Query controls, in-panel text search, vault actions, and filter dialogs now carry the guidance that existed in the legacy UI.
+
+### Why
+- Users interpreted long preflight scans as a deadlock because the previous Qt task panel stayed on "waiting to start" until the rebuild proper began.
+- A cancel flag that only stops the worker loop but leaves the progress bar animating still feels broken in practice.
+- Qt widgets are fast enough, but loose margins and missing hover states quickly make the new shell feel less mature than the old UI.
+- Legacy tooltips encoded important operational knowledge for first-run tasks, filters, and search workflow; dropping them increased onboarding friction.
+
+### Implementation Notes
+- `preflight.py` now emits `preflight_scan` and `preflight` progress stages, and both the directory walk and file-parse loop honor pause / cancel events by raising `BuildCancelledError` promptly.
+- `service.py` forwards `on_progress`, `pause_event`, and `cancel_event` into `estimate_space(...)`, so preflight and rebuild share one interruption model.
+- `ui_next_qt/config_workspace.py` now renders dedicated preflight progress text, freezes the progress bar on pause/cancel, and restores the idle task panel copy after background work stops.
+- `ui_next_qt/theme.py`, `ui_next_qt/main_window.py`, and `ui_next_qt/config_workspace.py` now use tighter top-level spacing, and the combo-box popup explicitly styles hover / selected rows so the highlight logic matches desktop expectations.
+- `ui_next_qt/query_workspace.py` now restores the missing query-side tooltips, including query actions, page filtering, context jump, and in-panel text search.
+- `tests/test_qt_ui.py` now covers preflight cancellation, quick-start content presence, pause/cancel progress freezing, tooltip migration, and combo-box hover stylesheet generation.
+## 2026-03-11 Qt Task Sequencing And Header Memory
+
+### Decisions
+- Qt task completion now follows the legacy Tk semantics: a background task is considered finished only after the worker thread fully stops, `busy` is cleared, and the task panel is reset. Success / cancel / error handlers then run afterward.
+- Preflight estimation now exposes its post-parse tail as a real `preflight_finalize` stage. Measuring workspace state and model-cache size is no longer allowed to happen silently after the visible file scan reaches 100%.
+- Preflight cancellation must remain effective during the final local-cache sizing pass, not only during the vault scan / parse loop.
+- The Qt shell header can now be collapsed and the choice persists in config as `qt_header_collapsed`.
+
+### Why
+- The previous Qt flow ran success callbacks before the old task had fully released `busy`. That broke chained operations such as “prepare model, then automatically continue into rebuild”, because the follow-up task immediately hit the busy guard and stopped.
+- On real vaults, the expensive part after the visible Markdown scan was often the directory-size walk over workspace state and shared model cache. Without a separate stage label, users reasonably read this as a hang.
+- A cancellation path that cannot interrupt the final cache-size walk still feels like a dead cancel button.
+- The top header became more compact, but users still needed a persistent way to reclaim that vertical space completely when the guide copy was no longer needed.
+
+### Implementation Notes
+- `ui_next_qt/config_workspace.py` now stores task outcomes first and dispatches them only from `_on_task_finished()`, after clearing `busy`, stopping the task timer, and releasing the worker/thread references.
+- `preflight.py` now caps the parse stage below 100%, emits `preflight_finalize`, and makes `_directory_size(...)` obey the same pause / cancel controls used elsewhere in the rebuild pipeline.
+- `ui_i18n.py` now includes finalize-stage copy and header collapse / expand labels.
+- `ui_next_qt/main_window.py` now owns a small persistent header toggle button and writes its state back through config save flow.
+
+## 2026-03-11 Qt Start-Page State Closure
+
+### Decisions
+- The Start page must treat successful preflight and successful rebuild as first-class UI state transitions. Returned rebuild stats must be merged into the visible status snapshot immediately instead of waiting for a later manual refresh.
+- Whenever a background stage reports a known `current/total`, the Qt task progress bar must expose the same live numbers in its on-bar text. A moving bar with frozen counts is treated as broken feedback.
+- The legacy Tk shell is now single-instance from both the Qt bridge and the direct legacy entry path. Repeated clicks may not spawn duplicate fallback windows.
+
+### Why
+- Users read a stale "index not built yet" chip or frozen count text as a failed rebuild, even when the backend completed successfully.
+- The compatibility button exists as a safety valve; letting it open many windows at once makes the migration feel unstable instead of reversible.
+- Close-time teardown must stay safe even if Tk widgets have already been destroyed by the window manager.
+
+### Implementation Notes
+- `ui_next_qt/config_workspace.py` now merges returned `stats` into stale or missing status snapshots, clears stale preflight state while switching vaults, and surfaces a bold preflight-success notice that points users to `Query -> Activity Log`.
+- `ui_next_qt/config_workspace.py` now writes determinate `current/total` progress text onto the Qt progress bar and standardizes the ETA wording to "remaining time".
+- `legacy_single_instance.py`, `ui_legacy_tk/app.py`, and `ui_next_qt/main_window.py` now share a file-lock based legacy-window guard plus a short launch debounce so Qt cannot spawn duplicate legacy windows while the second process is still starting.
+- `gui.py` now routes task-progress teardown through a widget-existence guard so closing the legacy UI cannot crash on a destroyed `ttk.Progressbar`.
+
+## 2026-03-11 Index Readiness And Watch Throttling Closure
+
+### Decisions
+- Query and live watch are no longer allowed to infer index readiness from `stats.chunks > 0`. A vault is queryable/watchable only after a full rebuild writes a persistent completion marker; interrupted rebuilds stay in `pending`.
+- Cancelling a rebuild is treated as an explicit incomplete state, not a soft success. The UI must surface `Index pending` and keep watch/query blocked until a resume or a fresh successful rebuild finishes.
+- Live watch now has its own persisted hardware-peak control independent from full rebuild. The watcher uses that peak to cap per-batch work and add cooldown so CPU-only incremental sync can be intentionally quieter.
+- Preflight success guidance is now an actionable navigation affordance. The start-page notice is clickable and routes directly to the Activity Log instead of auto-jumping tabs.
+
+### Why
+- Using chunk counts as a proxy for readiness let cancelled or partially written indexes masquerade as healthy after restart, which polluted both UI status and allowed operations that should have been blocked.
+- Watch mode is long-lived background work; its acceptable resource envelope is different from one-off full rebuilds, especially on CPU-heavy machines.
+- Users still need a visible success acknowledgement after preflight, but forced tab jumps were disruptive.
+
+### Implementation Notes
+- `service.py` now persists full-build readiness in `index_state.json`, reports `index_state/index_ready/query_allowed/watch_allowed` from `status_snapshot()`, clears the marker when starting/discarding incomplete rebuilds, and refuses query/watch when the marker is missing.
+- `ui_next_qt/config_workspace.py` and `gui.py` now gate watch start/stop and query banners on explicit `index_state`, surface `pending` as a first-class chip, and keep old snapshots from leaking across vault/config transitions.
+- `config.py`, `ui_i18n.py`, `config_workspace.py`, and `gui.py` now expose a dedicated watch hardware-peak setting (5%-90%, default 15%) that persists in config and feeds the watch throttling logic.
+- `service.py`, `build_control.py`, and `vector_index.py` now emit rebuild progress more frequently and allow the 90% build profile to run with a less conservative CUDA batch ceiling.
+
+## 2026-03-11 Preflight Navigation And Vector Tail OOM Fix
+
+### Decisions
+- The preflight success notice is now a real page-level navigation action. Triggering it must switch the shell back to the Query page and open the Activity Log tab, not merely emit an internal signal.
+- Watch start is no longer hidden behind a disabled button when the index is missing. The control stays clickable so the UI can explain why live watch is blocked instead of failing silently.
+- Vector rebuild progress is no longer allowed to report completion based on `encoded_count` alone. The visible `current/total` tracks durable write progress, while encoded/written counts are surfaced separately in the detail line.
+- LanceDB tail writes are now memory-guarded. The writer may not accumulate multi-thousand-row staged batches before a final flush; write batches are capped by a conservative row ceiling plus a raw-vector byte budget, and the tail explicitly releases Python / CUDA caches before the final drain.
+
+### Why
+- Emitting the right signal without actually changing the active tab still feels broken to the user.
+- A disabled watch button gave no feedback at the exact moment users needed a reason and next step.
+- Large vault crashes were not caused by indexing or parsing loops. The dangerous window was the tail phase after encoding finished, when huge staged LanceDB writes could materialize at once and contend with unreclaimed CUDA cache.
+
+### Implementation Notes
+- `ui_next_qt/main_window.py` now routes `showQueryLogRequested` through a shell method that selects the Query page and then opens the log tab.
+- `ui_next_qt/config_workspace.py` and `gui.py` now keep the watch button clickable while idle, attach blocked-state copy to the control, and surface an explicit "no index, no watch" message when start is attempted too early.
+- `service.py` now emits rebuild-row progress more frequently, and `ui_i18n.py` now exposes encoded/written queue detail so vector tail lag is visible instead of looking like a hang.
+- `vector_index.py` now caps effective tail write batches, releases garbage/CUDA cache before the final write drain, and keeps progress honest by separating encoded progress from written progress.
+
+## 2026-03-11 Production Packaging Pipeline
+
+### Decisions
+- Production packaging now builds through a committed `OmniClipRAG.spec` plus `build.py`, with the final guarded output restored to `dist/OmniClipRAG/`. The local `dist/OmniClipRAG/runtime` tree remains protected state and the pipeline must never delete or overwrite it.
+- The distributable stays `onedir` and `windowed`: `launcher.exe` lives beside an `_internal` payload directory so Windows can start instantly without onefile extraction latency or a console window.
+- Packaging is explicit allowlist-based. Only app code, icon resources, and required native/runtime libraries are bundled; model weights, LanceDB data, Hugging Face caches, and `%APPDATA%` runtime state remain external and are regenerated at runtime under the existing AppData paths.
+- Windows icon identity is fixed at both packaging and runtime levels so the file icon and Qt taskbar grouping use the same application identity.
+
+### Why
+- PyInstaller's default dist cleanup is too dangerous for this repository because `dist/OmniClipRAG/runtime` may hold a preserved local runtime tree. A separate output folder plus path guards removes that blast radius.
+- This app ships PySide6, PyTorch, ONNX Runtime, PyArrow, and LanceDB together. Relying on implicit hook coverage alone is fragile, so the spec now explicitly collects the most failure-prone hidden imports and native libraries.
+- Keeping the package pure avoids shipping stale indexes or huge downloaded models and guarantees that user state still follows the `%APPDATA%\OmniClip RAG` contract.
+
+### Implementation Notes
+- `build.py` now owns safe cleanup, invokes PyInstaller against `OmniClipRAG.spec`, and performs a post-build purity audit that understands the PyInstaller 6 `_internal/resources` layout.
+- `OmniClipRAG.spec` now builds `launcher.py` as a `console=False` onedir bundle, adds icon resources, and explicitly gathers PySide6 / shiboken6 / torch / onnxruntime / pyarrow / LanceDB related binaries and metadata.
+- `ui_next_qt/app.py` now sets a Windows AppUserModelID before creating `QApplication` and loads the `.ico` plus PNG variants into the shared `QIcon` so packaged desktop surfaces stay visually consistent.
+- `scripts/build_exe.ps1` is now a thin wrapper over `build.py` so manual builds and CI-style builds follow the exact same guarded pipeline.
+
+## 2026-03-12 Lean Qt Packaging And External Runtime Split
+
+### Decisions
+- Qt is now the only packaged desktop UI. The new shell no longer exposes "Open legacy UI" / "Qt new UI" header controls, and the packaged build no longer ships `ui_legacy_tk`, `gui.py`, or Tk fallback assets.
+- The production bundle returned to the historical lean-release strategy: `dist/OmniClipRAG/` contains only `launcher.exe`, `_internal`, `InstallRuntime.ps1`, and `RUNTIME_SETUP.md`; heavy AI/runtime dependencies stay outside the main package and are installed on demand into a sibling `runtime/` directory.
+- Vector runtime dependencies are now treated as optional at process start. Missing `lancedb` / `pyarrow` / `torch` / `sentence-transformers` may not prevent the Qt shell from opening; the app degrades to a placeholder vector backend that blocks rebuild/warmup with explicit runtime-install guidance.
+- CUDA selection is now aspirational even on a lean build. If the machine has an NVIDIA GPU but the optional runtime is missing, the device picker still exposes `cuda` so the UI can guide the user to install the external runtime instead of hiding the path entirely.
+
+### Why
+- The previous full-fat Qt package duplicated the old external `runtime/` strategy and the new all-in-one `_internal` strategy at the same time, inflating the release to multi-gigabyte scale.
+- Packaging the legacy Tk surface only increased bundle size and UI clutter after the Qt migration was already stable.
+- A lean bundle only works if startup survives missing vector libraries. That required moving the failure boundary from import time to task time.
+
+### Implementation Notes
+- `ui_next_qt/main_window.py` and `ui_next_qt/query_workspace.py` dropped the legacy-launch affordance; `app_entry/desktop.py` now allows legacy only in source/dev mode and removes packaged fallback.
+- `launcher.py` plus `pyi_rth_omniclip.py` now bootstrap optional `runtime/` and bundled `_internal/.packages` DLL search paths early enough for packaged PySide6 / shiboken startup.
+- `vector_index.py` now exposes a `MissingRuntimeVectorIndex`, broadens runtime-install guidance to the full vector stack, and keeps keyword-only query startup alive even when the external runtime is absent.
+- `ui_next_qt/config_workspace.py` now prompts runtime installation when users switch to `cuda` on a GPU machine whose lean package still lacks the optional runtime.
+- `OmniClipRAG.spec` now excludes the heavy AI stack and unused Qt modules, while `build.py` copies `InstallRuntime.ps1` / `RUNTIME_SETUP.md` into the output and audits the bundle to keep those runtime packages out of `_internal`.
+
+
+## 2026-03-12 CUDA Guidance Dialog And Device Label Cleanup
+
+### Decisions
+- The Qt device picker now separates display labels from persisted config values. Users see `CUDA(N卡GPU)`, but config storage and service/runtime logic still use the stable internal code `cuda`.
+- CUDA guidance is now a dedicated Qt dialog instead of a plain `QMessageBox`. Device selection and CUDA-related runtime failures reuse the same structured guidance component so copy, wording, and detection stay consistent.
+- Runtime guidance now distinguishes three different layers: system CUDA condition, runtime folder existence, and runtime folder completeness. Users must be told not only whether `runtime/` exists, but whether it is actually complete.
+- The top copy on `设置` and `检索强化` was rewritten to explain purpose and tradeoffs directly, instead of forwarding users elsewhere or using vague benefit language.
+
+### Why
+- Once the device combo started showing a user-facing Chinese label, binding logic could no longer rely on `currentText()` as if it were the persisted config value. Keeping display and storage separated avoids subtle regressions in save/load and worker config.
+- The old runtime popup was technically accurate but too dense and too raw. Users needed a clearer “what happened / why / what to do / current status” structure, plus copyable commands and links.
+- A partial `runtime/` folder is materially different from a missing one. Treating both as the same hid the real next step and made repeated installs more likely.
+
+### Implementation Notes
+- `ui_next_qt/config_workspace.py` now owns a small device-label mapping layer (`auto/cpu/cuda` <-> localized labels) and always persists `vector_device` from combo item data instead of display text.
+- `vector_index.py` now exposes `inspect_runtime_environment()` plus `runtime_guidance_context()`, which centralize adaptive install commands, runtime completeness checks, and the plain-text fallback message used by non-Qt paths.
+- `ui_next_qt/runtime_guidance_dialog.py` renders the new themed guidance window with copyable sections for CUDA setup, runtime installation, current status, and CPU fallback guidance.
+- `ui_i18n.py` now labels the CUDA option as `CUDA(N卡GPU)`, updates the settings/retrieval top explanations, and keeps shared device-summary copy aligned with the new guidance flow.
+
+## 2026-03-12 Qt Language Switching In The Desktop Shell
+
+### Decisions
+- The packaged desktop shell now exposes a persistent language selector in the header, positioned to the left of the header expand/collapse button so it stays visible in the most compact layout.
+- Language switching is handled by rebuilding the Qt shell instead of trying to mutate every visible label in place. The app preserves the active tab, query/config view state, splitter state, and current window geometry across the switch.
+- Runtime or watch-heavy operations are treated as switch blockers. If a background task or hot watch is active, the language selector must refuse the switch and explain why instead of risking a half-switched UI.
+
+### Why
+- The Qt shell is now large enough that in-place relabeling would be brittle and easy to miss. Recreating the shell gives cleaner guarantees that every string comes from the active language bundle.
+- Users still expect the switch to feel instant and non-destructive. Snapshot/restore behavior keeps the shell bilingual without forcing them to rebuild context manually.
+- The language control needed to remain visible even after the legacy-header actions were removed, so the compact top-right placement became the stable long-term home.
+
+### Implementation Notes
+- `ui_next_qt/main_window.py` now owns the header language combo, validates whether switching is currently allowed, snapshots both workspaces, and spawns a replacement `MainWindow` with the new language code before closing the old shell.
+- `ui_next_qt/query_workspace.py` and `ui_next_qt/config_workspace.py` now expose snapshot/restore helpers so current results, logs, tabs, form fields, and status banners survive a language change.
+- `ui_next_qt/app.py` keeps the replacement window alive through the `QApplication` process lifetime, and config persistence now stores the selected `ui_language` for the next launch.

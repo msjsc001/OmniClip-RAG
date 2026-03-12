@@ -51,6 +51,14 @@ class BuildControlTests(unittest.TestCase):
         self.assertEqual(snapshot.reason, 'oom_recovery')
         self.assertEqual(snapshot.action, 'shrink')
 
+    def test_peak_profile_raises_cuda_batch_ceiling(self) -> None:
+        config = AppConfig(vault_path='.', data_root='.', build_resource_profile='peak', vector_batch_size=16)
+        controller = BuildPerformanceController(config, 'cuda', monitor=_FakeMonitor([ResourceSample(timestamp=1.0, cpu_percent=10.0, memory_percent=25.0, gpu_percent=18.0, gpu_memory_percent=18.0)]))
+        self.assertGreaterEqual(controller.current_encode_batch_size, 64)
+        self.assertEqual(controller.current_write_batch_size, 3072)
+        self.assertEqual(controller.max_encode_batch_size, 256)
+        self.assertEqual(controller.max_write_batch_size, 6144)
+
 
 if __name__ == '__main__':
     unittest.main()

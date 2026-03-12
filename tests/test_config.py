@@ -8,12 +8,13 @@ from omniclip_rag import config as config_module
 
 ROOT = Path(__file__).resolve().parents[1]
 FALLBACK_ROOT = ROOT / '.tmp' / 'config_fallback'
+TEMP_FALLBACK_ROOT = ROOT / '.tmp' / 'config_temp_fallback'
 CUSTOM_ROOT = ROOT / '.tmp' / 'config_custom'
 
 
 class ConfigTests(unittest.TestCase):
     def tearDown(self) -> None:
-        for path in (FALLBACK_ROOT, CUSTOM_ROOT):
+        for path in (FALLBACK_ROOT, TEMP_FALLBACK_ROOT, CUSTOM_ROOT):
             if path.exists():
                 shutil.rmtree(path)
 
@@ -60,23 +61,48 @@ class ConfigTests(unittest.TestCase):
 
     def test_falls_back_to_local_appdata_when_default_root_is_not_writable(self) -> None:
         blocked = Path('blocked_root')
-        local_base = ROOT / '.tmp' / 'local_appdata_env'
-        fallback_candidate = local_base / config_module.APP_NAME
+        local_candidate = Path('local_candidate')
+        temp_candidate = Path('temp_candidate')
         original = config_module._create_data_paths
 
         def side_effect(root: Path, vault_path=None):
             if root == blocked:
                 raise PermissionError('denied')
-            if root == fallback_candidate:
+            if root == local_candidate:
                 return original(FALLBACK_ROOT.resolve(), vault_path=vault_path)
+            if root == temp_candidate:
+                raise AssertionError('temp fallback should not be used when local appdata is writable')
             return original(root, vault_path=vault_path)
 
         with patch.object(config_module, 'default_data_root', return_value=blocked), \
-             patch.dict(config_module.os.environ, {'LOCALAPPDATA': str(local_base)}, clear=False), \
+             patch.object(config_module, 'default_local_data_root', return_value=local_candidate), \
+             patch.object(config_module, 'temp_data_root', return_value=temp_candidate), \
              patch.object(config_module, '_create_data_paths', side_effect=side_effect):
             paths = config_module.ensure_data_paths()
 
         self.assertEqual(paths.global_root, FALLBACK_ROOT.resolve())
+        self.assertTrue(paths.config_file.parent.exists())
+
+    def test_falls_back_to_temp_when_appdata_roots_are_not_writable(self) -> None:
+        blocked_roaming = Path('blocked_roaming')
+        blocked_local = Path('blocked_local')
+        temp_candidate = Path('temp_candidate')
+        original = config_module._create_data_paths
+
+        def side_effect(root: Path, vault_path=None):
+            if root in {blocked_roaming, blocked_local}:
+                raise PermissionError('denied')
+            if root == temp_candidate:
+                return original(TEMP_FALLBACK_ROOT.resolve(), vault_path=vault_path)
+            return original(root, vault_path=vault_path)
+
+        with patch.object(config_module, 'default_data_root', return_value=blocked_roaming), \
+             patch.object(config_module, 'default_local_data_root', return_value=blocked_local), \
+             patch.object(config_module, 'temp_data_root', return_value=temp_candidate), \
+             patch.object(config_module, '_create_data_paths', side_effect=side_effect):
+            paths = config_module.ensure_data_paths()
+
+        self.assertEqual(paths.global_root, TEMP_FALLBACK_ROOT.resolve())
         self.assertTrue(paths.config_file.parent.exists())
 
     def test_ui_preferences_are_normalized_when_saved(self) -> None:

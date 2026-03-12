@@ -4,7 +4,7 @@ param(
 )
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-if (Test-Path (Join-Path $scriptDir 'OmniClipRAG.exe')) {
+if ((Test-Path (Join-Path $scriptDir 'launcher.exe')) -or (Test-Path (Join-Path $scriptDir 'OmniClipRAG.exe'))) {
     $appDir = $scriptDir
 } else {
     $appDir = (Resolve-Path (Join-Path $scriptDir '..')).ProviderPath
@@ -33,17 +33,31 @@ if (-not $pythonExe) {
 $torchIndex = if ($Profile -eq 'cuda') { 'https://download.pytorch.org/whl/cu128' } else { 'https://download.pytorch.org/whl/cpu' }
 $packageList = @(
     'torch==2.10.0',
-    'sentence-transformers==5.2.3',
-    'huggingface-hub==0.36.0',
-    'safetensors==0.7.0'
+    'sentence-transformers>=5.1.0,<6.0.0',
+    'transformers>=4.41.0,<5.0.0',
+    'huggingface-hub>=0.20.0,<1.0.0',
+    'safetensors>=0.4.0,<1.0.0',
+    'lancedb>=0.23.0,<0.30.0',
+    'onnxruntime>=1.22.0,<1.25.0',
+    'pyarrow>=18.0.0,<21.0.0',
+    'numpy>=1.26.0,<3.0.0',
+    'scipy>=1.13.0,<2.0.0',
+    'pandas>=2.2.0,<3.0.0'
 )
 $cleanupPatterns = @(
-    'torch',
-    'torch-*dist-info',
-    'functorch',
-    'functorch-*dist-info',
-    'torchgen',
-    'torchgen-*dist-info'
+    'torch', 'torch-*dist-info',
+    'functorch', 'functorch-*dist-info',
+    'torchgen', 'torchgen-*dist-info',
+    'sentence_transformers', 'sentence_transformers-*dist-info',
+    'transformers', 'transformers-*dist-info',
+    'huggingface_hub', 'huggingface_hub-*dist-info',
+    'safetensors', 'safetensors-*dist-info',
+    'lancedb', 'lancedb-*dist-info',
+    'pyarrow', 'pyarrow-*dist-info', 'pyarrow.libs',
+    'numpy', 'numpy-*dist-info', 'numpy.libs',
+    'pandas', 'pandas-*dist-info',
+    'scipy', 'scipy-*dist-info', 'scipy.libs',
+    'onnxruntime', 'onnxruntime-*dist-info'
 )
 
 Write-Host "Installing OmniClip runtime profile '$Profile' into $target"
@@ -76,4 +90,4 @@ target.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding='ut
 '@ | & $pythonExe @pythonPrefix - $bootstrapPath
 if ($LASTEXITCODE -ne 0) { throw "Runtime bootstrap metadata generation failed." }
 
-Write-Host "Runtime installation completed. Restart OmniClipRAG and retry model bootstrap or indexing."
+Write-Host "Runtime installation completed. Restart launcher.exe and retry model bootstrap or indexing."

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -17,6 +17,7 @@ DEFAULT_UI_THEME = "system"
 SUPPORTED_UI_THEMES = {"system", "light", "dark"}
 UI_SCALE_PERCENT_MIN = 80
 UI_SCALE_PERCENT_MAX = 200
+WATCH_RESOURCE_PEAK_OPTIONS = (5, 10, 15, 20, 30, 40, 50, 60, 70, 80, 90)
 
 
 @dataclass(slots=True)
@@ -50,7 +51,7 @@ class AppConfig:
         ]
     )
     query_limit: int = 15
-    query_score_threshold: float = 20.0
+    query_score_threshold: float = 35.0
     poll_interval_seconds: float = 2.0
     vector_backend: str = "disabled"
     vector_model: str = "BAAI/bge-m3"
@@ -59,6 +60,7 @@ class AppConfig:
     vector_runtime: str = "torch"
     vector_batch_size: int = 16
     build_resource_profile: str = "balanced"
+    watch_resource_peak_percent: int = 15
     vector_local_files_only: bool = False
     reranker_enabled: bool = False
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
@@ -78,6 +80,10 @@ class AppConfig:
     ui_main_sash: int = 900
     ui_right_sash: int = 280
     ui_results_sash: int = 300
+    qt_window_geometry: str = ''
+    qt_query_splitter_state: str = ''
+    qt_results_splitter_state: str = ''
+    qt_header_collapsed: bool = False
 
     @property
     def vault_dir(self) -> Path:
@@ -89,6 +95,20 @@ def default_data_root() -> Path:
     if appdata:
         return Path(appdata) / APP_NAME
     return Path.home() / "AppData" / "Roaming" / APP_NAME
+
+
+def default_local_data_root() -> Path:
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        return Path(local_appdata) / APP_NAME
+    return Path.home() / "AppData" / "Local" / APP_NAME
+
+
+def temp_data_root() -> Path:
+    temp_root = os.environ.get("TEMP") or os.environ.get("TMP")
+    if temp_root:
+        return Path(temp_root) / APP_NAME
+    return Path.home() / "AppData" / "Local" / "Temp" / APP_NAME
 
 
 def normalize_vault_path(vault_path: str | Path | None) -> str:
@@ -130,6 +150,19 @@ def normalize_ui_scale_percent(value: object, default: int = 100) -> int:
     return max(UI_SCALE_PERCENT_MIN, min(UI_SCALE_PERCENT_MAX, parsed))
 
 
+def normalize_watch_resource_peak_percent(value: object, default: int = 15) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        parsed = int(default)
+    if parsed in WATCH_RESOURCE_PEAK_OPTIONS:
+        return parsed
+    ordered = sorted(WATCH_RESOURCE_PEAK_OPTIONS)
+    for candidate in ordered:
+        if parsed <= candidate:
+            return candidate
+    return ordered[-1]
+
 def workspace_id_for_vault(vault_path: str | Path | None) -> str:
     normalized = normalize_vault_path(vault_path)
     if not normalized:
@@ -144,10 +177,7 @@ def ensure_data_paths(custom_root: str | None = None, vault_path: str | Path | N
     if custom_root:
         return _create_data_paths(Path(custom_root).expanduser().resolve(), vault_path=vault_path)
 
-    candidates: list[Path] = [default_data_root()]
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        candidates.append(Path(local_appdata) / APP_NAME)
+    candidates: list[Path] = [default_data_root(), default_local_data_root(), temp_data_root()]
 
     last_error: OSError | None = None
     seen: set[str] = set()
@@ -204,6 +234,10 @@ def save_config(config: AppConfig, paths: DataPaths) -> None:
     payload["ui_language"] = normalize_language(payload.get("ui_language"))
     payload["ui_theme"] = normalize_ui_theme(payload.get("ui_theme"))
     payload["ui_scale_percent"] = normalize_ui_scale_percent(payload.get("ui_scale_percent"), config.ui_scale_percent)
+    payload["watch_resource_peak_percent"] = normalize_watch_resource_peak_percent(
+        payload.get("watch_resource_peak_percent"),
+        getattr(config, "watch_resource_peak_percent", 15),
+)
     paths.config_file.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -222,6 +256,10 @@ def load_config(paths: DataPaths) -> AppConfig | None:
     cleaned["ui_language"] = normalize_language(cleaned.get("ui_language"))
     cleaned["ui_theme"] = normalize_ui_theme(cleaned.get("ui_theme"))
     cleaned["ui_scale_percent"] = normalize_ui_scale_percent(cleaned.get("ui_scale_percent"), 100)
+    cleaned["watch_resource_peak_percent"] = normalize_watch_resource_peak_percent(
+        cleaned.get("watch_resource_peak_percent"),
+        15,
+)
     return AppConfig(**cleaned)
 
 

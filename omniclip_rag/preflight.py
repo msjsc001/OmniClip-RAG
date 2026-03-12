@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import AppConfig, DataPaths
+from .errors import BuildCancelledError
 from .models import SpaceEstimate
 from .parser import parse_markdown_file
 from .ui_i18n import normalize_language
@@ -60,8 +63,12 @@ def estimate_storage_for_vault(
     config: AppConfig,
     paths: DataPaths,
     files: list[Path] | None = None,
+    *,
+    on_progress: Callable[[dict[str, object]], None] | None = None,
+    pause_event: threading.Event | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> SpaceEstimate:
-    files = files or _scan_vault(config)
+    files = files or _scan_vault(config, on_progress=on_progress, pause_event=pause_event, cancel_event=cancel_event)
     language = normalize_language(config.ui_language)
     labels = _PRECHECK_TEXTS.get(language, _PRECHECK_TEXTS["en"])
 
@@ -76,24 +83,35 @@ def estimate_storage_for_vault(
     property_bytes = 0
     skipped_files: list[str] = []
 
-    for path in files:
+    total_files = len(files)
+    for index, path in enumerate(files, start=1):
+        _wait_for_preflight_controls(pause_event, cancel_event)
+        relative_path = _safe_relative_path(config.vault_dir, path)
         try:
             parsed = parse_markdown_file(config.vault_dir, path)
         except OSError:
-            skipped_files.append(_safe_relative_path(config.vault_dir, path))
-            continue
-        vault_total_bytes += parsed.size
-        parsed_chunk_count += len(parsed.chunks)
-        ref_count += sum(len(chunk.refs) for chunk in parsed.chunks)
-        if parsed.kind == "logseq":
-            logseq_file_count += 1
+            skipped_files.append(relative_path)
         else:
-            markdown_file_count += 1
-        raw_chunk_bytes += sum(_encoded_len(chunk.raw_text) for chunk in parsed.chunks)
-        anchor_bytes += sum(_encoded_len(chunk.anchor) for chunk in parsed.chunks)
-        title_bytes += sum(_encoded_len(chunk.title) for chunk in parsed.chunks)
-        property_bytes += _encoded_len(json.dumps(parsed.page_properties, ensure_ascii=False))
-        property_bytes += sum(_encoded_len(json.dumps(chunk.properties, ensure_ascii=False)) for chunk in parsed.chunks)
+            vault_total_bytes += parsed.size
+            parsed_chunk_count += len(parsed.chunks)
+            ref_count += sum(len(chunk.refs) for chunk in parsed.chunks)
+            if parsed.kind == "logseq":
+                logseq_file_count += 1
+            else:
+                markdown_file_count += 1
+            raw_chunk_bytes += sum(_encoded_len(chunk.raw_text) for chunk in parsed.chunks)
+            anchor_bytes += sum(_encoded_len(chunk.anchor) for chunk in parsed.chunks)
+            title_bytes += sum(_encoded_len(chunk.title) for chunk in parsed.chunks)
+            property_bytes += _encoded_len(json.dumps(parsed.page_properties, ensure_ascii=False))
+            property_bytes += sum(_encoded_len(json.dumps(chunk.properties, ensure_ascii=False)) for chunk in parsed.chunks)
+        if on_progress is not None and (total_files <= 64 or index == total_files or index % 8 == 0):
+            on_progress({
+                'stage': 'preflight',
+                'current': index,
+                'total': total_files,
+                'current_path': relative_path,
+                'overall_percent': (index / max(total_files, 1)) * 92.0,
+            })
 
     scanned_file_count = len(files)
     file_count = logseq_file_count + markdown_file_count
@@ -135,9 +153,39 @@ def estimate_storage_for_vault(
     )
     estimated_download_seconds = _estimate_download_duration_seconds(config.vector_model, config.vector_runtime) if vector_enabled and not model_ready else 0
 
-    current_state_bytes = _directory_size(paths.state_dir)
+    if on_progress is not None:
+        on_progress({
+            'stage': 'preflight_finalize',
+            'current': 0,
+            'total': 0,
+            'current_path': str(paths.state_dir),
+            'overall_percent': 95.0,
+        })
+    current_state_bytes = _directory_size(
+        paths.state_dir,
+        pause_event=pause_event,
+        cancel_event=cancel_event,
+        on_progress=on_progress,
+        stage='preflight_finalize',
+        overall_percent=95.0,
+    )
     model_cache_dir = paths.cache_dir / "models"
-    current_model_cache_bytes = _directory_size(model_cache_dir)
+    if on_progress is not None:
+        on_progress({
+            'stage': 'preflight_finalize',
+            'current': 0,
+            'total': 0,
+            'current_path': str(model_cache_dir),
+            'overall_percent': 98.0,
+        })
+    current_model_cache_bytes = _directory_size(
+        model_cache_dir,
+        pause_event=pause_event,
+        cancel_event=cancel_event,
+        on_progress=on_progress,
+        stage='preflight_finalize',
+        overall_percent=98.0,
+    )
 
     additional_index_bytes = max(estimated_sqlite_bytes + estimated_fts_bytes + estimated_vector_bytes - current_state_bytes, 0)
     additional_model_bytes = max(estimated_model_bytes - current_model_cache_bytes, 0)
@@ -218,18 +266,43 @@ def estimate_storage_for_vault(
     )
 
 
-def _scan_vault(config: AppConfig) -> list[Path]:
+def _wait_for_preflight_controls(pause_event: threading.Event | None, cancel_event: threading.Event | None) -> None:
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise BuildCancelledError('cancelled')
+        if pause_event is None or not pause_event.is_set():
+            return
+        threading.Event().wait(0.1)
+
+
+def _scan_vault(
+    config: AppConfig,
+    *,
+    on_progress: Callable[[dict[str, object]], None] | None = None,
+    pause_event: threading.Event | None = None,
+    cancel_event: threading.Event | None = None,
+) -> list[Path]:
     if not config.vault_path:
         return []
     ignore = set(config.ignore_dirs)
     files: list[Path] = []
     for root, dirnames, filenames in os.walk(config.vault_dir, topdown=True):
+        _wait_for_preflight_controls(pause_event, cancel_event)
         dirnames[:] = [name for name in dirnames if name not in ignore]
         current_root = Path(root)
         for filename in filenames:
+            _wait_for_preflight_controls(pause_event, cancel_event)
             if not filename.lower().endswith('.md'):
                 continue
             files.append((current_root / filename).resolve())
+            if on_progress is not None and (len(files) <= 8 or len(files) % 32 == 0):
+                on_progress({
+                    'stage': 'preflight_scan',
+                    'current': len(files),
+                    'total': 0,
+                    'current_path': _safe_relative_path(config.vault_dir, current_root / filename),
+                    'overall_percent': 0.0,
+                })
     return sorted(files)
 
 
@@ -258,16 +331,38 @@ def estimate_model_cache_bytes(model_name: str, runtime: str) -> int:
     return int(2.0 * GIB)
 
 
-def _directory_size(path: Path) -> int:
+def _directory_size(
+    path: Path,
+    *,
+    pause_event: threading.Event | None = None,
+    cancel_event: threading.Event | None = None,
+    on_progress: Callable[[dict[str, object]], None] | None = None,
+    stage: str = 'preflight_finalize',
+    overall_percent: float = 0.0,
+) -> int:
     if not path.exists():
         return 0
     total = 0
-    for child in path.rglob('*'):
-        if child.is_file():
+    counted_files = 0
+    for root, _dirnames, filenames in os.walk(path, topdown=True):
+        _wait_for_preflight_controls(pause_event, cancel_event)
+        root_path = Path(root)
+        for filename in filenames:
+            _wait_for_preflight_controls(pause_event, cancel_event)
+            child = root_path / filename
             try:
                 total += child.stat().st_size
             except OSError:
                 continue
+            counted_files += 1
+            if on_progress is not None and (counted_files <= 8 or counted_files % 256 == 0):
+                on_progress({
+                    'stage': stage,
+                    'current': counted_files,
+                    'total': 0,
+                    'current_path': _safe_relative_path(path, child),
+                    'overall_percent': overall_percent,
+                })
     return total
 
 
