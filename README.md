@@ -27,7 +27,7 @@
 <br/>
 
 <div align="center">
-  <img alt="App Main Interface" src="https://github.com/user-attachments/assets/c094453e-1d80-4560-b866-7d410d4a57bf" width="800" />
+  <img alt="App Main Interface" src="https://github.com/user-attachments/assets/34464cc3-ea24-428b-9ecb-28d3f81a7bf2" width="800" />
 </div>
 
 <br/>
