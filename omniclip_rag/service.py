@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -12,10 +13,11 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .app_logging import clear_log_files, configure_file_logging
 from .clipboard import copy_text
 from .config import AppConfig, DataPaths, normalize_watch_resource_peak_percent
-from .errors import BuildCancelledError
-from .models import QueryInsights, QueryResult, SearchHit, SpaceEstimate
+from .errors import BuildCancelledError, RuntimeDependencyError
+from .models import QueryInsights, QueryResult, RerankOutcome, SearchHit, SpaceEstimate
 from .parser import BLOCK_REF_RE, BULLET_RE, EMBED_RE, PAGE_REF_RE, PROPERTY_RE
 from .query_runtime import QueryRuntimeAdvisor, select_query_hits
 from .retrieval_policy import QueryProfile, build_query_profile, rank_candidates
@@ -23,7 +25,7 @@ from .reranker import CrossEncoderReranker, create_reranker, is_local_reranker_r
 from .preflight import estimate_storage_for_vault
 from .storage import MetadataStore
 from .timing import BuildEtaTracker, append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
-from .vector_index import create_vector_index, is_local_model_ready, resolve_vector_device
+from .vector_index import create_vector_index, is_local_model_ready, prepare_local_model_snapshot, resolve_vector_device, runtime_dependency_issue
 
 try:
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -50,8 +52,8 @@ WATCH_REPAIR_INTERVAL_SECONDS = 20.0
 WATCH_STATE_VERSION = 1
 REBUILD_STATE_VERSION = 1
 INDEX_STATE_VERSION = 1
-REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS = 0.05
-REBUILD_PROGRESS_EMIT_ROW_INTERVAL = 4
+REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS = 0.03
+REBUILD_PROGRESS_EMIT_ROW_INTERVAL = 1
 RENDER_UPDATE_BATCH_SIZE = 1024
 VECTOR_UPSERT_BATCH_SIZE = 256
 WATCH_READY_BATCH_LIMITS = {
@@ -97,11 +99,14 @@ EXTENDED_REDACTION_PATTERNS = [
     re.compile(r'(?<!\d)\d{17}[\dXx](?!\d)'),
 ]
 
+LOGGER = logging.getLogger(__name__)
+
 
 class OmniClipService:
     def __init__(self, config: AppConfig, paths: DataPaths) -> None:
         self.config = config
         self.paths = paths
+        configure_file_logging(paths, config)
         self.store = MetadataStore(paths.sqlite_file)
         self.vector_index = create_vector_index(config, paths)
         self._rebuild_state_file = self.paths.state_dir / 'rebuild_state.json'
@@ -181,8 +186,13 @@ class OmniClipService:
         self.store.record_preflight(report, str(self.config.vault_dir))
         return report
 
+    def _ensure_vector_runtime_ready(self) -> None:
+        message = runtime_dependency_issue(self.config)
+        if message:
+            raise RuntimeDependencyError(message)
+
     def bootstrap_model(self) -> dict[str, object]:
-        result = self.vector_index.warmup()
+        result = prepare_local_model_snapshot(self.config, self.paths, allow_download=True)
         result['cache_bytes'] = _directory_size(self.paths.cache_dir / 'models')
         return result
 
@@ -202,6 +212,9 @@ class OmniClipService:
     ) -> dict[str, int]:
         from .parser import parse_markdown_file
 
+        vector_enabled = (self.config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
+        if vector_enabled:
+            self._ensure_vector_runtime_ready()
         files = self.scan_vault()
         manifest = self._build_file_manifest(files)
         state = self._read_rebuild_state() if resume else None
@@ -218,11 +231,13 @@ class OmniClipService:
             state['total_files'] = len(manifest)
             self._write_rebuild_state(state)
 
-        vector_enabled = (self.config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
         model_ready = (not vector_enabled) or is_local_model_ready(self.config, self.paths)
         history_entry = find_matching_history(self._build_history_file, self.config)
         eta_tracker = BuildEtaTracker(self.config, history_entry=history_entry, vector_enabled=vector_enabled, model_ready=model_ready)
         resolved_device = resolve_vector_device(self.config.vector_device)
+        LOGGER.info('Starting full rebuild: resume=%s requested_device=%s resolved_device=%s build_profile=%s vector_backend=%s files=%s.', resume, getattr(self.config, 'vector_device', 'auto'), resolved_device, getattr(self.config, 'build_resource_profile', 'balanced'), getattr(self.config, 'vector_backend', 'disabled'), len(files))
+        if str(getattr(self.config, 'vector_device', '') or '').strip().lower() == 'cuda' and resolved_device != 'cuda':
+            LOGGER.warning('CUDA was requested for rebuild, but OmniClip fell back to %s.', resolved_device)
 
         completed_paths = set(state.get('completed_paths', []))
         readable_paths = list(dict.fromkeys(state.get('readable_paths', [])))
@@ -337,6 +352,7 @@ class OmniClipService:
             },
         )
 
+        LOGGER.info('Vector stage is starting with %s documents.', total_documents)
         vector_metrics: dict[str, object] = {}
 
         def emit_vector_progress(progress: dict[str, object]) -> None:
@@ -392,11 +408,13 @@ class OmniClipService:
         self._clear_rebuild_state()
         self._clear_watch_state()
         self._write_index_state(stats)
+        LOGGER.info('Full rebuild finished: files=%s chunks=%s refs=%s duplicate_block_ids=%s.', stats.get('files', 0), stats.get('chunks', 0), stats.get('refs', 0), stats.get('duplicate_block_ids', 0))
         return stats
 
     def reindex_paths(self, changed_relative_paths: list[str], deleted_relative_paths: list[str]) -> dict[str, object]:
         from .parser import parse_markdown_file
 
+        self._ensure_vector_runtime_ready()
         changed_paths = sorted({item for item in changed_relative_paths if item})
         deleted_paths = sorted({item for item in deleted_relative_paths if item})
         parsed_by_path = {}
@@ -513,6 +531,7 @@ class OmniClipService:
         on_progress: Callable[[dict[str, object]], None] | None = None,
     ) -> QueryResult:
         self._require_ready_index(action='query')
+        self._ensure_vector_runtime_ready()
         started_at = time.perf_counter()
         limit = max(int(limit or self.config.query_limit or 0), 1)
         profile = build_query_profile(query_text, limit)
@@ -538,8 +557,12 @@ class OmniClipService:
         effective_threshold = self.config.query_score_threshold if score_threshold is None else float(score_threshold or 0.0)
         threshold_floor = max(effective_threshold, 0.0)
         rerank_limit = min(len(hits), max(limit, profile.hydration_pool_size))
-        _emit_query_progress(on_progress, 'rerank', percent=68, candidates=rerank_limit, limit=limit)
-        reranked_hits, rerank_outcome = self.reranker.rerank(query_text, hits, rerank_limit)
+        if getattr(self.config, 'reranker_enabled', False):
+            _emit_query_progress(on_progress, 'rerank', percent=68, candidates=rerank_limit, limit=limit)
+            reranked_hits, rerank_outcome = self.reranker.rerank(query_text, hits, rerank_limit)
+        else:
+            reranked_hits = hits
+            rerank_outcome = RerankOutcome(enabled=False, applied=False, skipped_reason='disabled')
         filtered_hits = [hit for hit in reranked_hits if hit.score >= threshold_floor]
         finalized_hits, insights = self._finalize_query_hits(query_text, filtered_hits, limit, profile, on_progress=on_progress)
         insights.elapsed_ms = max(int((time.perf_counter() - started_at) * 1000), 0)
@@ -673,6 +696,7 @@ class OmniClipService:
         on_update: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self._require_ready_index(action='watch')
+        self._ensure_vector_runtime_ready()
         interval = interval or self.config.poll_interval_seconds
         if not force_polling and WATCHDOG_AVAILABLE:
             self._watch_with_watchdog(interval, stop_event, on_update)
@@ -771,7 +795,7 @@ class OmniClipService:
             self._clear_index_state()
             self.store = MetadataStore(self.paths.sqlite_file)
         if clear_logs:
-            _clear_directory(self.paths.logs_dir)
+            clear_log_files(self.paths, self.config)
         if clear_cache:
             _clear_directory(self.paths.cache_dir)
         if clear_exports:
@@ -2313,3 +2337,6 @@ def _emit_query_progress(
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+

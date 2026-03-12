@@ -41,7 +41,7 @@ from .reranker import get_local_reranker_dir, is_local_reranker_ready
 from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.2.0"
+APP_VERSION = "V0.2.1"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 _CONTEXT_PAGE_RE = re.compile(r'^# 笔记名：(.*)$')
 _CONTEXT_FRAGMENT_RE = re.compile(r'^笔记片段\d+：$')
@@ -1513,7 +1513,7 @@ class OmniClipDesktopApp:
                 try:
                     target = self._resolve_layout_position(pane, state_name, int(position), min_first=min_first, min_second=min_second)
                     pane.sashpos(0, target)
-                    if attr_name == 'right_pane':
+                    if attr_name in {'right_pane', 'results_pane'}:
                         try:
                             self.root.update_idletasks()
                         except Exception:
@@ -1526,7 +1526,7 @@ class OmniClipDesktopApp:
                         needs_followup = True
                 except Exception:
                     pending = True
-            if (pending or needs_followup) and attempt < 10 and self.root.winfo_exists():
+            if (pending or needs_followup) and attempt < 14 and self.root.winfo_exists():
                 delay = 80 if pending else 120
                 self.layout_after_id = self.root.after(delay, lambda: restore(attempt + 1))
 
@@ -1539,6 +1539,7 @@ class OmniClipDesktopApp:
         self.layout_after_id = self.root.after(0, restore)
         self._schedule_deferred_ui_callback('layout:settle-restore', lambda: restore(0), delay_ms=320)
         self._schedule_deferred_ui_callback('layout:late-restore', lambda: restore(0), delay_ms=680)
+        self._schedule_deferred_ui_callback('layout:final-restore', lambda: restore(0), delay_ms=1040)
 
     def _sync_runtime_layout_to_config(self, config: AppConfig) -> None:
         self._capture_layout_state()
@@ -1565,9 +1566,9 @@ class OmniClipDesktopApp:
         floor_first = self._scaled_px(64, minimum=56)
         floor_second = self._scaled_px(40, minimum=36)
         safe_first = max(floor_first, min(int(min_first), max(total - floor_second, floor_first)))
-        safe_second = max(floor_second, min(int(min_second), max(total - floor_first, floor_second)))
-        upper = max(safe_first, total - safe_second)
-        return max(safe_first, min(int(requested), upper))
+        # Let Tk decide the real upper bound. Its internal sash math can legitimately
+        # exceed a naive total-minus-second-pane clamp during late layout settlement.
+        return max(safe_first, int(requested))
 
     def _card(self, parent: tk.Widget, title: str, subtitle: str, row: int, *, pady: tuple[int, int] = (0, 0)) -> tk.Frame:
         card = tk.Frame(parent, bg=self.colors["card"], highlightbackground=self.colors["border"], highlightthickness=1)
@@ -2936,7 +2937,7 @@ class OmniClipDesktopApp:
 
         if self.rebuild_pause_event.is_set() and self._is_rebuild_task(self.active_task_key):
             if stage in {"indexing", "rendering", "vectorizing"} and total > 0:
-                self._set_task_progress_widget(mode="determinate", maximum=max(total, 1), value=min(current, total))
+                self._set_task_progress_widget(mode="determinate", maximum=100, value=min(max(int(round(float(percent_value or 0.0))), 0), 100))
             else:
                 self._set_task_progress_widget(mode="indeterminate", maximum=100, value=0)
             self._refresh_query_status_banner()
@@ -2946,12 +2947,12 @@ class OmniClipDesktopApp:
             self._set_task_progress_widget(mode='determinate', maximum=100, value=min(current, 100))
             self.task_detail_var.set(self._query_progress_detail(payload))
         elif stage == "indexing" and total > 0:
-            self._set_task_progress_widget(mode="determinate", maximum=max(total, 1), value=min(current, total))
+            self._set_task_progress_widget(mode="determinate", maximum=100, value=min(max(int(round(float(percent_value or 0.0))), 0), 100))
             current_path = str(payload.get("current_path") or self._tr("none_value"))
             self.task_detail_var.set(self._tr("task_detail_rebuild_progress", current=current, total=total, path=current_path))
         elif stage == "rendering":
             if total > 0:
-                self._set_task_progress_widget(mode="determinate", maximum=max(total, 1), value=min(current, total))
+                self._set_task_progress_widget(mode="determinate", maximum=100, value=min(max(int(round(float(percent_value or 0.0))), 0), 100))
                 self.task_detail_var.set(self._tr("task_detail_rebuild_rendering_progress", current=current, total=total))
             else:
                 self._set_task_progress_widget(mode="indeterminate", maximum=100, value=0, start_interval=10)
@@ -2961,7 +2962,7 @@ class OmniClipDesktopApp:
                 self._set_task_progress_widget(mode="indeterminate", maximum=100, value=0, start_interval=10)
                 self.task_detail_var.set(self._tr("task_detail_rebuild_vector_loading"))
             elif total > 0:
-                self._set_task_progress_widget(mode="determinate", maximum=max(total, 1), value=min(current, total))
+                self._set_task_progress_widget(mode="determinate", maximum=100, value=min(max(int(round(float(percent_value or 0.0))), 0), 100))
                 detail = self._tr("task_detail_rebuild_vectorizing", total=total)
                 tuning = self._render_vector_tuning(payload)
                 self.task_detail_var.set(f"{detail}\n{tuning}" if tuning else detail)
@@ -4615,6 +4616,10 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
 
 
 

@@ -18,6 +18,9 @@ SUPPORTED_UI_THEMES = {"system", "light", "dark"}
 UI_SCALE_PERCENT_MIN = 80
 UI_SCALE_PERCENT_MAX = 200
 WATCH_RESOURCE_PEAK_OPTIONS = (5, 10, 15, 20, 30, 40, 50, 60, 70, 80, 90)
+DEFAULT_LOG_FILE_SIZE_MB = 16
+LOG_FILE_SIZE_MB_MIN = 4
+LOG_FILE_SIZE_MB_MAX = 256
 
 
 @dataclass(slots=True)
@@ -61,6 +64,7 @@ class AppConfig:
     vector_batch_size: int = 16
     build_resource_profile: str = "balanced"
     watch_resource_peak_percent: int = 15
+    log_file_size_mb: int = DEFAULT_LOG_FILE_SIZE_MB
     vector_local_files_only: bool = False
     reranker_enabled: bool = False
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
@@ -163,6 +167,15 @@ def normalize_watch_resource_peak_percent(value: object, default: int = 15) -> i
             return candidate
     return ordered[-1]
 
+
+def normalize_log_file_size_mb(value: object, default: int = DEFAULT_LOG_FILE_SIZE_MB) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        parsed = int(default)
+    return max(LOG_FILE_SIZE_MB_MIN, min(LOG_FILE_SIZE_MB_MAX, parsed))
+
+
 def workspace_id_for_vault(vault_path: str | Path | None) -> str:
     normalized = normalize_vault_path(vault_path)
     if not normalized:
@@ -237,7 +250,11 @@ def save_config(config: AppConfig, paths: DataPaths) -> None:
     payload["watch_resource_peak_percent"] = normalize_watch_resource_peak_percent(
         payload.get("watch_resource_peak_percent"),
         getattr(config, "watch_resource_peak_percent", 15),
-)
+    )
+    payload["log_file_size_mb"] = normalize_log_file_size_mb(
+        payload.get("log_file_size_mb"),
+        getattr(config, "log_file_size_mb", DEFAULT_LOG_FILE_SIZE_MB),
+    )
     paths.config_file.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -259,7 +276,11 @@ def load_config(paths: DataPaths) -> AppConfig | None:
     cleaned["watch_resource_peak_percent"] = normalize_watch_resource_peak_percent(
         cleaned.get("watch_resource_peak_percent"),
         15,
-)
+    )
+    cleaned["log_file_size_mb"] = normalize_log_file_size_mb(
+        cleaned.get("log_file_size_mb"),
+        DEFAULT_LOG_FILE_SIZE_MB,
+    )
     return AppConfig(**cleaned)
 
 

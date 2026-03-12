@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gc
+import importlib
+import logging
 import os
 import queue
 import re
@@ -61,13 +63,18 @@ _ACCELERATION_CACHE: dict[str, object] | None = None
 _ACCELERATION_LOCK = threading.Lock()
 _WRITE_BATCH_ROW_CAPS = {
     'cpu': {'quiet': 64, 'balanced': 96, 'peak': 128},
-    'cuda': {'quiet': 64, 'balanced': 96, 'peak': 128},
+    'cuda': {'quiet': 128, 'balanced': 256, 'peak': 384},
 }
 _WRITE_BATCH_MEMORY_BUDGET_BYTES = {
     'cpu': 8 * 1024 * 1024,
-    'cuda': 12 * 1024 * 1024,
+    'cuda': 24 * 1024 * 1024,
 }
 _MIN_SAFE_WRITE_BATCH_ROWS = 32
+_MIN_RETRY_WRITE_BATCH_ROWS = 8
+_VECTOR_PROGRESS_HEARTBEAT_SECONDS = 0.75
+_VECTOR_PRESSURE_SLEEP_SECONDS = 0.35
+
+LOGGER = logging.getLogger(__name__)
 
 
 class NullVectorIndex:
@@ -220,6 +227,8 @@ class LanceDbVectorIndex:
         def current_progress_ratio() -> float:
             return (pipeline_progress_current() / total) if total and total > 0 else 0.0
 
+        last_vector_heartbeat_at = 0.0
+
         def emit_vector_progress(snapshot, *, stage_status: str | None = None) -> None:
             payload: dict[str, object] = {
                 'stage': 'vectorizing',
@@ -242,6 +251,36 @@ class LanceDbVectorIndex:
             payload.update(snapshot.to_progress_payload())
             _emit_progress(on_progress, payload)
 
+        def maybe_emit_vector_heartbeat(snapshot, *, stage_status: str, min_interval_seconds: float = _VECTOR_PROGRESS_HEARTBEAT_SECONDS) -> None:
+            nonlocal last_vector_heartbeat_at
+            now = time.time()
+            if now - last_vector_heartbeat_at < max(float(min_interval_seconds), 0.0):
+                return
+            last_vector_heartbeat_at = now
+            emit_vector_progress(snapshot, stage_status=stage_status)
+
+        def guard_resource_pressure() -> bool:
+            sample = controller.monitor.sample(force=False)
+            memory = sample.memory_percent if sample.memory_percent is not None else 0.0
+            gpu_memory = sample.gpu_memory_percent if sample.gpu_memory_percent is not None else 0.0
+            queue_fill = max(0.0, min(float(write_queue.qsize()) / max(float(write_queue_capacity), 1.0), 1.0))
+            backlog_rows = max(encoded - processed, staged_rows_hint, 0)
+            pipeline_active = backlog_rows >= max(controller.min_write_batch_size, controller.current_encode_batch_size) or write_queue.qsize() >= write_queue_capacity
+            memory_guard = min(controller.targets['memory_soft'] + (6.0 if controller.profile == 'peak' else 4.0), 98.0)
+            gpu_memory_guard = min(controller.targets['gpu_memory_soft'] + 3.0, 98.0)
+            if pipeline_active and (memory >= memory_guard or gpu_memory >= gpu_memory_guard):
+                snapshot = controller.note_pressure(reason='memory_guard', action='hold', shrink_ratio=0.65, cooldown_seconds=1.4, sample=sample)
+                maybe_emit_vector_heartbeat(snapshot, stage_status='recovering', min_interval_seconds=0.4)
+                _release_vector_memory(clear_cuda=resolved_device == 'cuda')
+                time.sleep(_VECTOR_PRESSURE_SLEEP_SECONDS)
+                return True
+            if queue_fill >= 0.95:
+                snapshot = controller.note_pressure(reason='write_backpressure', action='hold', shrink_ratio=0.9, cooldown_seconds=0.6, sample=sample)
+                maybe_emit_vector_heartbeat(snapshot, stage_status='backpressure', min_interval_seconds=0.4)
+                time.sleep(min(_VECTOR_PRESSURE_SLEEP_SECONDS, 0.25))
+                return True
+            return False
+
         def writer() -> None:
             table = None
             staged_documents: list[dict[str, str]] = []
@@ -260,39 +299,64 @@ class LanceDbVectorIndex:
                     if not force and len(staged_documents) < target_size:
                         break
                     target = min(max(target_size, 1), len(staged_documents))
-                    batch_documents = staged_documents[:target]
-                    batch_vectors = staged_vectors[:target]
-                    del staged_documents[:target]
-                    del staged_vectors[:target]
-                    if not batch_documents:
+                    if target <= 0:
                         break
-                    if vector_dimension_hint <= 0:
-                        vector_dimension_hint = self._infer_vector_dimension(batch_vectors)
-                    prepare_started = time.perf_counter()
-                    rows = self._materialize_rows(batch_documents, batch_vectors)
-                    prepare_elapsed_ms = max((time.perf_counter() - prepare_started) * 1000.0, 0.0)
-                    if rows and vector_dimension_hint <= 0:
-                        vector_dimension_hint = len(rows[0]['vector'])
-                    if table is None and rows:
-                        self._ensure_table(len(rows[0]['vector']))
-                        table = self._table()
-                    write_started = time.perf_counter()
-                    if rows:
-                        table.add(rows)
-                    write_elapsed_ms = max((time.perf_counter() - write_started) * 1000.0, 0.0)
-                    completion_queue.put(
-                        (
-                            'write',
-                            {
-                                'written': len(rows),
-                                'prepare_elapsed_ms': prepare_elapsed_ms,
-                                'write_elapsed_ms': write_elapsed_ms,
-                                'queue_depth': write_queue.qsize(),
-                                'staged_rows': len(staged_documents),
-                            },
+                    retry_target = target
+                    while retry_target > 0:
+                        batch_documents = staged_documents[:retry_target]
+                        batch_vectors = staged_vectors[:retry_target]
+                        if not batch_documents:
+                            retry_target = 0
+                            break
+                        if vector_dimension_hint <= 0:
+                            vector_dimension_hint = self._infer_vector_dimension(batch_vectors)
+                        rows = None
+                        try:
+                            prepare_started = time.perf_counter()
+                            rows = self._materialize_rows(batch_documents, batch_vectors)
+                            prepare_elapsed_ms = max((time.perf_counter() - prepare_started) * 1000.0, 0.0)
+                            if rows and vector_dimension_hint <= 0:
+                                vector_dimension_hint = len(rows[0]['vector'])
+                            if table is None and rows:
+                                self._ensure_table(len(rows[0]['vector']))
+                                table = self._table()
+                            write_started = time.perf_counter()
+                            if rows:
+                                table.add(rows)
+                            write_elapsed_ms = max((time.perf_counter() - write_started) * 1000.0, 0.0)
+                        except Exception as exc:
+                            if not _is_memory_pressure_exception(exc) or retry_target <= _MIN_RETRY_WRITE_BATCH_ROWS:
+                                raise
+                            next_retry_target = max(_MIN_RETRY_WRITE_BATCH_ROWS, retry_target // 2)
+                            if next_retry_target >= retry_target and retry_target > 1:
+                                next_retry_target = retry_target - 1
+                            LOGGER.warning('Vector writer hit memory pressure at batch=%s; retrying with batch=%s.', retry_target, next_retry_target)
+                            try:
+                                self.delete([str(item.get('chunk_id', '')) for item in batch_documents if str(item.get('chunk_id', ''))])
+                            except Exception:
+                                pass
+                            _release_vector_memory(clear_cuda=resolved_device == 'cuda')
+                            retry_target = next_retry_target
+                            continue
+                        del staged_documents[:retry_target]
+                        del staged_vectors[:retry_target]
+                        completion_queue.put(
+                            (
+                                'write',
+                                {
+                                    'written': len(rows or []),
+                                    'prepare_elapsed_ms': prepare_elapsed_ms,
+                                    'write_elapsed_ms': write_elapsed_ms,
+                                    'queue_depth': write_queue.qsize(),
+                                    'staged_rows': len(staged_documents),
+                                },
+                            )
                         )
-                    )
-                    del rows
+                        if rows is not None:
+                            del rows
+                        break
+                    if retry_target <= 0:
+                        break
 
             try:
                 while True:
@@ -378,8 +442,11 @@ class LanceDbVectorIndex:
                     write_queue.put((batch_documents, batch_vectors), timeout=0.15)
                     return
                 except queue.Full:
+                    snapshot = controller.note_pressure(reason='write_backpressure', action='hold', shrink_ratio=0.9, cooldown_seconds=0.6, force_sample=False)
+                    maybe_emit_vector_heartbeat(snapshot, stage_status='backpressure', min_interval_seconds=0.4)
                     drained_prepare_ms, drained_write_ms = drain_write_completions(wait_for_one=True)
                     observe_write_feedback(drained_prepare_ms, drained_write_ms)
+                    time.sleep(min(_VECTOR_PRESSURE_SLEEP_SECONDS, 0.25))
                     continue
 
         _wait_for_controls(pause_event, cancel_event)
@@ -393,6 +460,8 @@ class LanceDbVectorIndex:
                 _wait_for_controls(pause_event, cancel_event)
                 drained_prepare_ms, drained_write_ms = drain_write_completions()
                 observe_write_feedback(drained_prepare_ms, drained_write_ms)
+                if guard_resource_pressure():
+                    continue
 
                 desired_batch = max(controller.current_encode_batch_size, 1)
                 batch: list[dict[str, str]] = []
@@ -418,7 +487,8 @@ class LanceDbVectorIndex:
                         if _is_oom_error(exc) and controller.current_encode_batch_size > controller.min_encode_batch_size:
                             _release_vector_memory(clear_cuda=True)
                             tuning = controller.note_oom()
-                            emit_vector_progress(tuning)
+                            emit_vector_progress(tuning, stage_status='recovering')
+                            time.sleep(_VECTOR_PRESSURE_SLEEP_SECONDS)
                             continue
                         raise
 
@@ -445,12 +515,20 @@ class LanceDbVectorIndex:
                     write_queue.put(None, timeout=0.15)
                     break
                 except queue.Full:
+                    snapshot = controller.note_pressure(reason='write_backpressure', action='hold', shrink_ratio=0.9, cooldown_seconds=0.6, force_sample=False)
+                    maybe_emit_vector_heartbeat(snapshot, stage_status='backpressure', min_interval_seconds=0.4)
                     drained_prepare_ms, drained_write_ms = drain_write_completions(wait_for_one=True)
                     observe_write_feedback(drained_prepare_ms, drained_write_ms)
+                    time.sleep(min(_VECTOR_PRESSURE_SLEEP_SECONDS, 0.25))
             while (writer_thread is not None and writer_thread.is_alive()) or processed < encoded:
                 _wait_for_controls(pause_event, cancel_event)
                 drained_prepare_ms, drained_write_ms = drain_write_completions(wait_for_one=True)
                 observe_write_feedback(drained_prepare_ms, drained_write_ms)
+                if drained_prepare_ms <= 0.0 and drained_write_ms <= 0.0:
+                    heartbeat_reason = 'cooldown_recovery' if controller.in_cooldown() else 'write_backpressure'
+                    heartbeat_snapshot = controller.snapshot(controller.monitor.sample(force=False), action='hold', reason=heartbeat_reason)
+                    heartbeat_status = 'recovering' if heartbeat_reason == 'cooldown_recovery' else 'flushing'
+                    maybe_emit_vector_heartbeat(heartbeat_snapshot, stage_status=heartbeat_status)
             remaining_prepare_ms, remaining_write_ms = drain_write_completions()
             observe_write_feedback(remaining_prepare_ms, remaining_write_ms)
         finally:
@@ -619,24 +697,11 @@ class LanceDbVectorIndex:
         hf_home_dir.mkdir(parents=True, exist_ok=True)
         _configure_huggingface_environment(hf_home_dir)
 
-        from huggingface_hub import snapshot_download
+        prepare_local_model_snapshot(self.config, self.paths, allow_download=True)
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
             raise RuntimeDependencyError(_runtime_dependency_message(self.config.vector_runtime, self.config.vector_device)) from exc
-
-        if not is_local_model_ready(self.config, self.paths):
-            snapshot_download(
-                repo_id=self.config.vector_model,
-                local_dir=str(local_model_dir),
-                local_files_only=self.config.vector_local_files_only,
-            )
-
-        if not is_local_model_ready(self.config, self.paths):
-            raise RuntimeError(
-                "本地模型目录存在，但内容不完整。请先重新运行 bootstrap-model，"
-                "或清理 cache/models 后重新预热。"
-            )
 
         runtime_name = (self.config.vector_runtime or "torch").lower()
         resolved_device = resolve_vector_device(self.config.vector_device)
@@ -686,6 +751,48 @@ def is_local_model_ready(config: AppConfig, paths: DataPaths) -> bool:
     return _is_model_dir_ready(get_local_model_dir(config, paths), config.vector_runtime)
 
 
+def prepare_local_model_snapshot(
+    config: AppConfig,
+    paths: DataPaths,
+    *,
+    allow_download: bool = True,
+) -> dict[str, object]:
+    model_root = paths.cache_dir / "models"
+    local_model_dir = get_local_model_dir(config, paths)
+    hf_home_dir = model_root / "_hf_home"
+    model_root.mkdir(parents=True, exist_ok=True)
+    local_model_dir.parent.mkdir(parents=True, exist_ok=True)
+    hf_home_dir.mkdir(parents=True, exist_ok=True)
+    _configure_huggingface_environment(hf_home_dir)
+
+    if allow_download and not is_local_model_ready(config, paths):
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError as exc:
+            raise RuntimeDependencyError("当前还缺少 huggingface-hub 运行时，暂时不能下载模型缓存。") from exc
+        snapshot_download(
+            repo_id=config.vector_model,
+            local_dir=str(local_model_dir),
+            local_files_only=config.vector_local_files_only,
+        )
+
+    model_ready = is_local_model_ready(config, paths)
+    if not model_ready:
+        raise RuntimeError(
+            "本地模型目录存在，但内容不完整。请先重新运行下载模型，"
+            "或清理 cache/models 后重新下载。"
+        )
+
+    return {
+        "backend": "model-cache",
+        "model": config.vector_model,
+        "local_model_dir": str(local_model_dir),
+        "model_ready": True,
+        "requested_device": (config.vector_device or "auto").strip().lower() or "auto",
+        "resolved_device": resolve_vector_device(config.vector_device),
+    }
+
+
 _RUNTIME_REQUIRED_MARKERS = {
     '_runtime_bootstrap.json': '_runtime_bootstrap.json',
     'torch': 'torch',
@@ -701,6 +808,21 @@ _RUNTIME_REQUIRED_MARKERS = {
     'scipy': 'scipy',
 }
 _CUDA_SETUP_GUIDE_URL = 'https://pytorch.org/get-started/locally/'
+_RUNTIME_REQUIRED_IMPORTS = (
+    ('torch', 'torch'),
+    ('sentence_transformers', 'sentence-transformers'),
+    ('transformers', 'transformers'),
+    ('huggingface_hub', 'huggingface-hub'),
+    ('safetensors', 'safetensors'),
+    ('lancedb', 'lancedb'),
+    ('pyarrow', 'pyarrow'),
+    ('numpy', 'numpy'),
+    ('pandas', 'pandas'),
+    ('scipy', 'scipy'),
+)
+_RUNTIME_REQUIRED_IMPORTS_BY_RUNTIME = {
+    'onnx': (('onnxruntime', 'onnxruntime'),),
+}
 
 
 def _application_root_dir() -> Path:
@@ -855,11 +977,16 @@ def resolve_vector_device(device_name: str | None) -> str:
     requested = (device_name or "cpu").strip().lower() or "cpu"
     acceleration = detect_acceleration()
     if requested in {"auto", "gpu"}:
-        return "cuda" if acceleration.get("cuda_available") else "cpu"
-    if requested == "cuda" and not acceleration.get("cuda_available"):
+        if acceleration.get("cuda_available"):
+            return "cuda"
+        if requested == "gpu":
+            refreshed = detect_acceleration(force_refresh=True)
+            return "cuda" if refreshed.get("cuda_available") else "cpu"
         return "cpu"
+    if requested == "cuda" and not acceleration.get("cuda_available"):
+        refreshed = detect_acceleration(force_refresh=True)
+        return "cuda" if refreshed.get("cuda_available") else "cpu"
     return requested
-
 
 def _detect_nvcc_version() -> str:
     try:
@@ -1013,6 +1140,25 @@ def runtime_guidance_context(
     }
 
 
+def runtime_dependency_issue(config: AppConfig) -> str | None:
+    backend = (config.vector_backend or 'disabled').strip().lower()
+    if backend in {'', 'disabled', 'none', 'off'}:
+        return None
+    runtime_name = (config.vector_runtime or 'torch').strip().lower() or 'torch'
+    failures: list[str] = []
+    required_imports = [*_RUNTIME_REQUIRED_IMPORTS, *_RUNTIME_REQUIRED_IMPORTS_BY_RUNTIME.get(runtime_name, ())]
+    for module_name, display_name in required_imports:
+        try:
+            importlib.import_module(module_name)
+        except Exception as exc:
+            failures.append(f'- {display_name}: {type(exc).__name__}: {exc}')
+    if not failures:
+        return None
+    detail = '底层缺失：\n' + '\n'.join(failures)
+    context = runtime_guidance_context(runtime_name, config.vector_device, force_refresh=True, extra_detail=detail)
+    return str(context.get('plain_text') or '').strip() or detail
+
+
 def _runtime_dependency_message(runtime_name: str | None, device_name: str | None) -> str:
     return str(runtime_guidance_context(runtime_name, device_name, force_refresh=True).get('plain_text') or '')
 
@@ -1055,6 +1201,23 @@ def _configure_huggingface_environment(hf_home_dir: Path) -> None:
 def _is_oom_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return 'out of memory' in message or 'cuda out of memory' in message
+
+
+def _is_memory_pressure_exception(exc: Exception) -> bool:
+    if isinstance(exc, MemoryError):
+        return True
+    if _is_oom_error(exc):
+        return True
+    message = str(exc).lower()
+    return any(token in message for token in (
+        'bad_alloc',
+        'bad alloc',
+        'cannot allocate',
+        'not enough memory',
+        'memoryerror',
+        'memory pressure',
+        'allocator',
+    ))
 
 
 def _clear_cuda_cache() -> None:
@@ -1163,5 +1326,9 @@ def _wait_for_controls(pause_event: threading.Event | None, cancel_event: thread
         if pause_event is None or not pause_event.is_set():
             return
         time.sleep(0.12)
+
+
+
+
 
 

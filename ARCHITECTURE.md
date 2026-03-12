@@ -889,3 +889,63 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - `ui_next_qt/main_window.py` now owns the header language combo, validates whether switching is currently allowed, snapshots both workspaces, and spawns a replacement `MainWindow` with the new language code before closing the old shell.
 - `ui_next_qt/query_workspace.py` and `ui_next_qt/config_workspace.py` now expose snapshot/restore helpers so current results, logs, tabs, form fields, and status banners survive a language change.
 - `ui_next_qt/app.py` keeps the replacement window alive through the `QApplication` process lifetime, and config persistence now stores the selected `ui_language` for the next launch.
+
+## 2026-03-12 Runtime Preflight, Build Progress Semantics, And Shared Logging
+
+### Decisions
+- 向量运行时缺失不再允许“先把全文建完、最后才在写入向量阶段爆炸”。`service.py` 现在会在模型预热、全量建库、查询和热监听启动前统一做 vector runtime 预检查，缺失时直接抛出同一份安装引导文案。
+- Qt 建库进度条的“条形长度”和“数字滚动”现在彻底分口径处理：条形始终跟 `overall_percent` 走，向量阶段的滚动数字优先显示 `encoded_count/total`，同时把 `written_count` 明确并排显示，避免 6% 看起来像 50% 或“卡住不动”的错觉。
+- 轻量发布包的 `runtime/` 现在必须通过安装后自校验。`InstallRuntime.ps1` 在落完包后会实际导入 `torch / lancedb / pyarrow / pandas / scipy / sentence-transformers` 等模块，缺项时直接失败，不再让用户带着“看起来有 runtime 目录”但实际不完整的环境继续使用。
+- 文件日志现在被视为共享基础设施：日志写入、崩溃栈、Qt worker 异常、服务层关键状态都统一落到 `%APPDATA%/OmniClip RAG/shared/logs`；日志大小上限可配置，并且可在“数据”页直接打开或清理。
+
+### Why
+- 实机里的 `12309/12309 -> 写入向量索引 -> CUDA/runtime 引导窗` 说明真正的问题不是“中途随机弹窗”，而是运行时缺失在向量尾段才被发现，导致用户白跑大半程。
+- 索引/渲染阶段的 `current/total` 与全局完成度不是一回事。之前 UI 把两个概念混用，暂停/取消时尤其容易让用户误判任务已经过半。
+- 轻量包恢复外置 runtime 后，`runtime/` 是否“存在”已经不够，必须校验是否真的满足新 Qt 发行策略所依赖的模块集合。
+- 没有稳定的文件日志时，这类长流程尾段问题很难精准回溯；同时日志必须可控，不能无限膨胀，也不能只能手动去 AppData 里找。
+
+### Implementation Notes
+- `vector_index.py` 新增 `runtime_dependency_issue()`，按当前向量运行时实际导入必需模块；`service.py` 通过 `_ensure_vector_runtime_ready()` 在 warmup / rebuild / query / watch 前统一调用它。
+- `ui_next_qt/config_workspace.py` 新增 UI 侧 ` _ensure_vector_runtime_ready()`，建库、模型预热、热监听启动前都会优先拦截并复用已有 runtime 引导窗；显卡摘要也会把 `runtime_complete=False` 视为“环境仍不完整”。
+- `service.py` 把渲染阶段进度发射频率下调到更实时的粒度，`ui_next_qt/config_workspace.py` 则在向量阶段显示“已编码 / 已写入”双计数；`gui.py` 的旧 Tk 进度条语义也已对齐到百分比模式。
+- `app_logging.py` 负责滚动文件日志、崩溃日志和异常钩子；`ui_next_qt/app.py`、`service.py`、`query_workspace.py`、`workers.py` 都已经接入，数据页的日志大小设置会即时重配新的文件句柄。
+- `scripts/install_runtime.ps1` 现在会在安装后立即用目标 Python 对 `runtime/` 做真实导入校验，避免出现“目录大小看起来像对的，但缺少 lancedb/pyarrow/pandas”这种假完整状态。
+
+## 2026-03-12 Model Bootstrap Decoupling, Device Status Panel, And Reranker Gating
+
+### Decisions
+- “开始”页的模型下载入口现在只负责当前选中向量模型的本地存在性检查与下载，不再把 CUDA/runtime 缺失误判成“不能下载模型”。这条链只针对 `vector_model`（默认 `BAAI/bge-m3`）本身。
+- Qt `设置 -> 设备` 现在在设备下拉框下方常驻一块可复制的状态面板，明确展示 N 卡检测、CUDA 条件、`runtime/` 是否存在、`runtime/` 是否完整、CPU 模式是否可用，以及当前实际模式（只显示 CPU/GPU，不再暴露 `auto`）。
+- 全量建库的进度条语义继续收紧：条形长度始终代表 `overall_percent`，向量阶段的数字口径改为“已写入 / 总数”，`已编码` 仅保留在细节文案里，避免 encoded/written 双头切换造成视觉跳跃。
+- 查询阶段对 reranker 又加了一层 service 侧硬闸。即使某个旧实例或测试桩把 `self.reranker` 塞成了可工作的对象，只要 `config.reranker_enabled=False`，查询就绝不会真正调用 reranker。
+
+### Why
+- 用户点“下载模型”时，最需要的是把模型缓存补齐，而不是先被迫满足完整向量运行时。下载模型与运行 LanceDB/torch 本来就是两条不同依赖链，必须拆开。
+- 轻量发布恢复以后，用户最容易困惑的不是“有没有 CUDA 选项”，而是“当前到底缺哪一层”。把设备/运行时状态拆成多行面板，能显著降低误操作和重复安装。
+- 建库体感上最让人焦虑的是条形进度和文本计数互相打架。条形看整体，计数看落盘，这两个维度必须固定职责。
+- reranker 开关一旦只靠实例构造时生效，就容易被后续状态同步、测试桩或缓存对象绕过去。service 层再兜底一次，可以把“没勾选却仍然重排”的风险彻底堵死。
+
+### Implementation Notes
+- `vector_index.py` 新增 `prepare_local_model_snapshot()`，专门负责当前模型缓存目录准备与 `snapshot_download`；`service.py::bootstrap_model()` 改为直接走这条链，不再调用 `_ensure_vector_runtime_ready()`。
+- `ui_next_qt/config_workspace.py` 现在会动态刷新 `下载{model}模型` 按钮文案、`{model}模型已就绪/还没下载` 芯片，以及设备状态面板；模型名变化时会实时同步到这些 UI 元素。
+- `ui_i18n.py` 新增/对齐了命名模型芯片、命名下载按钮、设备状态面板相关文案；向量阶段的进度标签也改为只显示 `written/total`。
+- `service.py::query()` 现在在调用 reranker 前再次检查 `config.reranker_enabled`；禁用时直接返回 `RerankOutcome(enabled=False, applied=False, skipped_reason='disabled')`。
+- 回归测试补到了 Qt 和 service 两侧：覆盖命名模型下载 UI、设备状态面板、向量阶段进度口径、模型下载不依赖完整 runtime、以及 reranker 关闭时的 service 侧硬闸。
+
+## 2026-03-12 Large-Vault Rebuild Hardening For Memory/VRAM Pressure
+
+### Decisions
+- 万页级建库在资源压力下现在优先“保守减速”，而不是继续抢资源把系统推到 OOM 边缘。向量阶段新增了前置避让逻辑：只有在写入积压已经形成时，才会因为 RAM/VRAM 接近阈值而主动让行、缩批和短暂停顿。
+- LanceDB 写入链现在把“成功落盘”与“从 staged 队列删除”严格绑定。写库阶段如果出现内存/显存压力，会先尝试更小批次重试；只有真正写成功后，当前批次才会从 staged 文档/向量里移除。
+- Qt 向量阶段新增了恢复态可视化。即使编码/写入计数暂时不动，界面也会明确显示“正在回收显存/内存”“正在等待写入队列落盘”“正在把已编码内容写入向量索引”，并直接提示“任务仍在继续，请不要关闭程序”。
+
+### Why
+- 用户真正担心的不是单次 OOM 本身，而是长达数小时的大库任务在后段才暴露问题，以及卡住时无法判断是“仍在恢复”还是“已经死掉”。
+- 旧实现对编码侧 OOM 已经有缩批恢复，但写入侧仍然更脆弱；而且一旦资源压力来自系统里的其它软件，单纯依赖“等 OOM 发生后再缩”会太被动。
+- “只要系统内存高就立即让行”会把小任务和轻微波动也拖成假死，所以新的前置避让只在真正有向量写入积压时才生效，避免过度保守。
+
+### Implementation Notes
+- `build_control.py` 新增 `note_pressure()` / `in_cooldown()`，让控制器除了 `note_oom()` 之外，也能在高压但尚未硬崩时主动收缩批次并进入短冷静期。
+- `vector_index.py` 现在会在向量阶段发出节流心跳：当资源接近阈值、写入队列积压、或末尾正在 flush 时，UI 仍能收到持续进度事件；writer 在遇到内存压力时会按更小写批次重试，并且在重试前清理当前批次可能残留的 chunk 行，尽量避免重复写入风险。
+- `ui_i18n.py` 与 `ui_next_qt/config_workspace.py` 增加了 `recovering / backpressure / flushing` 三类向量阶段说明文案，让“数字不动但仍在工作”的状态可见且可理解。
+- 回归测试新增覆盖：控制器高压收缩、向量写入阶段的小批次恢复、以及 Qt 恢复态提示；全量测试已覆盖这些路径。

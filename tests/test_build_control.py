@@ -51,6 +51,19 @@ class BuildControlTests(unittest.TestCase):
         self.assertEqual(snapshot.reason, 'oom_recovery')
         self.assertEqual(snapshot.action, 'shrink')
 
+    def test_pressure_guard_can_hold_and_shrink_without_hard_oom(self) -> None:
+        config = AppConfig(vault_path='.', data_root='.', build_resource_profile='peak', vector_batch_size=16)
+        monitor = _FakeMonitor([ResourceSample(timestamp=25.0, cpu_percent=36.0, memory_percent=94.0, gpu_percent=42.0, gpu_memory_percent=96.0)])
+        controller = BuildPerformanceController(config, 'cuda', monitor=monitor)
+        encode_before = controller.current_encode_batch_size
+        write_before = controller.current_write_batch_size
+        snapshot = controller.note_pressure(reason='memory_guard', action='hold', shrink_ratio=0.6, cooldown_seconds=1.2)
+        self.assertLess(controller.current_encode_batch_size, encode_before)
+        self.assertLess(controller.current_write_batch_size, write_before)
+        self.assertEqual(snapshot.reason, 'memory_guard')
+        self.assertEqual(snapshot.action, 'hold')
+        self.assertTrue(controller.in_cooldown())
+
     def test_peak_profile_raises_cuda_batch_ceiling(self) -> None:
         config = AppConfig(vault_path='.', data_root='.', build_resource_profile='peak', vector_batch_size=16)
         controller = BuildPerformanceController(config, 'cuda', monitor=_FakeMonitor([ResourceSample(timestamp=1.0, cpu_percent=10.0, memory_percent=25.0, gpu_percent=18.0, gpu_memory_percent=18.0)]))

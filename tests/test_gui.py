@@ -362,7 +362,7 @@ class GuiTests(unittest.TestCase):
             app.task_started_at = 1.0
             app._update_task_progress({'stage': 'indexing', 'current': 2, 'total': 4, 'current_path': 'pages/a.md'})
             self.assertIn('2/4', app.task_detail_var.get())
-            self.assertEqual(float(app.task_progress.cget('value')), 2.0)
+            self.assertEqual(float(app.task_progress.cget('value')), 50.0)
         finally:
             app._on_close()
 

@@ -1,14 +1,17 @@
 from __future__ import annotations
-
 import sys
 import time
+import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
-
 from PySide6 import QtCore, QtGui, QtWidgets
-
+from ..app_logging import LOG_BACKUP_COUNT, configure_file_logging
 from ..build_control import ResourceSample, format_resource_sample, normalize_build_resource_profile
 from ..config import (
+    DEFAULT_LOG_FILE_SIZE_MB,
+    LOG_FILE_SIZE_MB_MAX,
+    LOG_FILE_SIZE_MB_MIN,
     AppConfig,
     UI_SCALE_PERCENT_MAX,
     UI_SCALE_PERCENT_MIN,
@@ -20,6 +23,7 @@ from ..config import (
     normalize_ui_theme,
     normalize_vault_path,
     normalize_watch_resource_peak_percent,
+    normalize_log_file_size_mb,
     save_config,
 )
 from ..formatting import format_bytes, format_duration, format_space_report, summarize_preflight
@@ -27,16 +31,14 @@ from ..preflight import estimate_model_cache_bytes
 from ..service import WATCHDOG_AVAILABLE, OmniClipService
 from ..ui_i18n import text, tooltip
 from ..ui_shared import merge_page_filter_defaults
-from ..vector_index import detect_acceleration, get_local_model_dir, is_local_model_ready, resolve_vector_device, runtime_guidance_context
+from ..vector_index import detect_acceleration, get_local_model_dir, is_local_model_ready, resolve_vector_device, runtime_dependency_issue, runtime_guidance_context
 from ..reranker import get_local_reranker_dir, is_local_reranker_ready
 from .filter_dialogs import PageBlocklistDialog, SensitiveFilterDialog
 from .theme import ThemeState, scaled
 from .runtime_guidance_dialog import RuntimeGuidanceDialog
 from .workers import FunctionWorker, ServiceTaskWorker, WatchWorker
-
 REPO_URL = 'https://github.com/msjsc001/OmniClip-RAG'
-
-
+LOGGER = logging.getLogger(__name__)
 class ConfigWorkspace(QtWidgets.QWidget):
     statusMessageChanged = QtCore.Signal(str)
     resultSummaryChanged = QtCore.Signal(str)
@@ -46,7 +48,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
     logMessageAdded = QtCore.Signal(str)
     showQueryLogRequested = QtCore.Signal()
     uiPreferencesChanged = QtCore.Signal(str, int)
-
     def __init__(self, *, config, paths, language_code: str, theme: ThemeState, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._config = config
@@ -78,6 +79,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._device_probe_worker: FunctionWorker | None = None
         self._device_probe_scheduled = False
         self._device_runtime_prompt_suppressed = False
+        self._live_runtime_sync_suppressed = False
         self._initial_status_worker: ServiceTaskWorker | None = None
         self._initial_status_scheduled = False
         self._resume_prompt_workspace_id: str | None = None
@@ -86,41 +88,33 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._task_timer = QtCore.QTimer(self)
         self._task_timer.setInterval(500)
         self._task_timer.timeout.connect(self._tick_task_feedback)
-
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
-
         header_card = QtWidgets.QFrame(self)
         header_card.setProperty('card', True)
         header_layout = QtWidgets.QHBoxLayout(header_card)
         header_layout.setContentsMargins(12, 12, 12, 12)
         header_layout.setSpacing(10)
         root.addWidget(header_card)
-
         title_layout = QtWidgets.QVBoxLayout()
         title_layout.setContentsMargins(0, 0, 0, 0)
         title_layout.setSpacing(6)
         header_layout.addLayout(title_layout, 1)
-
         workspace_title = QtWidgets.QLabel(self._tr('workspace_title'), header_card)
         workspace_title.setProperty('role', 'cardTitle')
         title_layout.addWidget(workspace_title)
-
         workspace_subtitle = QtWidgets.QLabel(self._tr('workspace_subtitle'), header_card)
         workspace_subtitle.setProperty('role', 'subtitle')
         workspace_subtitle.setWordWrap(True)
         title_layout.addWidget(workspace_subtitle)
-
         help_button = QtWidgets.QPushButton(self._tr('help_updates'), header_card)
         help_button.setProperty('variant', 'secondary')
         help_button.setToolTip(self._tip('help_updates'))
         help_button.clicked.connect(self._open_help_and_updates)
         header_layout.addWidget(help_button, 0, QtCore.Qt.AlignmentFlag.AlignTop)
-
         self.sub_tabs = QtWidgets.QTabWidget(self)
         root.addWidget(self.sub_tabs, 1)
-
         self.start_page, self.start_body = self._make_scroll_tab()
         self.settings_page, self.settings_body = self._make_scroll_tab()
         self.ui_page, self.ui_body = self._make_scroll_tab()
@@ -131,33 +125,32 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.sub_tabs.addTab(self.ui_page, self._tr('left_tab_ui'))
         self.sub_tabs.addTab(self.retrieval_page, self._tr('left_tab_retrieval'))
         self.sub_tabs.addTab(self.data_page, self._tr('left_tab_data'))
-
         self._build_start_page(self.start_body)
         self._build_settings_page(self.settings_body)
         self._build_ui_page(self.ui_body)
         self._build_retrieval_page(self.retrieval_body)
         self._build_data_page(self.data_body)
-
         self.device_combo.currentTextChanged.connect(self._on_device_selection_changed)
         self.backend_combo.currentTextChanged.connect(self._on_runtime_sensitive_setting_changed)
         self.runtime_combo.currentTextChanged.connect(self._on_runtime_sensitive_setting_changed)
-
+        self.model_edit.textChanged.connect(self._on_model_text_changed)
+        self.reranker_enabled_check.toggled.connect(self._on_live_runtime_preferences_changed)
+        self.export_ai_check.toggled.connect(self._on_live_runtime_preferences_changed)
+        self.reranker_model_edit.textChanged.connect(self._on_live_runtime_preferences_changed)
+        self.reranker_batch_cpu_edit.textChanged.connect(self._on_live_runtime_preferences_changed)
+        self.reranker_batch_cuda_edit.textChanged.connect(self._on_live_runtime_preferences_changed)
         self._apply_config_to_controls(self._config, self._paths)
         self._refresh_status_summary(snapshot=None)
-
     def _tr(self, key: str, **kwargs) -> str:
         return text(self._language_code, key, **kwargs)
-
     def _tip(self, key: str, **kwargs) -> str:
         return tooltip(self._language_code, key, **kwargs)
-
     def _set_button_variant(self, button: QtWidgets.QPushButton, variant: str) -> None:
         button.setProperty('variant', variant)
         style = button.style()
         style.unpolish(button)
         style.polish(button)
         button.update()
-
     def _make_card(self, title_key: str | None = None) -> tuple[QtWidgets.QFrame, QtWidgets.QVBoxLayout]:
         card = QtWidgets.QFrame(self)
         card.setProperty('card', True)
@@ -169,7 +162,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             title.setProperty('role', 'cardTitle')
             layout.addWidget(title)
         return card, layout
-
     def _make_scroll_tab(self) -> tuple[QtWidgets.QWidget, QtWidgets.QWidget]:
         page = QtWidgets.QWidget(self.sub_tabs)
         page_layout = QtWidgets.QVBoxLayout(page)
@@ -185,16 +177,13 @@ class ConfigWorkspace(QtWidgets.QWidget):
         body_layout.addStretch(1)
         scroll.setWidget(body)
         return page, body
-
     def _insert_card(self, parent: QtWidgets.QWidget, index: int, card: QtWidgets.QFrame) -> None:
         parent.layout().insertWidget(index, card)
-
     def _current_task_elapsed_seconds(self) -> float:
         if not self._task_started_at:
             return 0.0
         paused_extra = max(time.time() - self._task_paused_started_at, 0.0) if self._task_paused_started_at else 0.0
         return max(time.time() - self._task_started_at - self._task_paused_total_seconds - paused_extra, 0.0)
-
     def _format_elapsed(self, elapsed_seconds: float) -> str:
         total_seconds = max(0, int(elapsed_seconds))
         minutes, seconds = divmod(total_seconds, 60)
@@ -202,11 +191,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if hours:
             return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
         return f'{minutes:02d}:{seconds:02d}'
-
     def _build_start_page(self, parent: QtWidgets.QWidget) -> None:
         quick_card, quick_layout = self._make_card('quick_start_title')
         self._insert_card(parent, 0, quick_card)
-
         top_row = QtWidgets.QHBoxLayout()
         quick_layout.addLayout(top_row)
         subtitle = QtWidgets.QLabel(self._tr('quick_start_subtitle'), quick_card)
@@ -218,7 +205,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.quick_start_button.setToolTip(self._tip('quick_start_toggle'))
         self.quick_start_button.clicked.connect(self._toggle_quick_start)
         top_row.addWidget(self.quick_start_button)
-
         self.quick_steps_widget = QtWidgets.QWidget(quick_card)
         steps_layout = QtWidgets.QVBoxLayout(self.quick_steps_widget)
         steps_layout.setContentsMargins(0, 0, 0, 0)
@@ -229,7 +215,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             step.setProperty('role', 'guide')
             steps_layout.addWidget(step)
         quick_layout.addWidget(self.quick_steps_widget)
-
         chips = QtWidgets.QHBoxLayout()
         chips.setSpacing(8)
         quick_layout.addLayout(chips)
@@ -240,14 +225,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
             chip.setMargin(8)
             chips.addWidget(chip)
         chips.addStretch(1)
-
         workspace_card, workspace_layout = self._make_card()
         self._insert_card(parent, 1, workspace_card)
         form = QtWidgets.QGridLayout()
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(10)
         workspace_layout.addLayout(form)
-
         saved_caption = QtWidgets.QLabel(self._tr('saved_vaults_label'), workspace_card)
         saved_caption.setProperty('role', 'muted')
         form.addWidget(saved_caption, 0, 0)
@@ -260,7 +243,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         remove_button.setToolTip(self._tip('remove_saved_vault'))
         remove_button.clicked.connect(self._remove_selected_vault)
         form.addWidget(remove_button, 0, 2)
-
         vault_label = QtWidgets.QLabel(self._tr('vault_label'), workspace_card)
         vault_label.setProperty('role', 'muted')
         form.addWidget(vault_label, 1, 0)
@@ -272,7 +254,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._set_button_variant(browse_vault, 'secondary')
         browse_vault.clicked.connect(self._browse_vault)
         form.addWidget(browse_vault, 1, 2)
-
         data_label = QtWidgets.QLabel(self._tr('data_dir_label'), workspace_card)
         data_label.setProperty('role', 'muted')
         form.addWidget(data_label, 2, 0)
@@ -284,12 +265,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._set_button_variant(browse_data, 'secondary')
         browse_data.clicked.connect(self._browse_data_root)
         form.addWidget(browse_data, 2, 2)
-
         self.workspace_summary_label = QtWidgets.QLabel(workspace_card)
         self.workspace_summary_label.setWordWrap(True)
         self.workspace_summary_label.setProperty('role', 'guide')
         workspace_layout.addWidget(self.workspace_summary_label)
-
         actions_card, actions_layout = self._make_card()
         self._insert_card(parent, 2, actions_card)
         action_row = QtWidgets.QGridLayout()
@@ -315,7 +294,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.watch_button.setToolTip(self._tip('watch'))
         self.watch_button.clicked.connect(self._toggle_watch)
         action_row.addWidget(self.watch_button, 1, 1)
-
         status_card, status_layout = self._make_card()
         self._insert_card(parent, 3, status_card)
         stat_row = QtWidgets.QHBoxLayout()
@@ -341,7 +319,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.watch_summary_label.setWordWrap(True)
         self.watch_summary_label.setProperty('role', 'muted')
         status_layout.addWidget(self.watch_summary_label)
-
         task_card, task_layout = self._make_card()
         self._insert_card(parent, 4, task_card)
         self.task_progress = QtWidgets.QProgressBar(task_card)
@@ -377,7 +354,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.task_elapsed_label.setText(self._tr('task_elapsed', value='00:00'))
         self.task_eta_label.setText(self._tr('task_eta_idle'))
         self.task_detail_label.setText(self._tr('task_idle_detail'))
-
     def _build_settings_page(self, parent: QtWidgets.QWidget) -> None:
         card, layout = self._make_card()
         self._insert_card(parent, 0, card)
@@ -389,7 +365,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.device_summary_label.setProperty('role', 'guide')
         self.device_summary_label.setWordWrap(True)
         layout.addWidget(self.device_summary_label)
-
         form = QtWidgets.QGridLayout()
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(10)
@@ -415,20 +390,24 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.watch_peak_combo.setToolTip(self._tip('watch_resource_peak'))
         self.watch_peak_combo.addItems(self._watch_peak_choices())
         rows = [
-            ('backend_label', self.backend_combo),
-            ('model_label', self.model_edit),
-            ('runtime_label', self.runtime_combo),
-            ('device_label', self.device_combo),
-            ('interval_label', self.interval_edit),
-            ('build_resource_profile_label', self.build_profile_combo),
-            ('watch_resource_peak_label', self.watch_peak_combo),
+            (0, 'backend_label', self.backend_combo),
+            (1, 'model_label', self.model_edit),
+            (2, 'runtime_label', self.runtime_combo),
+            (3, 'device_label', self.device_combo),
+            (5, 'interval_label', self.interval_edit),
+            (6, 'build_resource_profile_label', self.build_profile_combo),
+            (7, 'watch_resource_peak_label', self.watch_peak_combo),
         ]
-        for row_index, (label_key, widget) in enumerate(rows):
+        for row_index, label_key, widget in rows:
             label = QtWidgets.QLabel(self._tr(label_key), card)
             label.setProperty('role', 'muted')
             form.addWidget(label, row_index, 0)
             form.addWidget(widget, row_index, 1)
-
+        self.device_runtime_status_label = QtWidgets.QLabel(card)
+        self.device_runtime_status_label.setWordWrap(True)
+        self.device_runtime_status_label.setProperty('role', 'guide')
+        self.device_runtime_status_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addWidget(self.device_runtime_status_label, 4, 1)
         actions = QtWidgets.QHBoxLayout()
         layout.addLayout(actions)
         recommended_button = QtWidgets.QPushButton(self._tr('apply_recommended'), card)
@@ -447,12 +426,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         save_button.clicked.connect(self._save_only)
         actions.addWidget(save_button)
         actions.addStretch(1)
-
         self.advanced_toggle_button = QtWidgets.QPushButton(card)
         self._set_button_variant(self.advanced_toggle_button, 'secondary')
         self.advanced_toggle_button.clicked.connect(self._toggle_advanced)
         layout.addWidget(self.advanced_toggle_button)
-
         self.advanced_widget = QtWidgets.QWidget(card)
         advanced_layout = QtWidgets.QVBoxLayout(self.advanced_widget)
         advanced_layout.setContentsMargins(0, 0, 0, 0)
@@ -467,12 +444,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         advanced_layout.addWidget(self.force_check)
         advanced_layout.addWidget(self.polling_check)
         layout.addWidget(self.advanced_widget)
-
         refresh_button = QtWidgets.QPushButton(self._tr('refresh_button'), card)
         self._set_button_variant(refresh_button, 'secondary')
         refresh_button.clicked.connect(self._run_refresh)
         layout.addWidget(refresh_button, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
-
     def _build_ui_page(self, parent: QtWidgets.QWidget) -> None:
         card, layout = self._make_card()
         self._insert_card(parent, 0, card)
@@ -508,7 +483,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._set_button_variant(apply_button, 'primary')
         apply_button.clicked.connect(self._apply_ui_preferences)
         layout.addWidget(apply_button, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
-
     def _build_retrieval_page(self, parent: QtWidgets.QWidget) -> None:
         card, layout = self._make_card()
         self._insert_card(parent, 0, card)
@@ -557,7 +531,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         refresh_button.clicked.connect(self._run_refresh)
         actions.addWidget(refresh_button)
         actions.addStretch(1)
-
     def _build_data_page(self, parent: QtWidgets.QWidget) -> None:
         card, layout = self._make_card()
         self._insert_card(parent, 0, card)
@@ -587,8 +560,40 @@ class ConfigWorkspace(QtWidgets.QWidget):
         open_exports.setToolTip(self._tip('open_exports'))
         self._set_button_variant(open_exports, 'secondary')
         open_exports.clicked.connect(self._open_exports_dir)
-        buttons.addWidget(open_exports, 1, 0, 1, 2)
-
+        buttons.addWidget(open_exports, 1, 0)
+        open_logs = QtWidgets.QPushButton(self._tr('open_logs'), card)
+        open_logs.setToolTip(self._tip('open_logs'))
+        self._set_button_variant(open_logs, 'secondary')
+        open_logs.clicked.connect(self._open_logs_dir)
+        buttons.addWidget(open_logs, 1, 1)
+        log_title = QtWidgets.QLabel(self._tr('log_settings_title'), card)
+        log_title.setProperty('role', 'cardTitle')
+        layout.addWidget(log_title)
+        log_hint = QtWidgets.QLabel(self._tr('log_settings_hint', default=DEFAULT_LOG_FILE_SIZE_MB, backups=LOG_BACKUP_COUNT + 1), card)
+        log_hint.setProperty('role', 'muted')
+        log_hint.setWordWrap(True)
+        layout.addWidget(log_hint)
+        log_form = QtWidgets.QGridLayout()
+        log_form.setHorizontalSpacing(10)
+        log_form.setVerticalSpacing(8)
+        layout.addLayout(log_form)
+        log_limit_label = QtWidgets.QLabel(self._tr('log_size_limit_label'), card)
+        log_limit_label.setProperty('role', 'muted')
+        log_form.addWidget(log_limit_label, 0, 0)
+        self.log_size_spin = QtWidgets.QSpinBox(card)
+        self.log_size_spin.setRange(LOG_FILE_SIZE_MB_MIN, LOG_FILE_SIZE_MB_MAX)
+        self.log_size_spin.setSuffix(' MB')
+        self.log_size_spin.setToolTip(self._tip('log_size_limit'))
+        log_form.addWidget(self.log_size_spin, 0, 1)
+        save_log_button = QtWidgets.QPushButton(self._tr('apply_log_settings'), card)
+        save_log_button.setToolTip(self._tip('apply_log_settings'))
+        self._set_button_variant(save_log_button, 'secondary')
+        save_log_button.clicked.connect(self._save_log_preferences)
+        log_form.addWidget(save_log_button, 0, 2)
+        self.log_storage_summary_label = QtWidgets.QLabel(card)
+        self.log_storage_summary_label.setProperty('role', 'guide')
+        self.log_storage_summary_label.setWordWrap(True)
+        layout.addWidget(self.log_storage_summary_label)
         self.clear_index_check = QtWidgets.QCheckBox(self._tr('clear_index_label'), card)
         self.clear_index_check.setToolTip(self._tip('clear'))
         self.clear_logs_check = QtWidgets.QCheckBox(self._tr('clear_logs_label'), card)
@@ -606,7 +611,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._set_button_variant(clear_button, 'danger')
         clear_button.clicked.connect(self._run_clear)
         layout.addWidget(clear_button, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
-
     def _make_stat_card(self, parent_layout: QtWidgets.QHBoxLayout, label_key: str) -> QtWidgets.QLabel:
         card = QtWidgets.QFrame(self)
         card.setProperty('card', True)
@@ -621,10 +625,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         layout.addWidget(value)
         parent_layout.addWidget(card, 1)
         return value
-
     def _ui_theme_label(self, code: str) -> str:
         return self._tr(f'ui_theme_{normalize_ui_theme(code)}')
-
     def _ui_theme_code(self, label: str) -> str:
         mapping = {
             self._tr('ui_theme_system'): 'system',
@@ -635,13 +637,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
             'dark': 'dark',
         }
         return mapping.get(str(label or '').strip(), normalize_ui_theme(getattr(self._config, 'ui_theme', 'system')))
-
     def _ui_theme_choices(self) -> list[str]:
         return [self._ui_theme_label('system'), self._ui_theme_label('light'), self._ui_theme_label('dark')]
-
     def _build_profile_label(self, profile: str) -> str:
         return self._tr(f'build_profile_{normalize_build_resource_profile(profile)}')
-
     def _build_profile_code(self, label: str) -> str:
         mapping = {
             self._tr('build_profile_quiet'): 'quiet',
@@ -652,17 +651,13 @@ class ConfigWorkspace(QtWidgets.QWidget):
             'peak': 'peak',
         }
         return mapping.get(str(label or '').strip(), 'balanced')
-
     def _build_profile_choices(self) -> list[str]:
         return [self._build_profile_label('quiet'), self._build_profile_label('balanced'), self._build_profile_label('peak')]
-
     def _watch_peak_label(self, value: object) -> str:
         normalized = normalize_watch_resource_peak_percent(value, 15)
         return self._tr('watch_peak_option', value=normalized)
-
     def _watch_peak_choices(self) -> list[str]:
         return [self._watch_peak_label(value) for value in WATCH_RESOURCE_PEAK_OPTIONS]
-
     def _watch_peak_value(self, label: str) -> int:
         normalized = str(label or '').strip()
         for value in WATCH_RESOURCE_PEAK_OPTIONS:
@@ -670,16 +665,13 @@ class ConfigWorkspace(QtWidgets.QWidget):
             if normalized == localized or normalized == str(value):
                 return int(value)
         return normalize_watch_resource_peak_percent(normalized, 15)
-
     def _normalize_device_code(self, value: str | None) -> str:
         normalized = str(value or '').strip().lower()
         if normalized in {'auto', 'cpu', 'cuda'}:
             return normalized
         return 'auto'
-
     def _device_option_label(self, code: str) -> str:
         return self._tr(f"device_option_{self._normalize_device_code(code)}")
-
     def _device_option_code(self, value: str | None) -> str:
         normalized = str(value or '').strip()
         mapping = {
@@ -691,10 +683,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             'cuda': 'cuda',
         }
         return mapping.get(normalized, self._normalize_device_code(normalized))
-
     def _device_choices(self, codes: list[str]) -> list[str]:
         return [self._device_option_label(code) for code in codes]
-
     def _current_device_value(self) -> str:
         if not hasattr(self, 'device_combo') or self.device_combo.count() == 0:
             return self._normalize_device_code(getattr(self._config, 'vector_device', 'auto'))
@@ -702,7 +692,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if isinstance(data, str) and data.strip():
             return self._device_option_code(data)
         return self._device_option_code(self.device_combo.currentText())
-
     def _set_device_value(self, value: str | None) -> None:
         code = self._device_option_code(value)
         index = self.device_combo.findData(code)
@@ -714,7 +703,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.device_combo.setCurrentIndex(fallback)
         elif self.device_combo.count() > 0:
             self.device_combo.setCurrentIndex(0)
-
     def _current_index_state(self, snapshot: dict[str, object] | None = None) -> str:
         source = snapshot if isinstance(snapshot, dict) else (self._status_snapshot if isinstance(self._status_snapshot, dict) else {})
         raw = str(source.get('index_state') or '').strip().lower()
@@ -726,25 +714,20 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return 'ready'
         stats = source.get('stats') or {}
         return 'ready' if int(stats.get('chunks', 0) or 0) > 0 else 'missing'
-
     def _index_ready(self, snapshot: dict[str, object] | None = None) -> bool:
         return self._current_index_state(snapshot) == 'ready'
-
     def _watch_allowed(self, snapshot: dict[str, object] | None = None) -> bool:
         source = snapshot if isinstance(snapshot, dict) else self._status_snapshot
         if isinstance(source, dict) and 'watch_allowed' in source:
             return bool(source.get('watch_allowed'))
         return self._index_ready(snapshot)
-
     def _default_watch_summary(self) -> str:
         watch_text = self._tr('watch_ready') if WATCHDOG_AVAILABLE else self._tr('watch_fallback')
         backend = (self.backend_combo.currentText().strip() if hasattr(self, 'backend_combo') else getattr(self._config, 'vector_backend', 'disabled')) or 'disabled'
         return self._tr('vector_watch_summary', backend=backend, watch_text=watch_text)
-
     def _watch_mode_label(self, mode: str | bool) -> str:
         use_polling = mode if isinstance(mode, bool) else str(mode).strip().lower() == 'polling'
         return self._tr('watch_mode_polling') if use_polling else self._tr('watch_mode_watchdog')
-
     def _device_summary(self) -> str:
         acceleration = dict(self._acceleration_payload or {})
         if not acceleration:
@@ -753,17 +736,65 @@ class ConfigWorkspace(QtWidgets.QWidget):
         resolved = resolve_vector_device(requested)
         gpu_name = str(acceleration.get('gpu_name') or acceleration.get('cuda_name') or '').strip()
         nvcc_version = str(acceleration.get('nvcc_version') or '').strip()
-        if acceleration.get('cuda_available'):
+        runtime_complete = bool(acceleration.get('runtime_complete', True))
+        if acceleration.get('cuda_available') and runtime_complete:
             return self._tr('device_summary_cuda_ready', gpu=gpu_name or 'NVIDIA GPU', resolved=resolved)
         if acceleration.get('gpu_present'):
             if not acceleration.get('torch_available'):
                 if nvcc_version:
                     return self._tr('device_summary_gpu_runtime_missing_with_nvcc', gpu=gpu_name or 'NVIDIA GPU', cuda=nvcc_version)
                 return self._tr('device_summary_gpu_runtime_missing', gpu=gpu_name or 'NVIDIA GPU')
-            if not acceleration.get('sentence_transformers_available'):
+            if not acceleration.get('sentence_transformers_available') or not runtime_complete:
                 return self._tr('device_summary_gpu_runtime_incomplete', gpu=gpu_name or 'NVIDIA GPU')
             return self._tr('device_summary_gpu_detected_no_cuda', gpu=gpu_name or 'NVIDIA GPU')
         return self._tr('device_summary_cpu_only')
+
+    def _runtime_available_for_device(self, device_name: str) -> bool:
+        try:
+            config, _paths = self._collect_config(False)
+        except Exception:
+            config = replace(self._config)
+        probe_config = replace(config, vector_device=device_name)
+        return runtime_dependency_issue(probe_config) is None
+
+    def _actual_mode_text(self) -> str:
+        requested = self._current_device_value() if hasattr(self, 'device_combo') else self._normalize_device_code(getattr(self._config, 'vector_device', 'auto'))
+        resolved = resolve_vector_device(requested)
+        if resolved == 'cuda' and self._runtime_available_for_device(requested):
+            return self._tr('device_status_mode_gpu')
+        return self._tr('device_status_mode_cpu')
+
+    def _device_runtime_status_text(self) -> str:
+        acceleration = dict(self._acceleration_payload or {})
+        if not acceleration:
+            return self._tr('device_summary_detecting')
+        gpu_name = str(acceleration.get('gpu_name') or acceleration.get('cuda_name') or '').strip()
+        nvcc_version = str(acceleration.get('nvcc_version') or '').strip()
+        runtime_exists = bool(acceleration.get('runtime_exists'))
+        runtime_complete = bool(acceleration.get('runtime_complete'))
+        missing_items = [str(item) for item in (acceleration.get('runtime_missing_items') or []) if str(item).strip()]
+        gpu_value = gpu_name if acceleration.get('gpu_present') else self._tr('device_status_value_not_detected')
+        if acceleration.get('cuda_available'):
+            cuda_value = self._tr('device_status_value_cuda_ready', version=nvcc_version or str(acceleration.get('torch_version') or '').strip() or self._tr('none_value'))
+        elif acceleration.get('nvcc_available'):
+            cuda_value = self._tr('device_status_value_cuda_toolkit_only', version=nvcc_version or self._tr('none_value'))
+        else:
+            cuda_value = self._tr('device_status_value_not_detected')
+        runtime_dir_value = self._tr('device_status_value_yes') if runtime_exists else self._tr('device_status_value_no')
+        runtime_integrity_value = self._tr('device_status_value_complete') if runtime_complete else self._tr('device_status_value_incomplete')
+        cpu_value = self._tr('device_status_value_yes') if self._runtime_available_for_device('cpu') else self._tr('device_status_value_cpu_unavailable')
+        lines = [
+            self._tr('device_runtime_status_title'),
+            self._tr('device_runtime_status_gpu', value=gpu_value),
+            self._tr('device_runtime_status_cuda', value=cuda_value),
+            self._tr('device_runtime_status_runtime', value=runtime_dir_value),
+            self._tr('device_runtime_status_integrity', value=runtime_integrity_value),
+            self._tr('device_runtime_status_cpu', value=cpu_value),
+            self._tr('device_runtime_status_mode', value=self._actual_mode_text()),
+        ]
+        if missing_items:
+            lines.append(self._tr('device_runtime_status_runtime_missing_items', items=', '.join(missing_items)))
+        return '\n'.join(lines)
 
     def _collect_vault_paths(self, active_vault: str = '') -> list[str]:
         ordered: list[str] = []
@@ -775,7 +806,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             seen.add(normalized)
             ordered.append(normalized)
         return ordered
-
     def _set_saved_vaults(self, vaults: list[str], active_vault: str = '') -> None:
         ordered: list[str] = []
         seen: set[str] = set()
@@ -794,7 +824,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         elif self._saved_vaults:
             self.saved_vault_combo.setCurrentIndex(0)
         self.saved_vault_combo.blockSignals(False)
-
     def _refresh_workspace_summary(self) -> None:
         vault = normalize_vault_path(self.vault_edit.text().strip())
         data_root = self.data_dir_edit.text().strip() or str(default_data_root())
@@ -808,7 +837,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 summary = self._tr('workspace_pending', vault=Path(vault).name or vault)
         self.workspace_summary_label.setText(summary)
         self.data_workspace_label.setText(summary)
-
+        self._refresh_log_storage_summary()
     def _set_chip_style(self, widget: QtWidgets.QLabel, *, ok: bool = False, warn: bool = False) -> None:
         colors = self._theme.colors
         if ok:
@@ -821,6 +850,19 @@ class ConfigWorkspace(QtWidgets.QWidget):
             bg = colors['chip_neutral_bg']
             fg = colors['chip_neutral_fg']
         widget.setStyleSheet(f'background:{bg}; color:{fg}; border-radius:8px; padding:6px 10px;')
+    def _current_model_name(self) -> str:
+        if hasattr(self, 'model_edit'):
+            value = self.model_edit.text().strip()
+            if value:
+                return value
+        return str(getattr(self._config, 'vector_model', 'BAAI/bge-m3') or 'BAAI/bge-m3').strip() or 'BAAI/bge-m3'
+
+    def _bootstrap_button_text(self) -> str:
+        return self._tr('bootstrap_button_named', model=self._current_model_name())
+
+    def _refresh_model_download_text(self) -> None:
+        if hasattr(self, 'bootstrap_button'):
+            self.bootstrap_button.setText(self._bootstrap_button_text())
 
     def _refresh_overview_chips(self) -> None:
         try:
@@ -831,12 +873,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.vault_chip.setText(self._tr('vault_ready') if vault_ready else self._tr('vault_missing'))
         self._set_chip_style(self.vault_chip, ok=vault_ready)
         model_ready = self._is_model_ready()
-        self.model_chip.setText(self._tr('model_ready') if model_ready else self._tr('model_missing'))
+        model_name = self._current_model_name()
+        self.model_chip.setText(self._tr('model_ready_named', model=model_name) if model_ready else self._tr('model_missing_named', model=model_name))
         self._set_chip_style(self.model_chip, ok=model_ready, warn=not model_ready)
         index_state = self._current_index_state()
         self.index_chip.setText(self._tr(f'index_{index_state}'))
         self._set_chip_style(self.index_chip, ok=index_state == 'ready', warn=index_state == 'pending')
-
     def _refresh_device_options(self, payload: dict[str, object] | None = None) -> None:
         if isinstance(payload, dict):
             self._acceleration_payload = dict(payload)
@@ -854,17 +896,32 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._set_device_value(preferred)
         self.device_combo.blockSignals(False)
         self.device_summary_label.setText(self._device_summary())
-
+        self.device_runtime_status_label.setText(self._device_runtime_status_text())
     def _vector_backend_enabled(self) -> bool:
         backend = self.backend_combo.currentText().strip() if hasattr(self, 'backend_combo') else getattr(self._config, 'vector_backend', 'disabled')
         return (backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
-
     def _runtime_missing_for_cuda(self) -> bool:
         payload = runtime_guidance_context(self.runtime_combo.currentText().strip() or 'torch', 'cuda', force_refresh=True)
         if not payload.get('gpu_present'):
             return False
-        return (not payload.get('torch_available')) or (not payload.get('sentence_transformers_available')) or (not payload.get('cuda_available'))
-
+        if not payload.get('cuda_available'):
+            return True
+        try:
+            config, _paths = self._collect_config(False)
+        except Exception:
+            config = replace(self._config)
+        config = replace(config, vector_device='cuda')
+        return runtime_dependency_issue(config) is not None
+    def _runtime_guidance_auto_popup_allowed(self) -> bool:
+        return not self._device_runtime_prompt_suppressed and not self._busy and not self._watch_active
+    def _ensure_vector_runtime_ready(self, config: AppConfig) -> bool:
+        message = runtime_dependency_issue(config)
+        if not message:
+            return True
+        self._append_log(message, focus_log=True)
+        if not self._show_runtime_guidance_from_error(message):
+            self._show_runtime_install_guidance(self._normalize_device_code(getattr(config, 'vector_device', 'auto')), extra_detail=message)
+        return False
     def _show_runtime_install_guidance(self, requested_device: str, *, extra_detail: str = '') -> None:
         context = runtime_guidance_context(
             self.runtime_combo.currentText().strip() or 'torch',
@@ -872,10 +929,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
             force_refresh=True,
             extra_detail=extra_detail,
         )
+        LOGGER.info('Opening runtime guidance dialog: requested_device=%s busy=%s watch_active=%s runtime_complete=%s.', requested_device, self._busy, self._watch_active, context.get('runtime_complete'))
         self.statusMessageChanged.emit(self._tr('status_runtime_guidance_opened'))
         dialog = RuntimeGuidanceDialog(language_code=self._language_code, theme=self._theme, context=context, parent=self)
         dialog.exec()
-
     def _show_runtime_guidance_from_error(self, message: str) -> bool:
         text_value = str(message or '').strip()
         if not text_value:
@@ -883,8 +940,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if '当前还不能开始本地语义建库或向量查询。' not in text_value and 'Local semantic' not in text_value:
             return False
         requested = self._current_device_value() if hasattr(self, 'device_combo') else self._normalize_device_code(getattr(self._config, 'vector_device', 'auto'))
-        if requested != 'cuda':
-            return False
+        if requested not in {'auto', 'gpu', 'cuda'}:
+            requested = 'auto'
         baseline = runtime_guidance_context(self.runtime_combo.currentText().strip() or 'torch', requested, force_refresh=True)
         baseline_text = str(baseline.get('plain_text') or '').strip()
         extra_detail = ''
@@ -894,10 +951,27 @@ class ConfigWorkspace(QtWidgets.QWidget):
             extra_detail = text_value
         self._show_runtime_install_guidance(requested, extra_detail=extra_detail)
         return True
+    def _on_model_text_changed(self, _value: str) -> None:
+        self._refresh_model_download_text()
+        self._refresh_overview_chips()
+        self._on_live_runtime_preferences_changed()
+
+    def _on_live_runtime_preferences_changed(self, *_args) -> None:
+        if self._live_runtime_sync_suppressed:
+            return
+        try:
+            config, paths = self._collect_config(False)
+        except Exception:
+            return
+        self._config = config
+        self._paths = paths
+        self.runtimeConfigChanged.emit(self._config, self._paths)
 
     def _on_device_selection_changed(self, _value: str) -> None:
         self.device_summary_label.setText(self._device_summary())
-        if self._device_runtime_prompt_suppressed:
+        self.device_runtime_status_label.setText(self._device_runtime_status_text())
+        self._on_live_runtime_preferences_changed()
+        if not self._runtime_guidance_auto_popup_allowed():
             return
         requested = self._current_device_value()
         if requested != 'cuda':
@@ -908,7 +982,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
 
     def _on_runtime_sensitive_setting_changed(self, _value: str) -> None:
         self.device_summary_label.setText(self._device_summary())
-        if self._device_runtime_prompt_suppressed:
+        self.device_runtime_status_label.setText(self._device_runtime_status_text())
+        self._on_live_runtime_preferences_changed()
+        if not self._runtime_guidance_auto_popup_allowed():
             return
         requested = self._current_device_value() if hasattr(self, 'device_combo') else 'auto'
         if requested != 'cuda':
@@ -916,7 +992,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if not self._vector_backend_enabled() or not self._runtime_missing_for_cuda():
             return
         self._show_runtime_install_guidance(requested)
-
     def _refresh_reranker_state(self, payload: dict[str, object] | None = None) -> None:
         ready = None
         model_name = self.reranker_model_edit.text().strip() or 'BAAI/bge-reranker-v2-m3'
@@ -933,7 +1008,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 ready = False
         self.reranker_state_label.setText(self._tr('reranker_ready') if ready else self._tr('reranker_missing'))
         self.reranker_state_label.setProperty('role', 'guide' if ready else 'muted')
-
     def _merge_status_snapshot(self, snapshot: dict[str, object] | None, *, stats: dict[str, object] | None = None) -> dict[str, object] | None:
         merged = dict(snapshot) if isinstance(snapshot, dict) else {}
         if stats is not None:
@@ -942,12 +1016,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 merged_stats[key] = int(stats.get(key, merged_stats.get(key, 0)) or 0)
             merged['stats'] = merged_stats
         return merged or None
-
     def _refresh_preflight_notice(self) -> None:
         show_notice = self._current_report is not None or self._latest_preflight_snapshot is not None
         self.preflight_notice_label.setText(self._tr('preflight_success_notice') if show_notice else '')
         self.preflight_notice_label.setVisible(show_notice)
-
     def _refresh_status_summary(self, snapshot: dict[str, object] | None) -> None:
         if isinstance(snapshot, dict):
             self._status_snapshot = snapshot
@@ -986,12 +1058,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_task_controls()
         self._emit_query_block_state()
         self._emit_result_summary()
-
     def _emit_result_summary(self) -> None:
         self.resultSummaryChanged.emit(
             f"{self._tr('stat_files')} {self.files_value.text()} · {self._tr('stat_chunks')} {self.chunks_value.text()} · {self._tr('stat_refs')} {self.refs_value.text()}"
         )
-
     def _emit_query_block_state(self) -> None:
         if self._busy and self._active_task_key:
             self.queryBlockStateChanged.emit(True, self._tr('query_status_blocked_title'), self._tr('query_status_blocked_detail_task', task=self._tr(self._active_task_key)))
@@ -1003,18 +1073,16 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.queryBlockStateChanged.emit(True, self._tr('query_status_blocked_title'), self._tr('query_status_blocked_detail_index'))
             return
         self.queryBlockStateChanged.emit(False, '', '')
-
     def _append_log(self, message: str, *, focus_log: bool = False) -> None:
         text_value = str(message or '').strip()
         if not text_value:
             return
+        LOGGER.info('%s', text_value)
         self.logMessageAdded.emit(text_value)
         if focus_log:
             self.showQueryLogRequested.emit()
-
     def _on_preflight_notice_link(self, _target: str) -> None:
         self.showQueryLogRequested.emit()
-
     def _refresh_watch_button(self) -> None:
         self.watch_button.setText(self._tr('watch_stop') if self._watch_active else self._tr('watch_start'))
         self._set_button_variant(self.watch_button, 'danger' if self._watch_active else 'primary')
@@ -1030,11 +1098,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.watch_button.setToolTip(self._tr('watch_start_blocked_pending_body'))
         else:
             self.watch_button.setToolTip(self._tr('watch_start_blocked_missing_body'))
-
     def _apply_config_to_controls(self, config: AppConfig, paths) -> None:
         self._config = config
         self._paths = paths
         self._device_runtime_prompt_suppressed = True
+        self._live_runtime_sync_suppressed = True
         try:
             self.vault_edit.setText(config.vault_path)
             self.data_dir_edit.setText(config.data_root)
@@ -1047,6 +1115,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.interval_edit.setText(str(config.poll_interval_seconds))
             self.build_profile_combo.setCurrentText(self._build_profile_label(getattr(config, 'build_resource_profile', 'balanced')))
             self.watch_peak_combo.setCurrentText(self._watch_peak_label(getattr(config, 'watch_resource_peak_percent', 15)))
+            self.log_size_spin.setValue(normalize_log_file_size_mb(getattr(config, 'log_file_size_mb', DEFAULT_LOG_FILE_SIZE_MB), DEFAULT_LOG_FILE_SIZE_MB))
             self.local_only_check.setChecked(config.vector_local_files_only)
             self.force_check.setChecked(False)
             self.polling_check.setChecked(False)
@@ -1057,13 +1126,16 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.reranker_model_edit.setText(getattr(config, 'reranker_model', 'BAAI/bge-reranker-v2-m3'))
             self.reranker_batch_cpu_edit.setText(str(getattr(config, 'reranker_batch_size_cpu', 4)))
             self.reranker_batch_cuda_edit.setText(str(getattr(config, 'reranker_batch_size_cuda', 8)))
+            self._refresh_model_download_text()
             self._refresh_quick_start_visibility()
             self._refresh_advanced_visibility()
             self._refresh_workspace_summary()
         finally:
             self._device_runtime_prompt_suppressed = False
+            self._live_runtime_sync_suppressed = False
+        self.device_summary_label.setText(self._device_summary())
+        self.device_runtime_status_label.setText(self._device_runtime_status_text())
         self.runtimeConfigChanged.emit(self._config, self._paths)
-
     def _collect_config(self, require_vault: bool) -> tuple[AppConfig, Any]:
         vault = normalize_vault_path(self.vault_edit.text().strip())
         if require_vault:
@@ -1089,6 +1161,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             poll_interval_seconds=interval,
             build_resource_profile=self._build_profile_code(self.build_profile_combo.currentText()),
             watch_resource_peak_percent=self._watch_peak_value(self.watch_peak_combo.currentText()),
+            log_file_size_mb=normalize_log_file_size_mb(self.log_size_spin.value(), DEFAULT_LOG_FILE_SIZE_MB),
             vector_backend=self.backend_combo.currentText().strip() or 'disabled',
             vector_model=self.model_edit.text().strip() or 'BAAI/bge-m3',
             vector_runtime=self.runtime_combo.currentText().strip() or 'torch',
@@ -1116,25 +1189,20 @@ class ConfigWorkspace(QtWidgets.QWidget):
             qt_results_splitter_state=getattr(self._config, 'qt_results_splitter_state', ''),
         )
         return config, paths
-
     def _refresh_quick_start_visibility(self) -> None:
         expanded = bool(getattr(self._config, 'ui_quick_start_expanded', True))
         self.quick_steps_widget.setVisible(expanded)
         self.quick_start_button.setText(self._tr('quick_start_hide') if expanded else self._tr('quick_start_show'))
-
     def _toggle_quick_start(self) -> None:
         self._config.ui_quick_start_expanded = not bool(getattr(self._config, 'ui_quick_start_expanded', True))
         self._refresh_quick_start_visibility()
-
     def _refresh_advanced_visibility(self) -> None:
         expanded = bool(getattr(self, '_show_advanced', True))
         self.advanced_widget.setVisible(expanded)
         self.advanced_toggle_button.setText(self._tr('advanced_hide') if expanded else self._tr('advanced_show'))
-
     def _toggle_advanced(self) -> None:
         self._show_advanced = not bool(getattr(self, '_show_advanced', True))
         self._refresh_advanced_visibility()
-
     def schedule_device_probe(self, delay_ms: int = 0) -> None:
         if self._device_probe_scheduled or self._device_probe_worker is not None:
             return
@@ -1143,7 +1211,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtCore.QTimer.singleShot(delay_ms, self._start_device_probe)
             return
         self._start_device_probe()
-
     def _start_device_probe(self) -> None:
         self._device_probe_scheduled = False
         if self._device_probe_worker is not None:
@@ -1154,21 +1221,17 @@ class ConfigWorkspace(QtWidgets.QWidget):
         worker.finished.connect(self._on_device_probe_finished)
         self._device_probe_worker = worker
         worker.start()
-
     def _on_device_probe_success(self, payload: object) -> None:
         if not isinstance(payload, dict):
             return
         self._refresh_device_options(payload)
-
     def _on_device_probe_failed(self, message: str, traceback_text: str) -> None:
         print(f'Qt device probe failed: {message}', file=sys.stderr, flush=True)
         if traceback_text.strip():
             print(traceback_text.strip(), file=sys.stderr, flush=True)
         self.device_summary_label.setText(self._tr('device_summary_detecting'))
-
     def _on_device_probe_finished(self) -> None:
         self._device_probe_worker = None
-
     def schedule_initial_status_load(self, delay_ms: int = 0) -> None:
         if self._initial_status_scheduled or self._initial_status_worker is not None:
             return
@@ -1177,7 +1240,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtCore.QTimer.singleShot(delay_ms, self._load_initial_status)
             return
         self._load_initial_status()
-
     def _load_initial_status(self) -> None:
         self._initial_status_scheduled = False
         if self._initial_status_worker is not None or self._busy or self._watch_active:
@@ -1189,14 +1251,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._refresh_status_summary(snapshot=None)
             self._emit_query_block_state()
             return
-
         def runner(service, emit, pause, cancel):
             return {
                 'status': service.status_snapshot(),
                 'config': config,
                 'paths': paths,
             }
-
         worker = ServiceTaskWorker(config=config, paths=paths, runner=runner)
         worker.succeeded.connect(self._on_initial_status_success)
         worker.runtimeError.connect(self._on_initial_status_runtime_error)
@@ -1204,7 +1264,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         worker.finished.connect(self._on_initial_status_finished)
         self._initial_status_worker = worker
         worker.start()
-
     def _on_initial_status_success(self, payload: object) -> None:
         if not isinstance(payload, dict):
             return
@@ -1220,13 +1279,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
         else:
             self._refresh_status_summary(snapshot=None)
         self._emit_query_block_state()
-
     def _on_initial_status_runtime_error(self, message: str) -> None:
         print(f'Qt initial status load failed: {message}', file=sys.stderr, flush=True)
         self.statusMessageChanged.emit(self._tr('status_ready'))
         self._append_log(message, focus_log=True)
         self._emit_query_block_state()
-
     def _on_initial_status_failed(self, message: str, traceback_text: str) -> None:
         print(f'Qt initial status load failed: {message}', file=sys.stderr, flush=True)
         if traceback_text.strip():
@@ -1234,39 +1291,32 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('status_ready'))
         self._append_log(traceback_text.strip() or message, focus_log=True)
         self._emit_query_block_state()
-
     def _on_initial_status_finished(self) -> None:
         self._initial_status_worker = None
-
     def _open_help_and_updates(self) -> None:
         answer = QtWidgets.QMessageBox.question(self, self._tr('help_updates_confirm_title'), self._tr('help_updates_confirm_body'))
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
         self._open_url(REPO_URL)
-
     def _open_url(self, url: str) -> None:
         if not QtGui.QDesktopServices.openUrl(QtCore.QUrl(url)):
             QtWidgets.QMessageBox.warning(self, self._tr('help_updates'), self._tr('help_failed'))
-
     def _browse_vault(self) -> None:
         selected = QtWidgets.QFileDialog.getExistingDirectory(self, self._tr('vault_label'), self.vault_edit.text().strip() or str(Path.home()))
         if not selected:
             return
         self._activate_vault(selected, refresh_status=True)
         self._append_log(self._tr('log_vault_selected', vault=Path(selected).name or selected))
-
     def _browse_data_root(self) -> None:
         selected = QtWidgets.QFileDialog.getExistingDirectory(self, self._tr('data_dir_label'), self.data_dir_edit.text().strip() or str(default_data_root()))
         if not selected:
             return
         self.data_dir_edit.setText(str(Path(selected).expanduser().resolve()))
         self._load_config_from_current_dir()
-
     def _on_saved_vault_selected(self, value: str) -> None:
         selected = normalize_vault_path(value)
         if selected:
             self._activate_vault(selected, refresh_status=True)
-
     def _activate_vault(self, vault: str, *, refresh_status: bool) -> None:
         normalized = normalize_vault_path(vault)
         if not normalized:
@@ -1280,7 +1330,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_status_summary(snapshot=None)
         if refresh_status and not self._busy and not self._watch_active:
             self._load_initial_status()
-
     def _remove_selected_vault(self) -> None:
         selected = normalize_vault_path(self.saved_vault_combo.currentText().strip() or self.vault_edit.text().strip())
         if not selected:
@@ -1300,7 +1349,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.statusMessageChanged.emit(self._tr('status_ready'))
             self._refresh_status_summary(snapshot=None)
         self._append_log(self._tr('log_vault_removed', vault=Path(selected).name or selected))
-
     def _save_only(self) -> None:
         try:
             config, paths = self._collect_config(False)
@@ -1312,7 +1360,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('status_saved', path=paths.config_file))
         self._append_log(self._tr('log_saved_config', path=paths.config_file))
         self._refresh_status_summary(self._status_snapshot)
-
     def _load_config_from_current_dir(self) -> None:
         active_vault = self.vault_edit.text().strip() or None
         paths = ensure_data_paths(self.data_dir_edit.text().strip() or str(default_data_root()), active_vault)
@@ -1328,7 +1375,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._apply_config_to_controls(config, paths)
         self._append_log(self._tr('log_loaded_config', path=paths.config_file))
         self._load_initial_status()
-
     def _apply_recommended(self) -> None:
         self.backend_combo.setCurrentText('lancedb')
         self.model_edit.setText('BAAI/bge-m3')
@@ -1338,6 +1384,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.interval_edit.setText('2.0')
         self.build_profile_combo.setCurrentText(self._build_profile_label('balanced'))
         self.watch_peak_combo.setCurrentText(self._watch_peak_label(15))
+        self.log_size_spin.setValue(DEFAULT_LOG_FILE_SIZE_MB)
         self.local_only_check.setChecked(False)
         self.force_check.setChecked(False)
         self.polling_check.setChecked(False)
@@ -1352,10 +1399,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._config.page_blocklist_rules = merge_page_filter_defaults('')
         self._refresh_status_summary(self._status_snapshot)
         self.statusMessageChanged.emit(self._tr('status_recommended'))
-
     def update_theme(self, theme: ThemeState) -> None:
         self._theme = theme
-
     def snapshot_view_state(self) -> dict[str, object]:
         return {
             'sub_tab_index': self.sub_tabs.currentIndex(),
@@ -1369,6 +1414,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             'interval_text': self.interval_edit.text(),
             'build_profile': self._build_profile_code(self.build_profile_combo.currentText()),
             'watch_peak': self._watch_peak_value(self.watch_peak_combo.currentText()),
+            'log_size_mb': normalize_log_file_size_mb(self.log_size_spin.value(), DEFAULT_LOG_FILE_SIZE_MB),
             'local_only': self.local_only_check.isChecked(),
             'force': self.force_check.isChecked(),
             'polling': self.polling_check.isChecked(),
@@ -1382,7 +1428,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             'current_report': self._current_report,
             'status_snapshot': self._status_snapshot,
         }
-
     def restore_view_state(self, state: dict[str, object] | None) -> None:
         payload = dict(state or {})
         self._device_runtime_prompt_suppressed = True
@@ -1398,6 +1443,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.interval_edit.setText(str(payload.get('interval_text') or self.interval_edit.text()))
             self.build_profile_combo.setCurrentText(self._build_profile_label(payload.get('build_profile') or self._build_profile_code(self.build_profile_combo.currentText())))
             self.watch_peak_combo.setCurrentText(self._watch_peak_label(payload.get('watch_peak') or self._watch_peak_value(self.watch_peak_combo.currentText())))
+            self.log_size_spin.setValue(normalize_log_file_size_mb(payload.get('log_size_mb', self.log_size_spin.value()), DEFAULT_LOG_FILE_SIZE_MB))
             self.local_only_check.setChecked(bool(payload.get('local_only', self.local_only_check.isChecked())))
             self.force_check.setChecked(bool(payload.get('force', self.force_check.isChecked())))
             self.polling_check.setChecked(bool(payload.get('polling', self.polling_check.isChecked())))
@@ -1416,7 +1462,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 self.sub_tabs.setCurrentIndex(sub_tab_index)
         finally:
             self._device_runtime_prompt_suppressed = False
-
     def _apply_ui_preferences(self) -> None:
         try:
             config, paths = self._collect_config(False)
@@ -1430,18 +1475,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.uiPreferencesChanged.emit(config.ui_theme, config.ui_scale_percent)
         self.statusMessageChanged.emit(self._tr('status_saved', path=paths.config_file))
         self._append_log(self._tr('log_saved_config', path=paths.config_file))
-
     def _is_model_ready(self) -> bool:
         try:
             config, paths = self._collect_config(False)
         except Exception:
             return False
-        backend_enabled = (config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
-        return True if not backend_enabled else is_local_model_ready(config, paths)
-
+        return is_local_model_ready(config, paths)
     def _open_local_dir(self, path: Path) -> None:
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
-
     def _open_vault_dir(self) -> None:
         try:
             config, _paths = self._collect_config(True)
@@ -1449,7 +1490,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), str(exc))
             return
         self._open_local_dir(config.vault_dir)
-
     def _open_data_dir(self) -> None:
         try:
             _config, paths = self._collect_config(True)
@@ -1457,7 +1497,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), str(exc))
             return
         self._open_local_dir(paths.root)
-
     def _open_exports_dir(self) -> None:
         try:
             _config, paths = self._collect_config(True)
@@ -1465,12 +1504,53 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), str(exc))
             return
         self._open_local_dir(paths.exports_dir)
-
+    def _open_logs_dir(self) -> None:
+        try:
+            _config, paths = self._collect_config(False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), str(exc))
+            return
+        self._open_local_dir(paths.logs_dir)
+    def _log_directory_bytes(self, directory: Path) -> int:
+        if not directory.exists():
+            return 0
+        total = 0
+        for child in directory.rglob('*'):
+            if not child.is_file():
+                continue
+            try:
+                total += child.stat().st_size
+            except OSError:
+                continue
+        return total
+    def _refresh_log_storage_summary(self) -> None:
+        if not hasattr(self, 'log_storage_summary_label'):
+            return
+        try:
+            _config, paths = self._collect_config(False)
+        except Exception:
+            self.log_storage_summary_label.setText(self._tr('log_storage_summary_unavailable', limit=normalize_log_file_size_mb(getattr(self._config, 'log_file_size_mb', DEFAULT_LOG_FILE_SIZE_MB), DEFAULT_LOG_FILE_SIZE_MB), backups=LOG_BACKUP_COUNT + 1))
+            return
+        limit_mb = normalize_log_file_size_mb(self.log_size_spin.value() if hasattr(self, 'log_size_spin') else getattr(self._config, 'log_file_size_mb', DEFAULT_LOG_FILE_SIZE_MB), DEFAULT_LOG_FILE_SIZE_MB)
+        total_bytes = self._log_directory_bytes(paths.logs_dir)
+        self.log_storage_summary_label.setText(self._tr('log_storage_summary', path=paths.logs_dir, size=format_bytes(total_bytes), limit=limit_mb, backups=LOG_BACKUP_COUNT + 1))
+    def _save_log_preferences(self) -> None:
+        try:
+            config, paths = self._collect_config(False)
+            config.log_file_size_mb = normalize_log_file_size_mb(self.log_size_spin.value(), DEFAULT_LOG_FILE_SIZE_MB)
+            save_config(config, paths)
+            configure_file_logging(paths, config)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('save_failed_title'), str(exc))
+            return
+        self._apply_config_to_controls(config, paths)
+        self._refresh_log_storage_summary()
+        self.statusMessageChanged.emit(self._tr('status_log_settings_saved', limit=config.log_file_size_mb))
+        self._append_log(self._tr('log_log_settings_saved', limit=config.log_file_size_mb, path=paths.logs_dir))
     def open_page_blocklist_dialog(self) -> None:
         dialog = PageBlocklistDialog(raw_rules=getattr(self._config, 'page_blocklist_rules', ''), language_code=self._language_code, theme=self._theme, parent=self)
         dialog.rulesSaved.connect(self._on_page_blocklist_saved)
         dialog.exec()
-
     def _on_page_blocklist_saved(self, serialized_rules: str) -> None:
         self._config.page_blocklist_rules = serialized_rules
         try:
@@ -1484,7 +1564,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('status_page_blocklist_saved'))
         self._append_log(self._tr('log_page_blocklist_saved', enabled=sum(1 for line in serialized_rules.splitlines() if line.startswith('1\t')), total=len([line for line in serialized_rules.splitlines() if line.strip()])))
         self.queryReplayRequested.emit()
-
     def open_sensitive_filter_dialog(self) -> None:
         dialog = SensitiveFilterDialog(
             core_enabled=getattr(self._config, 'rag_filter_core_enabled', True),
@@ -1496,7 +1575,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         )
         dialog.rulesSaved.connect(self._on_sensitive_filters_saved)
         dialog.exec()
-
     def _on_sensitive_filters_saved(self, core_enabled: bool, extended_enabled: bool, custom_rules: str) -> None:
         self._config.rag_filter_core_enabled = core_enabled
         self._config.rag_filter_extended_enabled = extended_enabled
@@ -1514,7 +1592,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('status_sensitive_filters_saved'))
         self._append_log(self._tr('log_sensitive_filters_saved'))
         self.queryReplayRequested.emit()
-
     def _ask_yes_no_cancel(self, title: str, body: str) -> QtWidgets.QMessageBox.StandardButton:
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle(title)
@@ -1522,15 +1599,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
         box.setIcon(QtWidgets.QMessageBox.Icon.Question)
         box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No | QtWidgets.QMessageBox.StandardButton.Cancel)
         return QtWidgets.QMessageBox.StandardButton(box.exec())
-
     def _manual_model_hint(self, config: AppConfig, paths) -> str:
         return self._tr('manual_model_hint', mirror_url='https://hf-mirror.com/', hf_url=f'https://huggingface.co/{config.vector_model}', model=config.vector_model, size=format_bytes(estimate_model_cache_bytes(config.vector_model, config.vector_runtime)), model_dir=get_local_model_dir(config, paths))
-
     def _manual_reranker_hint(self, config: AppConfig, paths) -> str:
         model_dir = get_local_reranker_dir(config, paths)
         model_dir.mkdir(parents=True, exist_ok=True)
         return self._tr('manual_reranker_hint', mirror_url='https://hf-mirror.com/', hf_url=f'https://huggingface.co/{config.reranker_model}', model=config.reranker_model, size=format_bytes(estimate_model_cache_bytes(config.reranker_model, config.vector_runtime)), model_dir=model_dir)
-
     def _choose_model_download_mode(self, task_label: str, config: AppConfig, paths) -> str | None:
         model_dir = get_local_model_dir(config, paths)
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -1546,7 +1620,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('model_prompt_declined'))
         self._append_log(self._tr('log_model_download_declined'))
         return None
-
     def _choose_reranker_download_mode(self, task_label: str, config: AppConfig, paths) -> str | None:
         model_dir = get_local_reranker_dir(config, paths)
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -1562,7 +1635,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('status_reranker_download_declined'))
         self._append_log(self._tr('log_reranker_download_declined'))
         return None
-
     def _prepare_model_for_followup(self, label_key: str, require_vault: bool, followup) -> bool:
         try:
             config, paths = self._collect_config(require_vault)
@@ -1581,7 +1653,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.local_only_check.setChecked(False)
         self._run_bootstrap_model(followup=followup)
         return True
-
     def _task_profile(self, label_key: str, config: AppConfig, paths) -> tuple[str, str]:
         if label_key == 'preflight_button':
             return self._tr('task_eta_preflight'), self._tr('task_detail_preflight')
@@ -1600,10 +1671,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if label_key == 'clear_button':
             return self._tr('task_eta_refresh'), self._tr('task_detail_refresh')
         return self._tr('task_eta_unknown'), self._tr('task_detail_unknown')
-
     def _is_rebuild_task(self, label_key: str | None) -> bool:
         return label_key in {'rebuild_button', 'resume_rebuild_task'}
-
     def _refresh_task_controls(self) -> None:
         visible = self._busy and self._is_rebuild_task(self._active_task_key)
         self.rebuild_pause_button.setVisible(visible)
@@ -1613,29 +1682,25 @@ class ConfigWorkspace(QtWidgets.QWidget):
         paused = self._rebuild_pause_event.is_set()
         self.rebuild_pause_button.setText(self._tr('resume_rebuild_button') if paused else self._tr('pause_rebuild'))
         self._set_button_variant(self.rebuild_pause_button, 'primary' if paused else 'secondary')
-
     def _set_task_progress_busy(self) -> None:
         self.task_progress.setRange(0, 0)
         self.task_progress.setValue(0)
         self.task_progress.setFormat('')
         self.task_progress.setTextVisible(False)
-
     def _set_task_progress_counts(self, current: int, total: int, percent: float) -> None:
         safe_total = max(int(total), 1)
         safe_current = max(0, min(int(current), safe_total))
         safe_percent = max(0.0, min(float(percent), 100.0))
-        self.task_progress.setRange(0, safe_total)
-        self.task_progress.setValue(safe_current)
+        self.task_progress.setRange(0, 100)
+        self.task_progress.setValue(int(round(safe_percent)))
         self.task_progress.setFormat(f'{safe_current}/{safe_total} · {safe_percent:.0f}%')
         self.task_progress.setTextVisible(True)
-
     def _set_task_progress_percent(self, percent: float, *, format_text: str = '') -> None:
         safe_percent = max(0.0, min(float(percent), 100.0))
         self.task_progress.setRange(0, 100)
         self.task_progress.setValue(int(round(safe_percent)))
         self.task_progress.setFormat(format_text or f'{safe_percent:.0f}%')
         self.task_progress.setTextVisible(True)
-
     def _start_task_feedback(self, label_key: str, config: AppConfig, paths) -> None:
         eta_text, detail_text = self._task_profile(label_key, config, paths)
         self._active_task_key = label_key
@@ -1655,21 +1720,26 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._task_timer.start()
         self._refresh_task_controls()
         self._emit_query_block_state()
-
     def _freeze_task_progress_visual(self) -> None:
         payload = dict(self._latest_task_progress or {})
+        stage = str(payload.get('stage') or '').strip().lower()
         current = int(payload.get('current', 0) or 0)
         total = int(payload.get('total', 0) or 0)
         percent = float(payload.get('overall_percent', 0.0) or 0.0)
         if total > 0:
             if percent <= 0.0 and current > 0:
                 percent = (current / max(total, 1)) * 100.0
-            self._set_task_progress_counts(current, total, percent)
-            self.task_percent_label.setText(self._tr('task_percent_label', percent=percent, current=current, total=total))
+            if stage == 'vectorizing':
+                encoded = max(0, min(int(payload.get('encoded_count', current) or current), total))
+                written = max(0, min(int(payload.get('written_count', current) or current), total))
+                self._set_task_progress_counts(written, total, percent)
+                self.task_percent_label.setText(self._tr('task_percent_vector_label', percent=percent, written=written, total=total))
+            else:
+                self._set_task_progress_counts(current, total, percent)
+                self.task_percent_label.setText(self._tr('task_percent_label', percent=percent, current=current, total=total))
             return
         self._set_task_progress_percent(percent)
         if payload:
-            stage = str(payload.get('stage') or '').strip().lower()
             stage_map = {
                 'preflight_scan': 'task_stage_preflight_scan',
                 'preflight_finalize': 'task_stage_preflight_finalize',
@@ -1683,7 +1753,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 self.task_percent_label.setText(self._tr('task_percent_idle'))
         else:
             self.task_percent_label.setText(self._tr('task_percent_idle'))
-
     def _stop_task_feedback(self) -> None:
         self._task_timer.stop()
         self._rebuild_pause_event.clear()
@@ -1704,13 +1773,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.task_progress.setTextVisible(False)
         self._refresh_task_controls()
         self._emit_query_block_state()
-
     def _tick_task_feedback(self) -> None:
         if not self._busy:
             return
         if not (self._rebuild_pause_event.is_set() and self._is_rebuild_task(self._active_task_key)):
             self.task_elapsed_label.setText(self._tr('task_elapsed', value=self._format_elapsed(self._current_task_elapsed_seconds())))
-
     def _render_vector_tuning(self, payload: dict[str, object]) -> str:
         encode_batch = int(payload.get('encode_batch_size', 0) or 0)
         write_batch = int(payload.get('write_batch_size', 0) or 0)
@@ -1724,18 +1791,23 @@ class ConfigWorkspace(QtWidgets.QWidget):
             except Exception:
                 metrics = self._tr('none_value')
         return self._tr('task_detail_rebuild_vector_tuning', profile=self._build_profile_label(str(payload.get('build_profile', 'balanced'))), encode_batch=encode_batch, write_batch=write_batch, metrics=metrics, action=self._tr(f"vector_tuning_action_{str(payload.get('tuning_action', 'steady')).strip().lower() or 'steady'}"), reason=self._tr(f"vector_tuning_reason_{str(payload.get('tuning_reason', 'stable')).strip().lower() or 'stable'}"), encoded_count=int(payload.get('encoded_count', 0) or 0), written_count=int(payload.get('written_count', 0) or 0), queue_depth=int(payload.get('write_queue_depth', 0) or 0), queue_capacity=int(payload.get('write_queue_capacity', 0) or 0), flush_count=int(payload.get('write_flush_count', 0) or 0), prepare_seconds=f"{float(payload.get('prepare_elapsed_total_ms', 0.0) or 0.0) / 1000.0:.1f}", write_seconds=f"{float(payload.get('write_elapsed_total_ms', 0.0) or 0.0) / 1000.0:.1f}")
-
     def _update_task_progress(self, payload: dict[str, object]) -> None:
         self._latest_task_progress = payload
         stage = str(payload.get('stage') or '').strip().lower()
         current = int(payload.get('current', 0) or 0)
         total = int(payload.get('total', 0) or 0)
         percent = float(payload.get('overall_percent', 0.0) or 0.0)
+        encoded = max(0, min(int(payload.get('encoded_count', current) or current), total)) if total > 0 else max(0, int(payload.get('encoded_count', current) or current))
+        written = max(0, min(int(payload.get('written_count', current) or current), total)) if total > 0 else max(0, int(payload.get('written_count', current) or current))
         if total > 0:
             if percent <= 0.0 and current > 0:
                 percent = (current / max(total, 1)) * 100.0
-            self._set_task_progress_counts(current, total, percent)
-            self.task_percent_label.setText(self._tr('task_percent_label', percent=percent, current=current, total=total))
+            if stage == 'vectorizing':
+                self._set_task_progress_counts(written, total, percent)
+                self.task_percent_label.setText(self._tr('task_percent_vector_label', percent=percent, written=written, total=total))
+            else:
+                self._set_task_progress_counts(current, total, percent)
+                self.task_percent_label.setText(self._tr('task_percent_label', percent=percent, current=current, total=total))
         else:
             self._set_task_progress_busy()
             if stage in {'rendering', 'vectorizing'}:
@@ -1766,15 +1838,22 @@ class ConfigWorkspace(QtWidgets.QWidget):
         elif stage == 'rendering':
             self.task_detail_label.setText(self._tr('task_detail_rebuild_rendering_progress', current=current, total=total) if total > 0 else self._tr('task_detail_rebuild_rendering'))
         elif stage == 'vectorizing':
-            if str(payload.get('stage_status') or '') == 'loading_model' and current <= 0:
+            stage_status = str(payload.get('stage_status') or '').strip().lower()
+            if stage_status == 'loading_model' and current <= 0:
                 self._set_task_progress_busy()
                 self.task_detail_label.setText(self._tr('task_detail_rebuild_vector_loading'))
             else:
-                detail = self._tr('task_detail_rebuild_vectorizing', total=total)
+                if stage_status == 'recovering':
+                    detail = self._tr('task_detail_rebuild_vector_recovering', encoded=encoded, written=written, total=total)
+                elif stage_status == 'backpressure':
+                    detail = self._tr('task_detail_rebuild_vector_backpressure', encoded=encoded, written=written, total=total)
+                elif stage_status == 'flushing':
+                    detail = self._tr('task_detail_rebuild_vector_flushing', encoded=encoded, written=written, total=total)
+                else:
+                    detail = self._tr('task_detail_rebuild_vectorizing_counts', encoded=encoded, written=written, total=total)
                 tuning = self._render_vector_tuning(payload)
                 self.task_detail_label.setText(f'{detail}\n{tuning}' if tuning else detail)
         self._refresh_task_controls()
-
     def _start_service_task(self, label_key: str, runner, on_success, *, require_vault: bool) -> None:
         if self._busy:
             QtWidgets.QMessageBox.information(self, self._tr('busy_title'), self._tr('busy_body'))
@@ -1806,28 +1885,22 @@ class ConfigWorkspace(QtWidgets.QWidget):
         worker.finished.connect(self._on_task_finished)
         self._task_worker = worker
         worker.start()
-
     def _on_task_progress(self, payload: object) -> None:
         if isinstance(payload, dict):
             self._update_task_progress(payload)
-
     def _on_task_success(self, payload: object) -> None:
         self._task_outcome_kind = 'success'
         self._task_outcome_payload = payload
-
     def _on_task_cancelled(self, snapshot: object) -> None:
         self._task_outcome_kind = 'cancelled'
         self._task_outcome_payload = snapshot
-
     def _on_task_runtime_error(self, message: str) -> None:
         self._task_outcome_kind = 'runtime-error'
         self._task_outcome_message = message
-
     def _on_task_failed(self, message: str, traceback_text: str) -> None:
         self._task_outcome_kind = 'failed'
         self._task_outcome_message = message
         self._task_outcome_traceback = traceback_text
-
     def _on_task_finished(self) -> None:
         label_key = self._active_task_key
         handler = self._task_success_handler
@@ -1866,7 +1939,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.statusMessageChanged.emit(self._tr('status_failed', label=self._tr(label_key or 'refresh_button')))
             self._append_log(outcome_traceback.strip() or outcome_message, focus_log=True)
             QtWidgets.QMessageBox.critical(self, self._tr(label_key or 'refresh_button'), outcome_message or outcome_traceback)
-
     def _toggle_rebuild_pause(self) -> None:
         if not self._busy or not self._is_rebuild_task(self._active_task_key):
             return
@@ -1890,7 +1962,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.task_detail_label.setText(self._tr('task_detail_rebuild_paused'))
             self.task_eta_label.setText(self._tr('task_eta_paused', value=self._task_last_eta_text))
         self._refresh_task_controls()
-
     def _cancel_rebuild(self) -> None:
         if not self._busy or not self._is_rebuild_task(self._active_task_key):
             return
@@ -1908,7 +1979,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('status_rebuild_cancel_requested'))
         self._append_log(self._tr('log_rebuild_cancel_requested'))
         self._refresh_task_controls()
-
     def _offer_resume_rebuild(self, config: AppConfig, paths, payload) -> None:
         pending = payload.get('pending_rebuild') if isinstance(payload, dict) else None
         if not isinstance(pending, dict):
@@ -1933,22 +2003,20 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_status_summary(snapshot)
         self.statusMessageChanged.emit(self._tr('status_resume_discarded'))
         self._append_log(self._tr('log_resume_discarded'))
-
     def _run_preflight(self) -> None:
         self._start_service_task('preflight_button', lambda service, emit, pause, cancel: {'report': service.estimate_space(on_progress=emit, pause_event=pause, cancel_event=cancel), 'status': service.status_snapshot()}, self._after_preflight, require_vault=True)
-
     def _run_bootstrap_model(self, *, followup=None) -> None:
         try:
             config, paths = self._collect_config(True)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
             return
-        if (config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'} and is_local_model_ready(config, paths):
+        if is_local_model_ready(config, paths):
             self.statusMessageChanged.emit(self._tr('status_model_already_ready'))
             self._append_log(self._tr('log_model_already_ready', model=config.vector_model))
             QtWidgets.QMessageBox.information(self, self._tr('model_ready_title'), self._tr('model_ready_body', model=config.vector_model))
             return
-        choice = self._choose_model_download_mode(self._tr('bootstrap_button'), config, paths)
+        choice = self._choose_model_download_mode(self._bootstrap_button_text(), config, paths)
         if choice != 'auto':
             return
         force = self.force_check.isChecked()
@@ -1962,7 +2030,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             if followup is not None and not payload.get('blocked'):
                 followup()
         self._start_service_task('bootstrap_button', runner, after, require_vault=True)
-
     def _run_bootstrap_reranker(self) -> None:
         try:
             config, paths = self._collect_config(False)
@@ -1978,7 +2045,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if choice != 'auto':
             return
         self._start_service_task('bootstrap_reranker_button', lambda service, emit, pause, cancel: {'result': service.bootstrap_reranker(), 'status': service.status_snapshot()}, self._after_bootstrap_reranker, require_vault=False)
-
     def _run_rebuild(self, *, resume: bool = False) -> None:
         try:
             config, paths = self._collect_config(True)
@@ -1986,6 +2052,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
             return
         backend_enabled = (config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
+        resolved_device = resolve_vector_device(config.vector_device)
+        if backend_enabled and str(config.vector_device or '').strip().lower() == 'cuda' and resolved_device != 'cuda':
+            self._append_log(self._tr('log_rebuild_cuda_fell_back_to_cpu'))
+        if backend_enabled and not self._ensure_vector_runtime_ready(config):
+            return
         if backend_enabled and not is_local_model_ready(config, paths):
             if self._prepare_model_for_followup('resume_rebuild_task' if resume else 'rebuild_button', True, lambda: self._run_rebuild(resume=resume)):
                 return
@@ -2023,10 +2094,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             stats = service.rebuild_index(resume=resume, on_progress=emit, pause_event=pause, cancel_event=cancel)
             return {'blocked': False, 'report': report, 'stats': stats, 'status': service.status_snapshot(), 'resumed': resume}
         self._start_service_task(label_key, runner, self._after_rebuild, require_vault=True)
-
     def _run_refresh(self) -> None:
         self._start_service_task('refresh_button', lambda service, emit, pause, cancel: service.status_snapshot(), self._after_status, require_vault=False)
-
     def _run_clear(self) -> None:
         if not any((self.clear_index_check.isChecked(), self.clear_logs_check.isChecked(), self.clear_cache_check.isChecked(), self.clear_exports_check.isChecked())):
             QtWidgets.QMessageBox.information(self, self._tr('clear_pick_title'), self._tr('clear_pick_body'))
@@ -2038,7 +2107,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             service.clear_data(clear_index=self.clear_index_check.isChecked(), clear_logs=self.clear_logs_check.isChecked(), clear_cache=self.clear_cache_check.isChecked(), clear_exports=self.clear_exports_check.isChecked())
             return service.status_snapshot()
         self._start_service_task('clear_button', runner, self._after_clear, require_vault=True)
-
     def _toggle_watch(self) -> None:
         if self._watch_active:
             if self._watch_worker is not None:
@@ -2071,6 +2139,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, self._tr('watch_start_blocked_title'), message)
             return
         backend_enabled = (config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
+        resolved_device = resolve_vector_device(config.vector_device)
+        if backend_enabled and str(config.vector_device or '').strip().lower() == 'cuda' and resolved_device != 'cuda':
+            self._append_log(self._tr('log_rebuild_cuda_fell_back_to_cpu'))
+        if backend_enabled and not self._ensure_vector_runtime_ready(config):
+            return
         if backend_enabled and not is_local_model_ready(config, paths):
             self._prepare_model_for_followup('watch_start', True, self._toggle_watch)
             return
@@ -2088,7 +2161,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         worker.finished.connect(self._on_watch_finished)
         self._watch_worker = worker
         worker.start()
-
     def _on_watch_updated(self, payload: object) -> None:
         if not isinstance(payload, dict):
             return
@@ -2112,13 +2184,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if not payload.get('note_only'):
             self.statusMessageChanged.emit(self._tr('status_watch_update'))
             self._append_log(self._tr('log_watch_update', changed=', '.join(payload.get('changed', [])[:3]) or self._tr('none_value'), deleted=', '.join(payload.get('deleted', [])[:3]) or self._tr('none_value')))
-
     def _on_watch_failed(self, message: str, traceback_text: str) -> None:
         self.statusMessageChanged.emit(self._tr('status_watch_error'))
         self._append_log(self._tr('log_watch_error'), focus_log=True)
         self._append_log(traceback_text.strip() or message, focus_log=True)
         QtWidgets.QMessageBox.critical(self, self._tr('watch_start_failed_title'), message or traceback_text)
-
     def _on_watch_stopped(self, raw_mode: str) -> None:
         self._watch_active = False
         self._watch_stopping = False
@@ -2128,11 +2198,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._append_log(self._tr('log_watch_stopped'))
         self._refresh_watch_button()
         self._emit_query_block_state()
-
     def _on_watch_finished(self) -> None:
         self._watch_worker = None
         self._refresh_status_summary(self._status_snapshot)
-
     def _after_preflight(self, payload) -> None:
         report = payload['report']
         self._current_report = report
@@ -2140,7 +2208,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('status_preflight_done'))
         self._append_log(self._tr('log_preflight_done'))
         self._append_log(format_space_report(report, self._language_code))
-
     def _after_bootstrap(self, payload) -> None:
         report = payload.get('report')
         if report is not None:
@@ -2157,13 +2224,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('status_bootstrap_done'))
         self._append_log(self._tr('log_bootstrap_done', model=result.get('model'), dimension=result.get('dimension'), cache=format_bytes(int(result.get('cache_bytes', 0)))))
         self._refresh_status_summary(snapshot)
-
     def _after_bootstrap_reranker(self, payload) -> None:
         result = payload['result']
         self._refresh_status_summary(payload.get('status'))
         self.statusMessageChanged.emit(self._tr('status_reranker_ready'))
         self._append_log(self._tr('log_reranker_ready', model=result.get('model')))
-
     def _after_rebuild(self, payload) -> None:
         report = payload.get('report')
         if report is not None:
@@ -2183,7 +2248,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         else:
             self.statusMessageChanged.emit(self._tr('status_rebuild_done'))
         self._append_log(self._tr('log_rebuild_done', files=stats['files'], chunks=stats['chunks'], refs=stats['refs']))
-
     def _after_status(self, payload) -> None:
         self._refresh_status_summary(payload)
         self.statusMessageChanged.emit(self._tr('status_refresh_done'))
@@ -2193,7 +2257,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         except Exception:
             return
         self._offer_resume_rebuild(config, paths, payload)
-
     def _after_clear(self, payload) -> None:
         self.clear_index_check.setChecked(False)
         self.clear_logs_check.setChecked(False)
@@ -2202,6 +2265,3 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_status_summary(payload)
         self.statusMessageChanged.emit(self._tr('status_clear_done'))
         self._append_log(self._tr('log_clear_done'))
-
-
-

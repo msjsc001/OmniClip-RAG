@@ -90,4 +90,66 @@ target.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding='ut
 '@ | & $pythonExe @pythonPrefix - $bootstrapPath
 if ($LASTEXITCODE -ne 0) { throw "Runtime bootstrap metadata generation failed." }
 
+@'
+import importlib
+import json
+import os
+import sys
+from pathlib import Path
+
+runtime_dir = Path(sys.argv[1]).resolve()
+metadata = runtime_dir / '_runtime_bootstrap.json'
+if metadata.exists():
+    payload = json.loads(metadata.read_text(encoding='utf-8'))
+    dll_dir = str(payload.get('dll_dir') or '').strip()
+else:
+    dll_dir = ''
+
+sys.path.insert(0, str(runtime_dir))
+existing_paths = []
+for candidate in (
+    runtime_dir,
+    runtime_dir / 'bin',
+    runtime_dir / 'pyarrow.libs',
+    runtime_dir / 'numpy.libs',
+    runtime_dir / 'scipy.libs',
+    runtime_dir / 'torch' / 'lib',
+    Path(dll_dir) if dll_dir else None,
+):
+    if candidate is None or not candidate.exists():
+        continue
+    existing_paths.append(str(candidate))
+    if hasattr(os, 'add_dll_directory'):
+        try:
+            os.add_dll_directory(str(candidate))
+        except OSError:
+            pass
+if existing_paths:
+    os.environ['PATH'] = os.pathsep.join(existing_paths + [os.environ.get('PATH', '')])
+
+required = [
+    'torch',
+    'sentence_transformers',
+    'transformers',
+    'huggingface_hub',
+    'safetensors',
+    'lancedb',
+    'onnxruntime',
+    'pyarrow',
+    'numpy',
+    'pandas',
+    'scipy',
+]
+failures = []
+for module_name in required:
+    try:
+        importlib.import_module(module_name)
+    except Exception as exc:
+        failures.append(f'{module_name}: {type(exc).__name__}: {exc}')
+if failures:
+    raise SystemExit('Runtime validation failed:\n' + '\n'.join(failures))
+print('Runtime validation succeeded.')
+'@ | & $pythonExe @pythonPrefix - $target
+if ($LASTEXITCODE -ne 0) { throw "Runtime validation failed after installation." }
+
 Write-Host "Runtime installation completed. Restart launcher.exe and retry model bootstrap or indexing."

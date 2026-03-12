@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import logging
 from dataclasses import asdict, replace
 
 from PySide6 import QtCore, QtWidgets
@@ -15,6 +16,8 @@ from .query_table_model import QueryResultsTableModel
 from .searchable_text_panel import SearchableTextPanel
 from .theme import ThemeState, scaled
 from .workers import QueryTaskResult, QueryWorker
+
+LOGGER = logging.getLogger(__name__)
 
 
 class QueryWorkspace(QtWidgets.QWidget):
@@ -477,7 +480,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.detail_tabs.setCurrentIndex(2)
 
     def append_external_log(self, message: str) -> None:
-        self._append_log(message)
+        self._append_log(message, persist=False)
 
     def search(self) -> None:
         self._start_query(copy_result=False)
@@ -833,10 +836,12 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._worker = None
         self._refresh_query_status_banner()
 
-    def _append_log(self, message: str) -> None:
+    def _append_log(self, message: str, *, persist: bool = True) -> None:
         text_value = str(message or '').strip()
         if not text_value:
             return
+        if persist:
+            LOGGER.info('%s', text_value)
         self._log_lines.append(text_value)
         if len(self._log_lines) == 1:
             self.log_panel.set_text(text_value)
@@ -853,3 +858,4 @@ class QueryWorkspace(QtWidgets.QWidget):
         ]
         for column, width in enumerate(widths):
             self.table_view.setColumnWidth(column, width)
+

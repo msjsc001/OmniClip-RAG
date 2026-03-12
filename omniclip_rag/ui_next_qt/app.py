@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ctypes
-import faulthandler
+import logging
 import os
 import sys
 import traceback
@@ -11,6 +11,7 @@ from pathlib import Path
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import __version__
+from ..app_logging import configure_file_logging, install_exception_logging
 from ..config import AppConfig, ensure_data_paths, load_config, normalize_ui_scale_percent, normalize_ui_theme, normalize_vault_path
 from ..ui_i18n import normalize_language
 from .main_window import MainWindow
@@ -18,6 +19,7 @@ from .theme import apply_application_style, build_theme
 
 
 APP_USER_MODEL_ID = 'msjsc001.OmniClipRAG'
+APP_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -39,7 +41,7 @@ def _trace_startup(message: str) -> None:
 
 
 def _install_exception_logging() -> None:
-    pass
+    install_exception_logging()
 
 
 def _normalize_qpa_platform() -> None:
@@ -63,6 +65,8 @@ def main() -> int:
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
         _trace_startup('load runtime bundle')
         bundle = load_runtime_bundle()
+        configure_file_logging(bundle.paths, bundle.config)
+        APP_LOGGER.info('Qt app bootstrap started: language=%s theme=%s scale=%s data_root=%s.', bundle.language_code, bundle.theme_code, bundle.scale_percent, getattr(bundle.paths, 'global_root', ''))
         _trace_startup('build theme')
         theme = build_theme(bundle.theme_code, bundle.scale_percent)
         apply_application_style(app, theme)
@@ -86,10 +90,12 @@ def main() -> int:
         window.raise_()
         window.activateWindow()
         _trace_startup('main window shown')
+        APP_LOGGER.info('Qt main window shown successfully.')
         QtCore.QTimer.singleShot(60, window.config_workspace.schedule_device_probe)
         QtCore.QTimer.singleShot(180, window.config_workspace.schedule_initial_status_load)
         return app.exec()
     except Exception as exc:
+        APP_LOGGER.exception('Qt startup failed with an unhandled exception.')
         _stderr(f'Qt startup failed: {exc.__class__.__name__}: {exc}')
         traceback.print_exc()
         return 1
@@ -141,3 +147,4 @@ def _resource_path(name: str) -> Path:
     else:
         base = Path(__file__).resolve().parents[2]
     return base / 'resources' / name
+

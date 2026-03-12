@@ -4,7 +4,7 @@
 
 **A silent gravity field between your private notes and the universe of AI.**
 
-[![Version](https://img.shields.io/badge/version-v0.2.0-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.2.1-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md)
 
@@ -90,15 +90,15 @@ OmniClip was primarily built for personal use. Therefore, instead of indulging i
 
 ---
 
-## 🔄 V0.2.0 Key Updates
+## 🔄 V0.2.1 Key Updates
 
-`v0.2.0` is the "make it feel finished" release: the desktop shell has been rebuilt around the new Qt workflow, and the fragile state edges that used to leak into daily use have been closed properly.
+`v0.2.1` is the stabilization follow-up to the Qt rewrite release: the shell stays lean, but the last confusing runtime, progress, and large-vault edge cases have now been tightened for real-world packaged use.
 
-- 🌐 **Real bilingual shell**: the Qt desktop now keeps a persistent language dropdown in the top bar, and switching between `简体中文 / English` rebuilds the visible UI immediately instead of leaving parts of the shell untranslated.
-- 🧭 **Qt workflow rewrite**: the app now runs as a cohesive `Query + Configure` Qt shell with clearer tab structure, runtime guidance, theme/scale persistence, and tighter page-level navigation.
-- 🔒 **State closure hardening**: index `missing / pending / ready` states, rebuild cancel flow, hot-watch start/stop rules, and query blocking were all tightened so restart-time state pollution no longer makes the app pretend an unfinished index is usable.
-- 📈 **Honest live progress**: rebuild progress, remaining-time feedback, vector-tail reporting, and watch/resource controls now reflect real backend progress much more closely instead of jumping in misleading chunks.
-- 🚀 **Large-vault stability + lean packaging**: the late-stage vector-write OOM crash was fixed, and the Windows release returned to the lean strategy: a small main package, preserved local `runtime/`, and optional heavy runtime installation only when the user actually needs it.
+- 🌐 **Bilingual Qt shell, now fully retained as the release path**: the packaged desktop continues to use the new Qt workflow with persistent `简体中文 / English` switching, without shipping the legacy UI in the public build.
+- 🧭 **Runtime readiness is clearer before work begins**: model bootstrap, full rebuild, query, and watch entry points now separate lightweight model availability from heavy vector-runtime readiness, so users are guided earlier instead of hitting CUDA/runtime confusion late.
+- 📋 **More honest device and logging surfaces**: the Configure page now exposes concrete device/runtime readiness, rolling file logs, and cleanup controls, making packaged troubleshooting much easier without polluting the install directory.
+- 📈 **Overall progress stays consistent while recovery stays visible**: rebuild progress now keeps one global percentage while vector-stage details explain `encoded / written / flushing / recovering`, reducing the false impression of freezes during huge builds.
+- 🚀 **Large-vault memory-pressure hardening**: vector rebuilds now shrink, yield, retry smaller writes, and surface recovery states under RAM/VRAM pressure, favoring integrity and resumable progress over risky peak throughput.
 
 ---
 
@@ -192,3 +192,5 @@ This project is released under the [MIT License](LICENSE).
 <div align="center">
   <b>Infinite insights within a bounded space.</b>
 </div>
+
+

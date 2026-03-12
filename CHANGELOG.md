@@ -2,7 +2,30 @@
 
 ## Unreleased
 
-## V0.2.0 - 2026-03-12
+## V0.2.1 - 2026-03-12
+
+### Added
+
+- Added rolling file logging with configurable size limits plus in-app open/clear controls under the data settings flow.
+- Added clearer device/runtime status surfacing in the Configure page, including GPU presence, CUDA readiness, runtime completeness, CPU fallback availability, and the current effective mode.
+- Added vector-stage recovery and backpressure messaging so large packaged rebuilds can explain when they are flushing, shrinking, or waiting under resource pressure.
+- Added [RELEASE_NOTES_v0.2.1](releases/RELEASE_NOTES_v0.2.1.md) for the post-Qt stabilization, runtime-clarity, and large-vault hardening release.
+
+### Changed
+
+- Changed the visible app/release version to `v0.2.1` across the packaged UI, Python package metadata, and release documentation.
+- Changed model bootstrap behavior so it focuses on the selected embedding model itself instead of incorrectly piggybacking on CUDA/runtime guidance.
+- Changed rebuild progress presentation to keep one truthful overall percentage while vector details separately report encoded, written, flushing, and recovery states.
+- Changed resource-pressure handling during vector rebuilds so the pipeline proactively shrinks and yields under RAM/VRAM contention instead of waiting for late catastrophic pressure.
+
+### Fixed
+
+- Fixed the reranker toggle contract so disabling the optional reranker actually prevents reranker execution in the service layer.
+- Fixed late runtime-guidance surprises by moving vector-runtime preflight checks earlier for rebuild, watch, query, and warmup entry points.
+- Fixed writer-side vector tail handling so memory-pressure retries use smaller write batches without dropping staged rows before a successful write.
+- Fixed packaged large-vault rebuild visibility so recovery periods no longer look like silent hangs with a 
+
+
 
 ### Added
 
@@ -308,4 +331,7 @@
 - The current stable default remains `torch + bge-m3`.
 - ONNX remains a future optimization path, not the default production route for `V0.1.0`.
 - CLI remains available for debugging and automation, but GUI is now the primary workflow.
+
+
+
 
