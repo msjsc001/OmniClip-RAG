@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import traceback
 from collections.abc import Callable
@@ -11,6 +12,7 @@ from ..errors import BuildCancelledError, RuntimeDependencyError
 from ..service import WATCHDOG_AVAILABLE, OmniClipService
 
 
+LOGGER = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class QueryTaskResult:
@@ -67,8 +69,10 @@ class QueryWorker(QtCore.QObject):
                 )
             )
         except RuntimeDependencyError as exc:
+            LOGGER.exception('Query worker failed because the vector runtime is not ready.')
             self.failed.emit(str(exc).strip(), traceback.format_exc())
         except Exception as exc:
+            LOGGER.exception('Query worker crashed unexpectedly.')
             self.failed.emit(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
             service.close()
@@ -93,6 +97,7 @@ class FunctionWorker(QtCore.QObject):
         try:
             self.succeeded.emit(self._fn())
         except Exception as exc:
+            LOGGER.exception('Background function worker crashed unexpectedly.')
             self.failed.emit(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
             self.finished.emit()
@@ -135,8 +140,10 @@ class ServiceTaskWorker(QtCore.QObject):
         except BuildCancelledError:
             self.cancelled.emit(service.status_snapshot())
         except RuntimeDependencyError as exc:
+            LOGGER.exception('Service task worker failed because the vector runtime is not ready.')
             self.runtimeError.emit(str(exc).strip() or exc.__class__.__name__)
         except Exception as exc:
+            LOGGER.exception('Service task worker crashed unexpectedly.')
             self.failed.emit(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
             service.close()
@@ -179,8 +186,10 @@ class WatchWorker(QtCore.QObject):
                 on_update=lambda payload: self.updated.emit(dict(payload)),
             )
         except Exception as exc:
+            LOGGER.exception('Watch worker crashed unexpectedly.')
             self.failed.emit(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
             service.close()
             self.stopped.emit(raw_mode)
             self.finished.emit()
+

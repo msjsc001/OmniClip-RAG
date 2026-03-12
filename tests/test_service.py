@@ -5,72 +5,53 @@ import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
-
 from omniclip_rag import parser as parser_module
+from omniclip_rag.app_logging import shutdown_logging
 from omniclip_rag.config import AppConfig, ensure_data_paths
-from omniclip_rag.errors import BuildCancelledError
+from omniclip_rag.errors import BuildCancelledError, RuntimeDependencyError
 from omniclip_rag.models import SearchHit
 from omniclip_rag.retrieval_policy import build_query_profile
 from omniclip_rag.service import OmniClipService
 from omniclip_rag.timing import load_build_history
-
-
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_ROOT = ROOT / "logseq笔记样本"
 TEST_DATA_ROOT = ROOT / ".tmp" / "test_service_data"
-
-
 class _StubVectorIndex:
     def __init__(self) -> None:
         self.reset_called = False
-
     def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None):
         return None
-
     def upsert(self, documents):
         return None
-
     def delete(self, chunk_ids):
         return None
-
     def search(self, query_text, limit):
         return []
-
     def warmup(self):
         return {"backend": "stub", "model": None, "dimension": 0}
-
     def reset(self):
         self.reset_called = True
-
-
 class _InjectVectorIndex(_StubVectorIndex):
     def __init__(self) -> None:
         super().__init__()
         self.injected: list[SimpleNamespace] = []
-
     def search(self, query_text, limit):
         return list(self.injected[:limit])
-
-
 class _FailingVectorIndex(_StubVectorIndex):
     def __init__(self) -> None:
         super().__init__()
         self.fail_upsert_once = True
         self.deleted_batches: list[list[str]] = []
         self.upsert_batches: list[list[str]] = []
-
     def upsert(self, documents):
         self.upsert_batches.append([item.get('chunk_id', '') for item in documents])
         if self.fail_upsert_once:
             self.fail_upsert_once = False
             raise RuntimeError('vector busy')
         return None
-
     def delete(self, chunk_ids):
         self.deleted_batches.append(list(chunk_ids))
         return None
-
-
 class _ProfilingVectorIndex(_StubVectorIndex):
     def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None):
         count = int(total or 0)
@@ -92,15 +73,11 @@ class _ProfilingVectorIndex(_StubVectorIndex):
                 }
             )
         return None
-
-
 class _LoweringReranker:
     def __init__(self) -> None:
         self.last_candidate_limit: int | None = None
-
     def warmup(self, *, allow_download: bool = False):
         return {'backend': 'stub', 'model': 'stub', 'model_ready': True}
-
     def rerank(self, query_text: str, hits: list[SearchHit], candidate_limit: int):
         self.last_candidate_limit = candidate_limit
         reranked: list[SearchHit] = []
@@ -122,8 +99,6 @@ class _LoweringReranker:
                 )
             )
         return reranked, SimpleNamespace(enabled=True, applied=True, resolved_device='cpu', reranked_count=min(candidate_limit, len(hits)), degraded_to_cpu=False, oom_recovered=False)
-
-
 class ServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         for path in (
@@ -158,10 +133,13 @@ class ServiceTests(unittest.TestCase):
             ROOT / '.tmp' / 'cancelled_rebuild_data_test',
             ROOT / '.tmp' / 'watch_guard_vault_test',
             ROOT / '.tmp' / 'watch_guard_data_test',
+            ROOT / '.tmp' / 'bootstrap_model_only',
+            ROOT / '.tmp' / 'reranker_disabled_vault_test',
+            ROOT / '.tmp' / 'reranker_disabled_data_test',
         ):
+            shutdown_logging()
             if path.exists():
                 shutil.rmtree(path)
-
     def test_rebuild_and_query(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root))
@@ -179,7 +157,6 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("这是一个块的子内容（C）", hits[0].display_text)
         finally:
             service.close()
-
     def test_query_emits_progress_stages(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_progress'))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root))
@@ -198,7 +175,6 @@ class ServiceTests(unittest.TestCase):
             self.assertTrue(all(float(item.get('overall_percent', 0.0) or 0.0) >= 0.0 for item in progress))
         finally:
             service.close()
-
     def test_single_character_query_skips_vector_noise(self) -> None:
         vault_copy = ROOT / ".tmp" / "single_char_vault_test"
         data_root = ROOT / ".tmp" / "single_char_data_test"
@@ -222,7 +198,6 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn("完全无关的日志", context)
         finally:
             service.close()
-
     def test_bootstrap_reranker_works_when_disabled(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'bootstrap_reranker_disabled'))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), reranker_enabled=False)
@@ -234,6 +209,50 @@ class ServiceTests(unittest.TestCase):
             reranker_cls.assert_called_once()
             reranker_cls.return_value.warmup.assert_called_once_with(allow_download=True)
             self.assertTrue(result['model_ready'])
+        finally:
+            service.close()
+
+    def test_bootstrap_model_downloads_snapshot_without_vector_runtime(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'bootstrap_model_only'))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), vector_backend='lancedb', vector_device='cuda')
+        service = OmniClipService(config, data_paths)
+        try:
+            with patch('omniclip_rag.service.prepare_local_model_snapshot', return_value={'model_ready': True, 'model': config.vector_model}) as prepare_mock, \
+                 patch('omniclip_rag.service.runtime_dependency_issue', return_value='runtime missing') as runtime_mock:
+                result = service.bootstrap_model()
+            prepare_mock.assert_called_once_with(config, data_paths, allow_download=True)
+            runtime_mock.assert_not_called()
+            self.assertTrue(result['model_ready'])
+        finally:
+            service.close()
+
+    def test_query_skips_reranker_when_disabled_even_if_instance_exists(self) -> None:
+        vault_copy = ROOT / '.tmp' / 'reranker_disabled_vault_test'
+        data_root = ROOT / '.tmp' / 'reranker_disabled_data_test'
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        (vault_copy / 'page_a.md').write_text('- 我的日程\n  id:: 11111111-1111-1111-1111-111111111111\n', encoding='utf-8')
+        (vault_copy / 'page_b.md').write_text('- 我的待办\n  id:: 22222222-2222-2222-2222-222222222222\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        service = OmniClipService(config, data_paths)
+        reranker_called: list[bool] = []
+
+        class _GuardReranker:
+            def warmup(self, *, allow_download: bool = False):
+                return {'backend': 'guard'}
+            def rerank(self, query_text: str, hits: list[SearchHit], candidate_limit: int):
+                reranker_called.append(True)
+                raise AssertionError('reranker should stay disabled')
+
+        service.reranker = _GuardReranker()
+        service.vector_index = _StubVectorIndex()
+        try:
+            service.rebuild_index()
+            result = service.query('我的', limit=10, score_threshold=0)
+            self.assertTrue(result.hits)
+            self.assertEqual(reranker_called, [])
+            self.assertFalse(result.insights.reranker.applied)
+            self.assertEqual(result.insights.reranker.skipped_reason, 'disabled')
         finally:
             service.close()
 
@@ -256,7 +275,6 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(service.reranker.last_candidate_limit, min(2, max(39, build_query_profile("我的", 39).hydration_pool_size)))
         finally:
             service.close()
-
     def test_semantic_only_hits_keep_reasonable_score_floor(self) -> None:
         vault_copy = ROOT / ".tmp" / "semantic_floor_vault_test"
         data_root = ROOT / ".tmp" / "semantic_floor_data_test"
@@ -279,7 +297,6 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("语义相似", hits[0].reason)
         finally:
             service.close()
-
     def test_query_merges_vector_only_candidates(self) -> None:
         vault_copy = ROOT / ".tmp" / "vector_merge_vault_test"
         data_root = ROOT / ".tmp" / "vector_merge_data_test"
@@ -303,7 +320,6 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("page_b", {hit.title for hit in hits})
         finally:
             service.close()
-
     def test_context_pack_merges_same_parent_siblings(self) -> None:
         hits = [
             SearchHit(
@@ -340,7 +356,6 @@ class ServiceTests(unittest.TestCase):
         self.assertIn('**核心原则**', context)
         self.assertIn('**如何操作**', context)
         self.assertIn('**极致用法**', context)
-
     def test_context_pack_redacts_core_secrets(self) -> None:
         vault_copy = ROOT / ".tmp" / "redact_vault_test"
         data_root = ROOT / ".tmp" / "redact_data_test"
@@ -361,7 +376,6 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn("abc123456", context)
         finally:
             service.close()
-
     def test_context_pack_resolves_block_ref_without_uuid(self) -> None:
         vault_copy = ROOT / ".tmp" / "ref_vault_test"
         data_root = ROOT / ".tmp" / "ref_data_test"
@@ -386,7 +400,6 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn("33333333-3333-3333-3333-333333333333", context)
         finally:
             service.close()
-
     def test_query_dedupes_overlapping_and_duplicate_fragments(self) -> None:
         vault_copy = ROOT / ".tmp" / "dedupe_vault_test"
         data_root = ROOT / ".tmp" / "dedupe_data_test"
@@ -421,7 +434,6 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(sum(1 for hit in hits if hit.title == "手机笔记" and hit.anchor.startswith("鞋子记录")), 2)
         finally:
             service.close()
-
     def test_ai_collaboration_export_mode_adds_guidance_without_changing_hits(self) -> None:
         vault_copy = ROOT / '.tmp' / 'ai_collab_vault_test'
         data_root = ROOT / '.tmp' / 'ai_collab_data_test'
@@ -439,7 +451,6 @@ class ServiceTests(unittest.TestCase):
             self.assertIn('检索关键词', result.context_text)
         finally:
             service.close()
-
     def test_query_supports_page_blocklist_rules(self) -> None:
         vault_copy = ROOT / ".tmp" / "page_block_vault_test"
         data_root = ROOT / ".tmp" / "page_block_data_test"
@@ -463,7 +474,6 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn("2026-02-24T11_42_55.580Z.android", context)
         finally:
             service.close()
-
     def test_reindex_updates_changed_file(self) -> None:
         vault_copy = ROOT / ".tmp" / "watch_vault_test"
         data_root = ROOT / ".tmp" / "watch_data_test"
@@ -482,8 +492,6 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(hits[0].anchor, "热更新查询验证")
         finally:
             service.close()
-
-
     def test_reindex_keeps_previous_index_when_changed_file_is_temporarily_unreadable(self) -> None:
         vault_copy = ROOT / '.tmp' / 'reindex_locked_vault_test'
         data_root = ROOT / '.tmp' / 'reindex_locked_data_test'
@@ -506,7 +514,6 @@ class ServiceTests(unittest.TestCase):
             self.assertIn('page_a.md', stats.get('skipped_changed_paths', []))
         finally:
             service.close()
-
     def test_reindex_marks_vector_state_dirty_then_repairs_it(self) -> None:
         vault_copy = ROOT / '.tmp' / 'vector_dirty_vault_test'
         data_root = ROOT / '.tmp' / 'vector_dirty_data_test'
@@ -534,7 +541,6 @@ class ServiceTests(unittest.TestCase):
             self.assertGreaterEqual(len(failing_vector.upsert_batches), 2)
         finally:
             service.close()
-
     def test_snapshot_safe_reports_vault_offline_instead_of_empty_snapshot(self) -> None:
         vault_copy = ROOT / '.tmp' / 'snapshot_offline_vault_test'
         data_root = ROOT / '.tmp' / 'snapshot_offline_data_test'
@@ -552,19 +558,16 @@ class ServiceTests(unittest.TestCase):
             self.assertIn('vault', (reason or '').lower())
         finally:
             service.close()
-
     def test_rebuild_skips_unreadable_markdown_files(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root))
         service = OmniClipService(config, data_paths)
         service.vector_index = _StubVectorIndex()
         original_parse = parser_module.parse_markdown_file
-
         def side_effect(vault_root, absolute_path):
             if absolute_path.name == "这是一个标题点击后可以进入另外一篇笔记.md":
                 raise PermissionError("denied")
             return original_parse(vault_root, absolute_path)
-
         try:
             with patch("omniclip_rag.parser.parse_markdown_file", side_effect=side_effect):
                 stats = service.rebuild_index()
@@ -572,7 +575,6 @@ class ServiceTests(unittest.TestCase):
             self.assertGreaterEqual(stats["chunks"], 1)
         finally:
             service.close()
-
     def test_rebuild_demotes_duplicate_block_ids_instead_of_crashing(self) -> None:
         vault_copy = ROOT / '.tmp' / 'duplicate_vault_test'
         data_root = ROOT / '.tmp' / 'duplicate_data_test'
@@ -605,7 +607,6 @@ class ServiceTests(unittest.TestCase):
             self.assertIn('_duplicate_block_id', rows[1]['properties_json'])
         finally:
             service.close()
-
     def test_rebuild_waits_while_paused_then_continues(self) -> None:
         vault_copy = ROOT / '.tmp' / 'paused_vault_test'
         data_root = ROOT / '.tmp' / 'paused_data_test'
@@ -618,11 +619,9 @@ class ServiceTests(unittest.TestCase):
         pause_event = threading.Event()
         pause_event.set()
         outcome: dict[str, object] = {}
-
         def wrapped_parse(vault_root, absolute_path):
             parse_called.set()
             return original_parse(vault_root, absolute_path)
-
         def worker():
             service = OmniClipService(config, data_paths)
             service.vector_index = _StubVectorIndex()
@@ -632,7 +631,6 @@ class ServiceTests(unittest.TestCase):
                 outcome['error'] = exc
             finally:
                 service.close()
-
         thread = threading.Thread(target=worker, daemon=True)
         with patch('omniclip_rag.parser.parse_markdown_file', side_effect=wrapped_parse):
             thread.start()
@@ -644,7 +642,6 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertNotIn('error', outcome)
         self.assertEqual(outcome['stats']['files'], 1)
-
     def test_rebuild_can_resume_after_interruption(self) -> None:
         vault_copy = ROOT / '.tmp' / 'resume_vault_test'
         data_root = ROOT / '.tmp' / 'resume_data_test'
@@ -657,13 +654,11 @@ class ServiceTests(unittest.TestCase):
         service.vector_index = _StubVectorIndex()
         original_parse = parser_module.parse_markdown_file
         call_count = {'value': 0}
-
         def failing_parse(vault_root, absolute_path):
             call_count['value'] += 1
             if call_count['value'] == 2:
                 raise RuntimeError('simulated crash')
             return original_parse(vault_root, absolute_path)
-
         try:
             with patch('omniclip_rag.parser.parse_markdown_file', side_effect=failing_parse):
                 with self.assertRaises(RuntimeError):
@@ -673,7 +668,6 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(pending['completed'], 1)
         finally:
             service.close()
-
         resumed = OmniClipService(config, data_paths)
         resumed.vector_index = _StubVectorIndex()
         try:
@@ -682,7 +676,17 @@ class ServiceTests(unittest.TestCase):
             self.assertIsNone(resumed.pending_rebuild())
         finally:
             resumed.close()
-
+    def test_rebuild_fails_fast_when_vector_runtime_is_not_ready(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'runtime_precheck'))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), vector_backend='lancedb')
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        try:
+            with patch('omniclip_rag.service.runtime_dependency_issue', return_value='当前还不能开始本地语义建库或向量查询。'):
+                with self.assertRaises(RuntimeDependencyError):
+                    service.rebuild_index()
+        finally:
+            service.close()
     def test_cancelled_rebuild_keeps_index_pending(self) -> None:
         vault_copy = ROOT / '.tmp' / 'cancelled_rebuild_vault_test'
         data_root = ROOT / '.tmp' / 'cancelled_rebuild_data_test'
@@ -698,7 +702,6 @@ class ServiceTests(unittest.TestCase):
             def on_progress(payload: dict[str, object]) -> None:
                 if str(payload.get('stage') or '') == 'indexing' and int(payload.get('current', 0) or 0) >= 1:
                     cancel_event.set()
-
             with self.assertRaises(BuildCancelledError):
                 service.rebuild_index(on_progress=on_progress, cancel_event=cancel_event)
             snapshot = service.status_snapshot()
@@ -709,7 +712,6 @@ class ServiceTests(unittest.TestCase):
             self.assertGreaterEqual(int((snapshot['stats'] or {}).get('chunks', 0) or 0), 1)
         finally:
             service.close()
-
     def test_watch_requires_ready_index_marker(self) -> None:
         vault_copy = ROOT / '.tmp' / 'watch_guard_vault_test'
         data_root = ROOT / '.tmp' / 'watch_guard_data_test'
@@ -728,7 +730,6 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(snapshot['stats'], {'files': 0, 'chunks': 0, 'refs': 0})
         finally:
             service.close()
-
     def test_estimate_space_records_preflight(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), vector_backend="lancedb")
@@ -742,7 +743,6 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(latest["vault_file_count"], report.vault_file_count)
         finally:
             service.close()
-
     def test_rebuild_records_vector_pipeline_history(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root))
@@ -758,7 +758,6 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(int(latest['vector_write_flush_count']), 3)
         finally:
             service.close()
-
     def test_clear_exports_removes_export_files(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root))
@@ -770,7 +769,6 @@ class ServiceTests(unittest.TestCase):
             self.assertFalse(export_path.exists())
         finally:
             service.close()
-
     def test_clear_index_also_resets_vector_storage(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root))
@@ -785,7 +783,7 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(service.store.stats(), {"files": 0, "chunks": 0, "refs": 0})
         finally:
             service.close()
-
-
 if __name__ == "__main__":
     unittest.main()
+
+

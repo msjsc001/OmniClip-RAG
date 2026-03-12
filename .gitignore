@@ -48,3 +48,5 @@ Thumbs.db
 .DS_Store
 .wheelhouse_gpu/
 /runtime/
+/appdata/
+

@@ -123,6 +123,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(loaded.ui_theme, 'dark')
         self.assertEqual(loaded.ui_scale_percent, 200)
 
+    def test_log_file_size_is_normalized_when_saved(self) -> None:
+        vault = ROOT / 'vault_logs'
+        paths = config_module.ensure_data_paths(str(CUSTOM_ROOT), str(vault))
+        config = config_module.AppConfig(
+            vault_path=str(vault),
+            data_root=str(paths.global_root),
+            log_file_size_mb=999,
+        )
+
+        config_module.save_config(config, paths)
+        loaded = config_module.load_config(paths)
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.log_file_size_mb, config_module.LOG_FILE_SIZE_MB_MAX)
+
 
 if __name__ == '__main__':
     unittest.main()

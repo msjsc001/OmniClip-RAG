@@ -508,6 +508,142 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_config_workspace_runtime_missing_for_cuda_detects_incomplete_runtime(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace.backend_combo.setCurrentText('lancedb')
+            with patch('omniclip_rag.ui_next_qt.config_workspace.runtime_guidance_context', return_value={
+                'gpu_present': True,
+                'cuda_available': True,
+            }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_dependency_issue', return_value='runtime missing'):
+                self.assertTrue(workspace._runtime_missing_for_cuda())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_vector_progress_uses_written_counts_and_global_percent(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._update_task_progress({
+                'stage': 'vectorizing',
+                'current': 1,
+                'total': 5,
+                'overall_percent': 6.0,
+                'encoded_count': 3,
+                'written_count': 1,
+            })
+            self.assertEqual(workspace.task_progress.format(), '1/5 · 6%')
+            self.assertIn('已编码 3/5', workspace.task_detail_label.text())
+            self.assertIn('已写入 1/5', workspace.task_detail_label.text())
+            self.assertIn('6%', workspace.task_percent_label.text())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_model_download_ui_uses_selected_model_name(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_model='BAAI/bge-m3')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            self.assertEqual(workspace.bootstrap_button.text(), text('zh-CN', 'bootstrap_button_named', model='BAAI/bge-m3'))
+            self.assertEqual(workspace.model_chip.text(), text('zh-CN', 'model_missing_named', model='BAAI/bge-m3'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_device_runtime_status_lists_gpu_cuda_runtime_and_mode(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb', vector_device='cuda')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        payload = {
+            'gpu_present': True,
+            'gpu_name': 'NVIDIA RTX 3060',
+            'torch_available': True,
+            'torch_version': '2.10.0+cu128',
+            'sentence_transformers_available': True,
+            'cuda_available': True,
+            'nvcc_available': True,
+            'nvcc_version': '12.3',
+            'runtime_exists': True,
+            'runtime_complete': False,
+            'runtime_missing_items': ['lancedb', 'pyarrow'],
+            'device_options': ['auto', 'cpu', 'cuda'],
+        }
+        try:
+            with patch.object(workspace, '_runtime_available_for_device', side_effect=lambda device_name: device_name in {'cpu', 'cuda'}):
+                with patch('omniclip_rag.ui_next_qt.config_workspace.resolve_vector_device', return_value='cuda'):
+                    workspace._refresh_device_options(payload)
+            status_text = workspace.device_runtime_status_label.text()
+            self.assertIn('N卡支持', status_text)
+            self.assertIn('CUDA环境', status_text)
+            self.assertIn('runtime 文件夹', status_text)
+            self.assertIn('CPU模式', status_text)
+            self.assertIn('当前实际模式', status_text)
+            self.assertRegex(status_text, r'当前实际模式：(CPU|GPU)')
+            self.assertIn('lancedb, pyarrow', status_text)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_vector_progress_recovering_warns_not_to_close(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._update_task_progress({
+                'stage': 'vectorizing',
+                'stage_status': 'recovering',
+                'current': 12,
+                'total': 100,
+                'overall_percent': 12.0,
+                'encoded_count': 18,
+                'written_count': 12,
+                'encode_batch_size': 4,
+                'write_batch_size': 128,
+                'write_queue_depth': 2,
+                'write_queue_capacity': 6,
+                'write_flush_count': 3,
+                'tuning_action': 'hold',
+                'tuning_reason': 'memory_guard',
+            })
+            self.assertIn('请不要关闭程序', workspace.task_detail_label.text())
+            self.assertIn('等待', workspace.task_detail_label.text())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_saves_log_size_preferences(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace.log_size_spin.setValue(32)
+            workspace._save_log_preferences()
+            loaded = load_config(paths)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.log_file_size_mb, 32)
+            self.assertIn('32 MB', workspace.log_storage_summary_label.text())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_main_window_header_removes_legacy_controls(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -590,3 +726,10 @@ class QtUiTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+
+
+
+
+

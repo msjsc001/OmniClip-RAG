@@ -4,7 +4,7 @@
 
 **方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。**
 
-[![Version](https://img.shields.io/badge/version-v0.2.0-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.2.1-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md)
 
@@ -90,15 +90,15 @@
 
 ---
 
-## 🔄 V0.2.0 重点更新视角
+## 🔄 V0.2.1 重点更新视角
 
-`v0.2.0` 是一次把“能用”继续往“真正顺手”推进的版本：Qt 新界面已经成为完整主线，而那些以前最容易在日常使用里露出破绽的状态流、交互细节和打包策略，也终于被系统性收口了。
+`v0.2.1` 是 Qt 重写完成后的稳定性收尾版本：主程序依然保持轻量，但那些最容易在真实打包环境、大笔记库建库和运行时缺失场景里让用户困惑的边角问题，这次都继续收紧了。
 
-- 🌐 **真正可用的双语界面**：顶部加入持久化语言下拉框，支持 `简体中文 / English` 即时切换，切换后会重建当前 Qt 界面，避免只改一半文字的割裂感。
-- 🧭 **Qt 工作流重写完成**：现在的主界面已经整理成清晰的 `查询 + 配置` 双主页签，配套补齐了运行时引导、主题/字号持久化，以及更稳定的页面级导航体验。
-- 🔒 **业务状态真正闭环**：索引 `未建立 / Pending / 已建立`、中途取消建库、热监听启停约束、查询阻断条件都重新收紧，彻底堵住了重启后误判“索引已建立”的状态污染。
-- 📈 **进度与剩余时间更诚实**：全量建库、向量尾段、热监听和资源峰值反馈都改成更接近真实后台进度的呈现，不再出现大幅跳跃和真假难辨的“假实时”。
-- 🚀 **大库更稳，发布更轻**：修掉了大库在向量写入尾段的内存/显存雪崩问题，同时回归“轻主程序 + 外置按需 runtime”的分发路线，让公开发布包重新保持小体积与纯净性。
+- 🌐 **双语 Qt 主界面正式坐稳主线**：发布包继续只走新的 Qt 工作流，顶部 `简体中文 / English` 切换保持即时生效，同时不再把旧界面作为发布内容的一部分。
+- 🧭 **运行时准备度更早说清楚**：模型下载、全量建库、查询和热监听现在会更早区分“模型是否存在”和“向量运行时是否完备”，避免用户跑到后半段才撞上 CUDA/runtime 困惑。
+- 📋 **设备状态与日志入口更诚实**：配置页补齐了设备/运行时状态提示、滚动文件日志与清理入口，打包版排障不再只能靠猜，也不会把日志乱写进安装目录。
+- 📈 **整体进度统一，恢复态可见**：建库进度条统一使用全局百分比，向量阶段则额外说明 `已编码 / 已写入 / flushing / recovering`，大库恢复时不再那么像“卡死”。
+- 🚀 **大库资源压力恢复更稳**：向量建库在 RAM/VRAM 紧张时会主动缩批、让行、拆小批重试，并把恢复过程显示出来，优先保证结果完整性和可继续跑完，而不是冒险硬冲峰值。
 
 ---
 
@@ -192,3 +192,5 @@ flowchart LR
 <div align="center">
   <b>方寸之间 · 连接无穷</b>
 </div>
+
+

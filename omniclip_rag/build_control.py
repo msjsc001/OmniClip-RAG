@@ -79,7 +79,7 @@ _PROFILE_TARGETS: dict[BuildResourceProfile, dict[str, float]] = {
 
 
 class ResourceMonitor:
-    def __init__(self, device: str, *, sample_interval_seconds: float = 2.5) -> None:
+    def __init__(self, device: str, *, sample_interval_seconds: float = 1.0) -> None:
         self.device = (device or 'cpu').strip().lower() or 'cpu'
         self.sample_interval_seconds = max(float(sample_interval_seconds), 0.5)
         self._last_sample: ResourceSample | None = None
@@ -213,6 +213,32 @@ class BuildPerformanceController:
         self._cooldown_until = time.time() + 8.0
         sample = self.monitor.sample(force=True)
         return self.snapshot(sample, action='shrink', reason='oom_recovery')
+
+    def note_pressure(
+        self,
+        *,
+        reason: str = 'memory_pressure',
+        action: str = 'hold',
+        shrink_ratio: float = 0.75,
+        cooldown_seconds: float = 1.5,
+        sample: ResourceSample | None = None,
+        force_sample: bool = False,
+    ) -> BuildTuningSnapshot:
+        safe_ratio = max(min(float(shrink_ratio), 0.98), 0.35)
+        next_encode = max(self.min_encode_batch_size, int(self.current_encode_batch_size * safe_ratio))
+        next_write = max(self.min_write_batch_size, int(self.current_write_batch_size * safe_ratio))
+        if next_encode >= self.current_encode_batch_size and self.current_encode_batch_size > self.min_encode_batch_size:
+            next_encode = self.current_encode_batch_size - 1
+        if next_write >= self.current_write_batch_size and self.current_write_batch_size > self.min_write_batch_size:
+            next_write = max(self.min_write_batch_size, self.current_write_batch_size - 64)
+        self.current_encode_batch_size = max(self.min_encode_batch_size, next_encode)
+        self.current_write_batch_size = max(self.min_write_batch_size, next_write)
+        self._cooldown_until = max(self._cooldown_until, time.time() + max(float(cooldown_seconds), 0.25))
+        active_sample = sample if sample is not None else self.monitor.sample(force=force_sample)
+        return self.snapshot(active_sample, action=action, reason=reason)
+
+    def in_cooldown(self) -> bool:
+        return time.time() < self._cooldown_until
 
     def observe(
         self,

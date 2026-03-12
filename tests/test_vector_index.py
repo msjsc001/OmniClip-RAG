@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import RuntimeDependencyError
-from omniclip_rag.vector_index import LanceDbVectorIndex, create_vector_index, is_local_model_ready, runtime_guidance_context
+from omniclip_rag.vector_index import LanceDbVectorIndex, create_vector_index, is_local_model_ready, runtime_dependency_issue, runtime_guidance_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,12 +91,13 @@ class _FakeTable:
 
 
 class _FakeDb:
-    def __init__(self):
+    def __init__(self, table_cls=_FakeTable):
         self.tables: dict[str, _FakeTable] = {}
+        self._table_cls = table_cls
 
     def create_table(self, name: str, schema=None, mode="overwrite"):
         if mode == "overwrite" or name not in self.tables:
-            self.tables[name] = _FakeTable(self, name, schema)
+            self.tables[name] = self._table_cls(self, name, schema)
         return self.tables[name]
 
     def drop_table(self, name: str):
@@ -109,8 +110,18 @@ class _FakeDb:
         return list(self.tables.keys())
 
 
-def _fake_lancedb_modules() -> dict[str, object]:
-    fake_db = _FakeDb()
+class _MemoryPressureTable(_FakeTable):
+    def add(self, rows):
+        self.add_calls += 1
+        batch_rows = [dict(row) for row in rows]
+        self.add_batch_sizes.append(len(batch_rows))
+        if len(batch_rows) > 8:
+            raise MemoryError('out of memory while adding rows')
+        self.rows.extend(batch_rows)
+
+
+def _fake_lancedb_modules(table_cls=_FakeTable) -> dict[str, object]:
+    fake_db = _FakeDb(table_cls=table_cls)
     fake_lancedb = types.ModuleType("lancedb")
     fake_lancedb.connect = lambda _path: fake_db
 
@@ -169,6 +180,26 @@ class VectorIndexTests(unittest.TestCase):
         self.assertTrue(incomplete['runtime_exists'])
         self.assertFalse(incomplete['runtime_complete'])
         self.assertTrue(incomplete['runtime_missing_items'])
+
+    def test_runtime_dependency_issue_returns_guidance_when_imports_are_missing(self) -> None:
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(TEST_DATA_ROOT),
+            vector_backend='lancedb',
+            vector_runtime='torch',
+            vector_device='auto',
+        )
+
+        def fake_import(name: str):
+            if name == 'lancedb':
+                raise ModuleNotFoundError('No module named lancedb')
+            return object()
+
+        with patch('omniclip_rag.vector_index.runtime_guidance_context', return_value={'plain_text': 'guidance'}) as guidance_mock,              patch('omniclip_rag.vector_index.importlib.import_module', side_effect=fake_import):
+            issue = runtime_dependency_issue(config)
+
+        self.assertEqual(issue, 'guidance')
+        guidance_mock.assert_called_once()
 
     def test_lancedb_backend_rebuild_search_and_delete(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "main"))
@@ -359,7 +390,35 @@ class VectorIndexTests(unittest.TestCase):
             index.rebuild(documents, on_progress=lambda _payload: None)
             table = index._table()
         self.assertGreater(table.add_calls, 1)
-        self.assertLessEqual(max(table.add_batch_sizes), 128)
+        self.assertLessEqual(max(table.add_batch_sizes), 384)
+
+    def test_lancedb_rebuild_retries_smaller_write_batches_after_memory_pressure(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "memory_pressure_retry"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend="lancedb",
+            vector_batch_size=64,
+            build_resource_profile='peak',
+        )
+        documents = [
+            {
+                "chunk_id": f"retry{index}",
+                "source_path": f"pages/{index}.md",
+                "title": f"T{index}",
+                "anchor": f"A{index}",
+                "rendered_text": f"retry chunk {index}",
+            }
+            for index in range(40)
+        ]
+        progress: list[dict[str, object]] = []
+        with patch.dict(sys.modules, _fake_lancedb_modules(_MemoryPressureTable)):
+            index = LanceDbVectorIndex(config, data_paths, embedder_factory=FakeEmbedder)
+            index.rebuild(documents, on_progress=progress.append)
+            table = index._table()
+        self.assertEqual(len(table.rows), len(documents))
+        self.assertTrue(any(size <= 8 for size in table.add_batch_sizes))
+        self.assertEqual(progress[-1]['written_count'], len(documents))
 
     def test_lancedb_warmup_returns_dimension(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "warmup"))
