@@ -27,7 +27,7 @@
 <br/>
 
 <div align="center">
-  <img alt="软件主界面截图" src="https://github.com/user-attachments/assets/9c4bd9b4-9288-4177-a475-580dc1efab0f" width="800" />
+  <img alt="软件主界面截图" src="https://github.com/user-attachments/assets/5c91c1a4-46de-434a-9364-3944759aec1c" width="800" />
 </div>
 
 <br/>
@@ -67,7 +67,7 @@
 7. **建库完成后，搜索吧！**找到惊艳的切片，点击复制片段发给各个当红的大模型。
 
 <div align="center">
-  <img alt="智能检索与预览" src="https://github.com/user-attachments/assets/44a5b251-2ffd-46a6-9cc0-0b429cd40eb7" width="800" />
+  <img alt="智能检索与预览" src="https://github.com/user-attachments/assets/84fe1bd6-5dcf-40c0-89e7-4fc8b393fd50" width="800" />
 </div>
 
 ---
