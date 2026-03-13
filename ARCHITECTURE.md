@@ -998,3 +998,9 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - `build.py` 现在会同步生成一个 runtime-free 的版本化 zip：`dist/OmniClipRAG-vX.Y.Z-win64.zip`，供 GitHub Releases 直接上传。
 - `OmniClipRAG.spec` 的 EXE 名称已经统一改为 `OmniClipRAG`，因此打包后的 Windows 可执行文件和进程名都回到产品名，不再沿用历史遗留的 `launcher.exe`。
 - `RUNTIME_SETUP.md` 和 `InstallRuntime.ps1` 已同步改成围绕 `OmniClipRAG.exe` 描述，避免用户在 runtime 安装说明里看到过期的可执行文件名。
+
+## 2026-03-13 Extension Formats Must Stay As An Isolated Subsystem
+
+- 扩展格式（第一批：PDF / HTML / MHTML）已经明确不能作为 Markdown 主链里的几个条件分支去实现，而必须作为平行的隔离子系统推进：UI、状态、索引、热监听、删除/重建都要独立；查询层再统一融合。
+- 这项工作的执行蓝图已固定到 `plans/扩展格式隔离子系统实施计划.md`。后续无论在哪个聊天窗继续实现，必须先读取该文档，再继续写代码。
+- 该功能的硬约束是：扩展格式默认关闭时，当前 Markdown 主链的行为必须与“该功能不存在”完全等价；任何破坏该约束的实现都不得合入。
