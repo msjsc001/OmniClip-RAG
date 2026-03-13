@@ -4,7 +4,7 @@
 
 **方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。**
 
-[![Version](https://img.shields.io/badge/version-v0.2.2-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.2.3-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md)
 
@@ -111,15 +111,15 @@
 
 ---
 
-## 🔄 V0.2.2 重点更新视角
+## 🔄 V0.2.3 重点更新视角
 
-`v0.2.2` 是在 `v0.2.1` 之后继续收紧“大库可恢复性”和“发布目录形态”的版本：目标很明确，就是让超大 Markdown 库在真实长时间运行里更稳，也让每次本地构建都不再互相覆盖。
+`v0.2.3` 是建立在 `v0.2.2` 之上的一轮可用性收口版本：重点不是再扩功能，而是把 `BAAI/bge-m3` 缺失时的模型下载引导做成真正能执行、能复制、能恢复的闭环。
 
-- 🧱 **大库建库状态改成紧凑持久化**：全量建库不再把巨大的路径清单直接塞进断点状态文件里，而是只保存紧凑游标和清单签名，面对更大的笔记库时更稳、更省。
-- 🔁 **渲染和向量阶段的续跑语义更严格**：恢复建库时会从更可靠的游标继续推进，向量尾段还会先回退一小段再续写，降低断电、强退或崩溃后出现脏尾巴的风险。
-- 🩺 **补上卡顿诊断与异常启动恢复**：长时间没有前进时会自动写出诊断文件；如果上次是在 RAM/VRAM 事故或脏退出后中断，下次启动会先走更安全的恢复路径，避免整套运行时继续被污染。
-- 📦 **构建产物默认改成版本化目录**：以后每次构建都会输出到 `dist/OmniClipRAG-vX.Y.Z/`，该版本目录里的 `runtime/` 会被保护，旧版本目录也不会再被新构建误清。
-- 🪟 **打包 EXE 统一回到产品名**：Windows 分发包、运行时说明和 Release 资产现在统一使用 `OmniClipRAG.exe`，不再沿用历史遗留的 `launcher.exe` 名称。
+- ⬇️ **模型下载正式拆成自动与手动两条路径**：当 `BAAI/bge-m3` 缺失时，界面会明确让用户选择自动下载，或进入手动下载说明，不再只给一个弱提示。
+- 📋 **Qt 主界面补上可复制的手动下载窗口**：现在会直接展示目标目录、Hugging Face CLI 安装命令、官方源链接、镜像链接，以及可直接执行的 Windows 终端命令。
+- 🧭 **手动命令按真实本机路径生成**：程序会先创建模型目录，再按当前用户自己的 AppData 路径生成下载命令，不再要求用户自己猜缓存目录该怎么拼。
+- 📎 **旧 Tk 界面也复用了同一套命令逻辑**：老界面虽然还是消息框，但已经在弹窗前自动把完整说明复制到剪贴板，减少无法选中文本的老问题。
+- 📝 **文档与后续蓝图同步补齐**：README 的项目定位做了刷新，扩展格式隔离子系统的实施计划也已经正式写入仓库，方便后续继续推进。
 
 ---
 

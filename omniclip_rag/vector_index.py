@@ -890,6 +890,26 @@ def get_local_model_dir(config: AppConfig, paths: DataPaths) -> Path:
     return paths.cache_dir / "models" / _normalize_model_dir_name(config.vector_model)
 
 
+def model_download_guidance_context(config: AppConfig, paths: DataPaths) -> dict[str, str]:
+    model_name = str(config.vector_model or "BAAI/bge-m3").strip() or "BAAI/bge-m3"
+    model_root = paths.cache_dir / "models"
+    model_dir = get_local_model_dir(config, paths)
+    hf_home_dir = model_root / "_hf_home"
+    model_root.mkdir(parents=True, exist_ok=True)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    hf_home_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "model": model_name,
+        "model_dir": str(model_dir),
+        "hf_home_dir": str(hf_home_dir),
+        "official_url": f"https://huggingface.co/{model_name}",
+        "mirror_url": f"https://hf-mirror.com/{model_name}",
+        "install_cli_command": 'PowerShell -ExecutionPolicy Bypass -NoProfile -Command "irm https://hf.co/cli/install.ps1 | iex"',
+        "official_download_command": _build_model_download_command(model_name, model_dir, hf_home_dir, use_mirror=False),
+        "mirror_download_command": _build_model_download_command(model_name, model_dir, hf_home_dir, use_mirror=True),
+    }
+
+
 def is_local_model_ready(config: AppConfig, paths: DataPaths) -> bool:
     return _is_model_dir_ready(get_local_model_dir(config, paths), config.vector_runtime)
 
@@ -1466,6 +1486,24 @@ def _distance_to_score(distance: float) -> float:
 def _normalize_model_dir_name(model_name: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "__", (model_name or "").strip())
     return normalized or "model"
+
+
+def _powershell_literal(value: str | Path) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _build_model_download_command(repo_id: str, model_dir: Path, hf_home_dir: Path, *, use_mirror: bool) -> str:
+    command_parts = [
+        f"$target = {_powershell_literal(model_dir)}",
+        f"$hfHome = {_powershell_literal(hf_home_dir)}",
+        "New-Item -ItemType Directory -Force -Path $target, $hfHome | Out-Null",
+        "$env:HF_HOME = $hfHome",
+    ]
+    if use_mirror:
+        command_parts.append("$env:HF_ENDPOINT = 'https://hf-mirror.com'")
+    command_parts.append(f"hf download {_powershell_literal(repo_id)} --local-dir $target")
+    command = "; ".join(command_parts)
+    return f'PowerShell -ExecutionPolicy Bypass -NoProfile -Command "{command}"'
 
 
 def _is_model_dir_ready(path: Path, runtime: str) -> bool:

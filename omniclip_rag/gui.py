@@ -38,10 +38,10 @@ from .service import WATCHDOG_AVAILABLE, OmniClipService
 from .ui_i18n import language_code_from_label, language_label, normalize_language, text, tooltip
 from .ui_tooltip import ToolTip
 from .reranker import get_local_reranker_dir, is_local_reranker_ready
-from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
+from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, model_download_guidance_context, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.2.2"
+APP_VERSION = "V0.2.3"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 _CONTEXT_PAGE_RE = re.compile(r'^# 笔记名：(.*)$')
 _CONTEXT_FRAGMENT_RE = re.compile(r'^笔记片段\d+：$')
@@ -3754,15 +3754,24 @@ class OmniClipDesktopApp:
         self._append_log(self._tr("log_status_done"))
         self._offer_resume_rebuild(config, paths, payload)
 
-    def _manual_model_hint(self, config: AppConfig, paths) -> str:
-        return self._tr(
+    def _manual_model_context(self, config: AppConfig, paths) -> dict[str, str]:
+        context = model_download_guidance_context(config, paths)
+        context["size"] = format_bytes(estimate_model_cache_bytes(config.vector_model, config.vector_runtime))
+        context["plain_text"] = self._tr(
             "manual_model_hint",
-            mirror_url="https://hf-mirror.com/",
-            hf_url=f"https://huggingface.co/{config.vector_model}",
-            model=config.vector_model,
-            size=format_bytes(estimate_model_cache_bytes(config.vector_model, config.vector_runtime)),
-            model_dir=get_local_model_dir(config, paths),
+            size=context["size"],
+            model=context["model"],
+            model_dir=context["model_dir"],
+            official_url=context["official_url"],
+            mirror_url=context["mirror_url"],
+            install_cli_command=context["install_cli_command"],
+            official_download_command=context["official_download_command"],
+            mirror_download_command=context["mirror_download_command"],
         )
+        return context
+
+    def _manual_model_hint(self, config: AppConfig, paths) -> str:
+        return self._manual_model_context(config, paths)["plain_text"]
 
     def _manual_reranker_hint(self, config: AppConfig, paths) -> str:
         model_dir = get_local_reranker_dir(config, paths)
@@ -3795,9 +3804,17 @@ class OmniClipDesktopApp:
             self._append_log(self._tr("log_model_download_prompt"))
             return "auto"
         if choice is False:
+            manual_context = self._manual_model_context(config, paths)
+            manual_hint = manual_context["plain_text"]
+            clipboard_note = ""
+            try:
+                copy_text(manual_hint)
+                clipboard_note = f"\n\n{self._tr('manual_download_clipboard_note')}"
+            except Exception:
+                clipboard_note = ""
             messagebox.showinfo(
                 self._tr("model_manual_title"),
-                self._manual_model_hint(config, paths),
+                manual_hint + clipboard_note,
                 parent=self.root,
             )
             self.status_var.set(self._tr("status_manual_download_waiting"))

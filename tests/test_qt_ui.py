@@ -17,6 +17,7 @@ from omniclip_rag.errors import BuildCancelledError
 from omniclip_rag.models import SearchHit, SpaceEstimate
 from omniclip_rag.ui_i18n import text
 from omniclip_rag.preflight import estimate_storage_for_vault
+from omniclip_rag.vector_index import get_local_model_dir
 from omniclip_rag.ui_next_qt.config_workspace import ConfigWorkspace
 from omniclip_rag.ui_next_qt.filter_models import PageBlocklistTableModel
 from omniclip_rag.ui_next_qt.main_window import MainWindow
@@ -557,6 +558,29 @@ class QtUiTests(unittest.TestCase):
         try:
             self.assertEqual(workspace.bootstrap_button.text(), text('zh-CN', 'bootstrap_button_named', model='BAAI/bge-m3'))
             self.assertEqual(workspace.model_chip.text(), text('zh-CN', 'model_missing_named', model='BAAI/bge-m3'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_manual_model_download_opens_copyable_dialog(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_model='BAAI/bge-m3')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_ask_yes_no_cancel', return_value=QtWidgets.QMessageBox.StandardButton.No), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.ModelDownloadDialog') as dialog_cls:
+                dialog_instance = dialog_cls.return_value
+                result = workspace._choose_model_download_mode('下载模型', config, paths)
+            self.assertEqual(result, 'manual')
+            dialog_cls.assert_called_once()
+            kwargs = dialog_cls.call_args.kwargs
+            self.assertIn('hf download', kwargs['context']['official_download_command'])
+            self.assertIn('https://huggingface.co/BAAI/bge-m3', kwargs['context']['official_url'])
+            self.assertIn('https://hf-mirror.com/BAAI/bge-m3', kwargs['context']['mirror_url'])
+            self.assertIn(str(get_local_model_dir(config, paths)), kwargs['context']['plain_text'])
+            dialog_instance.exec.assert_called_once()
         finally:
             workspace.deleteLater()
             app.processEvents()

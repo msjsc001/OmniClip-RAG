@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import RuntimeDependencyError
-from omniclip_rag.vector_index import LanceDbVectorIndex, create_vector_index, is_local_model_ready, runtime_dependency_issue, runtime_guidance_context
+from omniclip_rag.vector_index import LanceDbVectorIndex, create_vector_index, is_local_model_ready, model_download_guidance_context, runtime_dependency_issue, runtime_guidance_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -521,6 +521,23 @@ class VectorIndexTests(unittest.TestCase):
         self.assertFalse(is_local_model_ready(config, data_paths))
         (model_dir / "pytorch_model.bin").write_bytes(b"ok")
         self.assertTrue(is_local_model_ready(config, data_paths))
+
+    def test_model_download_guidance_context_builds_commands_and_dirs(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "manual_model_context"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_model="BAAI/bge-m3",
+        )
+        result = model_download_guidance_context(config, data_paths)
+        self.assertEqual(result["model"], "BAAI/bge-m3")
+        self.assertTrue(Path(result["model_dir"]).exists())
+        self.assertTrue(Path(result["hf_home_dir"]).exists())
+        self.assertIn('https://huggingface.co/BAAI/bge-m3', result["official_url"])
+        self.assertIn('https://hf-mirror.com/BAAI/bge-m3', result["mirror_url"])
+        self.assertIn('hf download', result["official_download_command"])
+        self.assertIn(result["model_dir"], result["official_download_command"])
+        self.assertIn('HF_ENDPOINT', result["mirror_download_command"])
 
     def test_default_embedder_downloads_model_into_local_cache_without_symlink(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "bootstrap"))

@@ -77,6 +77,11 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(result, 'manual')
             self.assertTrue(get_local_model_dir(config, paths).exists())
             self.assertTrue(showinfo_mock.called)
+            _title, body = showinfo_mock.call_args.args[:2]
+            self.assertIn('hf download', body)
+            self.assertIn('https://huggingface.co/BAAI/bge-m3', body)
+            self.assertIn('https://hf-mirror.com/BAAI/bge-m3', body)
+            self.assertIn(str(get_local_model_dir(config, paths)), body)
         finally:
             app._on_close()
 

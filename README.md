@@ -4,7 +4,7 @@
 
 **A silent gravity field between your private notes and the universe of AI.**
 
-[![Version](https://img.shields.io/badge/version-v0.2.2-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.2.3-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md)
 
@@ -111,15 +111,15 @@ OmniClip was primarily built for personal use. Therefore, instead of indulging i
 
 ---
 
-## 🔄 V0.2.2 Key Updates
+## 🔄 V0.2.3 Key Updates
 
-`v0.2.2` is the large-vault durability and release-shape follow-up to `v0.2.1`: the rebuild pipeline is now more resumable under real interruptions, and the packaged build has been renamed and versioned more cleanly for long-term local use.
+`v0.2.3` is a focused usability release built on top of `v0.2.2`: the goal is to make missing-model onboarding for `BAAI/bge-m3` honest, executable, and much easier to recover from on a real Windows machine.
 
-- 🧱 **Large-vault rebuild state is now compact and durable**: full rebuild checkpoints no longer persist huge path lists; they keep compact cursors plus manifest signatures, which scales better when the vault grows into very large file counts.
-- 🔁 **Resume semantics are tighter across rendering and vector writes**: rebuild recovery now resumes from durable cursors and rewinds a small confirmed window before vector continuation, reducing the chance of dirty tails after crashes, power loss, or forced termination.
-- 🩺 **Watchdog diagnostics and safe startup were added for memory incidents**: when rebuild progress stalls for too long, the app now emits diagnostics; after dirty exits or RAM/VRAM incidents, the next startup enters a safer recovery path instead of poisoning the whole packaged runtime.
-- 📦 **Packaged outputs are now versioned and preserved by default**: each build lands in `dist/OmniClipRAG-vX.Y.Z/`, the runtime folder inside that version stays protected, and older version folders are left intact instead of being reused destructively.
-- 🪟 **The packaged executable is now `OmniClipRAG.exe`**: the public Windows bundle, runtime instructions, and release asset naming all now align with the product name instead of the old `launcher.exe` carryover.
+- ⬇️ **Model bootstrap now splits cleanly into automatic and manual paths**: when `BAAI/bge-m3` is missing, the app now offers an explicit choice instead of hiding the manual path behind a weak plain-text hint.
+- 📋 **Qt now shows a copyable manual-download dialog**: the main desktop flow includes the exact target folder, Hugging Face CLI bootstrap command, official source link, mirror link, and ready-to-run Windows terminal commands.
+- 🧭 **Manual commands are generated from the real local AppData paths**: the app now creates the model folder first and emits download commands that already point at the user-specific cache directory instead of relying on guesswork.
+- 📎 **Legacy Tk keeps the same manual path semantics**: the old UI now reuses the same download-command generator and copies the full manual instructions to the clipboard before showing them.
+- 📝 **Project docs were refreshed for the next stage**: README positioning was refined and the isolated extension-format subsystem plan is now written down explicitly for future implementation.
 
 ---
 

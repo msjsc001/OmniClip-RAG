@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## V0.2.3 - 2026-03-13
+
+### Added
+
+- Added a dedicated copyable manual-download dialog for missing `BAAI/bge-m3`, including the target folder, Hugging Face CLI bootstrap command, official source link, mirror link, and ready-to-run Windows terminal commands.
+- Added a shared `model_download_guidance_context()` helper so Qt, Tk, and future entry points reuse the same AppData-aware model-path and manual-command generation logic.
+- Added [RELEASE_NOTES_v0.2.3](releases/RELEASE_NOTES_v0.2.3.md) for the model-download usability and documentation refresh release.
+
+### Changed
+
+- Changed the model-missing flow so clicking `Download BAAI/bge-m3 model` now explicitly splits into automatic download versus manual download guidance instead of falling back to a weak plain-text hint.
+- Changed the legacy Tk manual-download path to copy the full instruction block to the clipboard before showing the dialog, compensating for old message-box text-selection limits.
+- Changed README positioning and captured the future extension-format isolation plan in repo docs so the next subsystem can be resumed without losing architectural intent.
+
+### Fixed
+
+- Fixed missing-model guidance so manual users now get executable commands with the correct target folder created in advance, instead of only getting generic web links.
+
 ## V0.2.2 - 2026-03-13
 
 ### Added

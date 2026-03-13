@@ -31,11 +31,12 @@ from ..preflight import estimate_model_cache_bytes
 from ..service import WATCHDOG_AVAILABLE, OmniClipService
 from ..ui_i18n import text, tooltip
 from ..ui_shared import merge_page_filter_defaults
-from ..vector_index import detect_acceleration, get_local_model_dir, is_local_model_ready, resolve_vector_device, runtime_dependency_issue, runtime_guidance_context
+from ..vector_index import detect_acceleration, get_local_model_dir, is_local_model_ready, model_download_guidance_context, resolve_vector_device, runtime_dependency_issue, runtime_guidance_context
 from ..reranker import get_local_reranker_dir, is_local_reranker_ready
 from .filter_dialogs import PageBlocklistDialog, SensitiveFilterDialog
 from .theme import ThemeState, scaled
 from .runtime_guidance_dialog import RuntimeGuidanceDialog
+from .model_download_dialog import ModelDownloadDialog
 from .workers import FunctionWorker, ServiceTaskWorker, WatchWorker
 REPO_URL = 'https://github.com/msjsc001/OmniClip-RAG'
 LOGGER = logging.getLogger(__name__)
@@ -1599,8 +1600,24 @@ class ConfigWorkspace(QtWidgets.QWidget):
         box.setIcon(QtWidgets.QMessageBox.Icon.Question)
         box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No | QtWidgets.QMessageBox.StandardButton.Cancel)
         return QtWidgets.QMessageBox.StandardButton(box.exec())
+    def _manual_model_context(self, config: AppConfig, paths) -> dict[str, str]:
+        context = model_download_guidance_context(config, paths)
+        context['size'] = format_bytes(estimate_model_cache_bytes(config.vector_model, config.vector_runtime))
+        context['plain_text'] = self._tr(
+            'manual_model_hint',
+            size=context['size'],
+            model=context['model'],
+            model_dir=context['model_dir'],
+            official_url=context['official_url'],
+            mirror_url=context['mirror_url'],
+            install_cli_command=context['install_cli_command'],
+            official_download_command=context['official_download_command'],
+            mirror_download_command=context['mirror_download_command'],
+        )
+        return context
+
     def _manual_model_hint(self, config: AppConfig, paths) -> str:
-        return self._tr('manual_model_hint', mirror_url='https://hf-mirror.com/', hf_url=f'https://huggingface.co/{config.vector_model}', model=config.vector_model, size=format_bytes(estimate_model_cache_bytes(config.vector_model, config.vector_runtime)), model_dir=get_local_model_dir(config, paths))
+        return self._manual_model_context(config, paths)['plain_text']
     def _manual_reranker_hint(self, config: AppConfig, paths) -> str:
         model_dir = get_local_reranker_dir(config, paths)
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -1613,7 +1630,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._append_log(self._tr('log_model_download_prompt'))
             return 'auto'
         if choice == QtWidgets.QMessageBox.StandardButton.No:
-            QtWidgets.QMessageBox.information(self, self._tr('model_manual_title'), self._manual_model_hint(config, paths))
+            context = self._manual_model_context(config, paths)
+            dialog = ModelDownloadDialog(language_code=self._language_code, theme=self._theme, context=context, parent=self)
+            dialog.exec()
             self.statusMessageChanged.emit(self._tr('status_manual_download_waiting'))
             self._append_log(self._tr('log_manual_download_hint', model=config.vector_model))
             return 'manual'
