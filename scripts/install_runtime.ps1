@@ -152,4 +152,5 @@ print('Runtime validation succeeded.')
 '@ | & $pythonExe @pythonPrefix - $target
 if ($LASTEXITCODE -ne 0) { throw "Runtime validation failed after installation." }
 
-Write-Host "Runtime installation completed. Restart launcher.exe and retry model bootstrap or indexing."
+Write-Host "Runtime installation completed. Restart OmniClipRAG.exe and retry model bootstrap or indexing."
+

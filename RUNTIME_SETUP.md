@@ -13,7 +13,8 @@ Why:
 
 To enable model warmup, full rebuild, and semantic query on the packaged app, install a runtime into the app's `runtime/` folder.
 
-The packaged app includes `InstallRuntime.ps1` next to `launcher.exe`.
+The packaged app includes `InstallRuntime.ps1` next to `OmniClipRAG.exe`.
+Each packaged build now lands in its own versioned folder such as `dist/OmniClipRAG-v0.2.2/`, so an older local runtime tree is not wiped by a newer build.
 
 ### CPU runtime
 
@@ -49,7 +50,7 @@ Notes:
 
 - `cuda` requires an NVIDIA GPU, working drivers, and a compatible PyTorch CUDA environment. A working `nvcc` on the system is not enough by itself; this lean app package still needs its own runtime installed into `runtime/`.
 - The installer script uses your system Python to download the runtime into the app-local `runtime/` folder.
-- The script creates or updates the app-local `runtime/` folder next to `launcher.exe`.
+- The script creates or updates the app-local `runtime/` folder next to `OmniClipRAG.exe`.
 - The main app package remains unchanged; only the optional runtime folder grows.
 - The runtime installer also installs the external LanceDB / PyArrow stack used by the vector index.
 

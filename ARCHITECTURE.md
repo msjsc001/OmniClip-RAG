@@ -949,3 +949,52 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - `vector_index.py` 现在会在向量阶段发出节流心跳：当资源接近阈值、写入队列积压、或末尾正在 flush 时，UI 仍能收到持续进度事件；writer 在遇到内存压力时会按更小写批次重试，并且在重试前清理当前批次可能残留的 chunk 行，尽量避免重复写入风险。
 - `ui_i18n.py` 与 `ui_next_qt/config_workspace.py` 增加了 `recovering / backpressure / flushing` 三类向量阶段说明文案，让“数字不动但仍在工作”的状态可见且可理解。
 - 回归测试新增覆盖：控制器高压收缩、向量写入阶段的小批次恢复、以及 Qt 恢复态提示；全量测试已覆盖这些路径。
+## 2026-03-12 Large-Vault Encode Stall Hardening
+
+### Decisions
+- 向量建库现在会先把超长 `rendered_text` 压到安全的嵌入文本长度，再送入 `SentenceTransformer.encode(...)`，并且按“单批总字符预算”动态收紧编码批次，避免极端长块把整个批次拖进异常慢甚至近似卡死的 tokenization / encode 路径。
+- 编码阶段新增了后台心跳与慢批次监控。即使某一批向量编码明显变慢，Qt/Tk 也会继续收到 `encoding` 心跳；一旦超过阈值，日志会直接写出该批次的文档数、字符量、截断数量，以及当前线程栈，方便精准定位到底是 `encode` 卡住还是别的底层库阻塞。
+- Hugging Face / tokenizers 运行环境现在默认关闭 `TOKENIZERS_PARALLELISM`，减少 Windows 本地长任务里 tokenizer 线程并行带来的不可控抖动。
+
+### Why
+- 实测万页库在 40%~50% 的中段“无报错、无推进、界面像死掉”时，`encoded` 与 `written` 只差几十条、写队列也未堆满，更像是下一批 `encode(...)` 被某个异常长片段拖住，而不是 LanceDB 写线程已经完全堵死。
+- 大库平均 chunk 很小，但只要混进极端长块，就足以把一个看似正常的小批次拖成分钟级甚至更久；如果没有前置截断和字符预算，这类问题会极难复现且很难从 UI 判断到底是慢还是死。
+- 用户已经在本地保守构建上投入数小时，系统需要优先保证“不会静默停住且能留下足够日志”，而不是继续无保护地赌底层库一定会按预期返回。
+
+### Implementation Notes
+- `vector_index.py` 新增了 `_prepare_vector_text()`、`_infer_vector_text_char_limit()` 与 `_infer_vector_batch_char_budget()`：嵌入时只对超长文本做 head+tail 安全裁剪，不改 SQLite/LanceDB 里保存的原始 `rendered_text`。
+- `LanceDbVectorIndex.rebuild()` 现在不再盲目按件数攒批次，而是同时受“目标批次数量”和“单批总字符预算”约束；一旦遇到超长块，会自动拆成更保守的小批。
+- 编码调用外围增加了 watchdog：慢批次会持续发 `encoding` 心跳；超过慢批次阈值会记录 warning；超过更高阈值会把全线程栈打进日志，便于后续精准抓住真实阻塞点。
+
+## 2026-03-13 Large-Vault Rebuild Durability Hardening
+
+- `service.py` 的全量建库状态已经从 `manifest + completed_paths + readable_paths` 的膨胀 JSON 改成紧凑 checkpoint：只保留 `manifest_signature`、阶段游标和少量计数，不再随着文件数线性膨胀到不可恢复。
+- 全量建库现在按阶段分别记录 durable cursor：`indexing_cursor`、`rendering_cursor`、`vector_written_count`。恢复时不再依赖巨大路径列表，而是依赖稳定排序后的游标与数据库真相源。
+- 渲染阶段的 checkpoint 只会在 `rendered_text + FTS` 批次真正提交后推进，避免断电后出现“状态已前进但数据库还没写进去”的跳过损坏。
+- 向量阶段新增了 durable suffix repair：崩溃后会从最后已确认写入位置向前回退一个小窗口，先删掉不确定尾巴，再从该游标继续写入，避免 LanceDB 因最后一批未确认而出现重复/脏尾。
+- 全量渲染不再一次性 `fetch_block_lookup()` 把整库 block 映射读进内存，而是改成按需 lazy lookup；查询展示的 `chunk/block lookup` 也同步按需加载，避免大库查询时再次爆内存。
+- 启动链新增 `runtime_recovery.py`：如果上次会话异常退出或命中过内存/显存事故，下一次启动会进入 safe startup，先清理进程级向量缓存与 CUDA cache，再延迟 torch/CUDA 探测，降低“上一轮 OOM 后 exe 要重启电脑才恢复”的概率。
+- `service.close()` 现在会主动释放进程级向量缓存；`vector_index.py` 也补了 `torch.cuda.ipc_collect()`，避免 Windows + CUDA 在长任务后残留更多显存句柄。
+
+### 下一轮继续加固计划
+
+1. 把 `scan_vault()` 的全量 Path 列表继续下沉成可落盘的 manifest spool，进一步把百万级文件扫描的峰值内存压平。
+2. 在 `service.py` 增加阶段感知 watchdog：超过 120 秒无 forward progress 时自动输出诊断包，并区分“编码慢批 / 写入回压 / 真 stall”。
+3. 为向量阶段补“已确认 checkpoint 周期”配置，把 durable rewind 窗口和 checkpoint 频率做成可调参数，兼顾极大库恢复时间与安全性。
+4. 继续把查询展示链剩余的全量 `fetchall()` 热点替换成按需或分批读取，让百万级状态库在查询侧也维持低峰值内存。
+
+## 2026-03-13 Large-Vault Scan And Watchdog Hardening
+
+- `service.py` 的全量建库文件发现已经进一步改成两遍流式遍历：第一遍只计算 `manifest_signature + total_files`，第二遍再按稳定顺序真正解析，不再把百万级 `Path` 列表长时间常驻内存。
+- 稳定顺序不再依赖最终 `sorted(files)` 全量排序，而是对 `os.walk()` 的 `dirnames/filenames` 做局部排序，保证跨重启恢复时 traversal 顺序一致，同时降低超大库下的内存峰值。
+- 全量建库新增了阶段感知 watchdog。超过 120 秒无 forward progress 时，它只做安全动作：强制 checkpoint、触发 `gc.collect()`、写 JSON 诊断文件、补一条可见的 UI 提示；不会在不确定 LanceDB / torch 内部状态时粗暴重启活线程，避免二次损坏。
+- watchdog 诊断文件落到 `shared/logs/diagnostics/`，会保留最近几份 `rebuild-watchdog-*.json`，其中包含阶段状态、已尝试动作、rebuild state 快照和关键线程栈，后续排查大库卡死会比单纯截图精确很多。
+- Qt 新界面在收到 watchdog payload 后会直接在任务详情里显示“已自动执行安全自检并写出诊断文件”，减少用户误以为已经死锁而强关程序的风险。
+
+## 2026-03-13 Versioned Build Outputs And Release Naming
+
+- `build.py` 现在会从 `omniclip_rag.__version__` 读取版本号，并默认把 onedir 构建输出到 `dist/OmniClipRAG-vX.Y.Z/`，而不是复用一个恒定的 `dist/OmniClipRAG/` 目录。
+- 新的构建策略只会清理当前目标版本目录里的非 `runtime/` 内容，不会碰旧版本目录；这样历史本地构建可以长期并存，各自的 `runtime/` 也不会被新构建误删。
+- `build.py` 现在会同步生成一个 runtime-free 的版本化 zip：`dist/OmniClipRAG-vX.Y.Z-win64.zip`，供 GitHub Releases 直接上传。
+- `OmniClipRAG.spec` 的 EXE 名称已经统一改为 `OmniClipRAG`，因此打包后的 Windows 可执行文件和进程名都回到产品名，不再沿用历史遗留的 `launcher.exe`。
+- `RUNTIME_SETUP.md` 和 `InstallRuntime.ps1` 已同步改成围绕 `OmniClipRAG.exe` 描述，避免用户在 runtime 安装说明里看到过期的可执行文件名。

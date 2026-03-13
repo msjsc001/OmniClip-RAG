@@ -420,6 +420,75 @@ class VectorIndexTests(unittest.TestCase):
         self.assertTrue(any(size <= 8 for size in table.add_batch_sizes))
         self.assertEqual(progress[-1]['written_count'], len(documents))
 
+    def test_lancedb_rebuild_trims_oversized_texts_before_encoding(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "oversized_trim"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend="lancedb",
+            vector_batch_size=3,
+            vector_device='cpu',
+        )
+        documents = [
+            {
+                "chunk_id": f"long{index}",
+                "source_path": f"pages/{index}.md",
+                "title": f"T{index}",
+                "anchor": f"A{index}",
+                "rendered_text": "超长片段" * 6000,
+            }
+            for index in range(3)
+        ]
+        seen_batches: list[list[str]] = []
+
+        class RecordingEmbedder:
+            def encode(self, texts, *, batch_size=16, show_progress_bar=False, normalize_embeddings=True):
+                seen_batches.append(list(texts))
+                return [[float(len(text)), 1.0, 0.0] for text in texts]
+
+        with patch.dict(sys.modules, _fake_lancedb_modules()):
+            index = LanceDbVectorIndex(config, data_paths, embedder_factory=RecordingEmbedder)
+            index.rebuild(documents)
+
+        self.assertTrue(seen_batches)
+        self.assertTrue(all(len(text) <= 8000 for batch in seen_batches for text in batch))
+        self.assertEqual([len(batch) for batch in seen_batches], [2, 1])
+
+    def test_lancedb_rebuild_emits_encoding_heartbeat_for_slow_batches(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "slow_encode_heartbeat"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend="lancedb",
+            vector_batch_size=1,
+            vector_device='cpu',
+        )
+        progress: list[dict[str, object]] = []
+
+        class SlowEmbedder:
+            def encode(self, texts, *, batch_size=16, show_progress_bar=False, normalize_embeddings=True):
+                time.sleep(0.35)
+                return [[float(len(text)), 1.0, 0.0] for text in texts]
+
+        documents = [
+            {
+                "chunk_id": "slow",
+                "source_path": "pages/slow.md",
+                "title": "Slow",
+                "anchor": "Slow",
+                "rendered_text": "这个批次会被故意放慢",
+            }
+        ]
+
+        with patch('omniclip_rag.vector_index._VECTOR_PROGRESS_HEARTBEAT_SECONDS', 0.05), \
+             patch('omniclip_rag.vector_index._VECTOR_STALL_STACK_DUMP_SECONDS', 99.0), \
+             patch.dict(sys.modules, _fake_lancedb_modules()):
+            index = LanceDbVectorIndex(config, data_paths, embedder_factory=SlowEmbedder)
+            index.rebuild(documents, on_progress=progress.append)
+
+        self.assertTrue(any(item.get('stage_status') == 'encoding' and int(item.get('current', 0) or 0) == 0 for item in progress))
+        self.assertEqual(progress[-1]['written_count'], 1)
+
     def test_lancedb_warmup_returns_dimension(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "warmup"))
         config = AppConfig(

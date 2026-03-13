@@ -389,6 +389,16 @@ class MetadataStore:
     def fetch_render_rows(self, source_paths: Iterable[str] | None = None) -> list[sqlite3.Row]:
         return list(self.iter_render_rows(source_paths))
 
+    def list_source_paths(self) -> list[str]:
+        rows = self.connection.execute(
+            """
+            SELECT source_path
+            FROM files
+            ORDER BY source_path
+            """
+        ).fetchall()
+        return [str(row["source_path"]) for row in rows if row["source_path"]]
+
     def fetch_block_lookup(self) -> dict[str, sqlite3.Row]:
         rows = self.connection.execute(
             """
@@ -399,6 +409,34 @@ class MetadataStore:
             """
         ).fetchall()
         return {row["block_id"]: row for row in rows if row["block_id"]}
+
+    def fetch_block_row(self, block_id: str) -> sqlite3.Row | None:
+        if not block_id:
+            return None
+        return self.connection.execute(
+            """
+            SELECT chunks.*, files.page_properties_json
+            FROM chunks
+            JOIN files ON files.source_path = chunks.source_path
+            WHERE chunks.block_id = ?
+            LIMIT 1
+            """
+            ,(block_id,),
+        ).fetchone()
+
+    def fetch_chunk_row(self, chunk_id: str) -> sqlite3.Row | None:
+        if not chunk_id:
+            return None
+        return self.connection.execute(
+            """
+            SELECT chunks.*, files.page_properties_json
+            FROM chunks
+            JOIN files ON files.source_path = chunks.source_path
+            WHERE chunks.chunk_id = ?
+            LIMIT 1
+            """
+            ,(chunk_id,),
+        ).fetchone()
 
     def fetch_chunk_lookup(self, chunk_ids: Iterable[str] | None = None) -> dict[str, sqlite3.Row]:
         query = """

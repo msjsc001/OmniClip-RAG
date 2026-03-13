@@ -77,5 +77,6 @@ _bootstrap_vendor_packages()
 
 __all__ = ['__version__']
 
-__version__ = '0.2.1'
+__version__ = '0.2.2'
+
 

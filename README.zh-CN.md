@@ -4,7 +4,7 @@
 
 **方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。**
 
-[![Version](https://img.shields.io/badge/version-v0.2.1-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.2.2-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md)
 
@@ -90,15 +90,15 @@
 
 ---
 
-## 🔄 V0.2.1 重点更新视角
+## 🔄 V0.2.2 重点更新视角
 
-`v0.2.1` 是 Qt 重写完成后的稳定性收尾版本：主程序依然保持轻量，但那些最容易在真实打包环境、大笔记库建库和运行时缺失场景里让用户困惑的边角问题，这次都继续收紧了。
+`v0.2.2` 是在 `v0.2.1` 之后继续收紧“大库可恢复性”和“发布目录形态”的版本：目标很明确，就是让超大 Markdown 库在真实长时间运行里更稳，也让每次本地构建都不再互相覆盖。
 
-- 🌐 **双语 Qt 主界面正式坐稳主线**：发布包继续只走新的 Qt 工作流，顶部 `简体中文 / English` 切换保持即时生效，同时不再把旧界面作为发布内容的一部分。
-- 🧭 **运行时准备度更早说清楚**：模型下载、全量建库、查询和热监听现在会更早区分“模型是否存在”和“向量运行时是否完备”，避免用户跑到后半段才撞上 CUDA/runtime 困惑。
-- 📋 **设备状态与日志入口更诚实**：配置页补齐了设备/运行时状态提示、滚动文件日志与清理入口，打包版排障不再只能靠猜，也不会把日志乱写进安装目录。
-- 📈 **整体进度统一，恢复态可见**：建库进度条统一使用全局百分比，向量阶段则额外说明 `已编码 / 已写入 / flushing / recovering`，大库恢复时不再那么像“卡死”。
-- 🚀 **大库资源压力恢复更稳**：向量建库在 RAM/VRAM 紧张时会主动缩批、让行、拆小批重试，并把恢复过程显示出来，优先保证结果完整性和可继续跑完，而不是冒险硬冲峰值。
+- 🧱 **大库建库状态改成紧凑持久化**：全量建库不再把巨大的路径清单直接塞进断点状态文件里，而是只保存紧凑游标和清单签名，面对更大的笔记库时更稳、更省。
+- 🔁 **渲染和向量阶段的续跑语义更严格**：恢复建库时会从更可靠的游标继续推进，向量尾段还会先回退一小段再续写，降低断电、强退或崩溃后出现脏尾巴的风险。
+- 🩺 **补上卡顿诊断与异常启动恢复**：长时间没有前进时会自动写出诊断文件；如果上次是在 RAM/VRAM 事故或脏退出后中断，下次启动会先走更安全的恢复路径，避免整套运行时继续被污染。
+- 📦 **构建产物默认改成版本化目录**：以后每次构建都会输出到 `dist/OmniClipRAG-vX.Y.Z/`，该版本目录里的 `runtime/` 会被保护，旧版本目录也不会再被新构建误清。
+- 🪟 **打包 EXE 统一回到产品名**：Windows 分发包、运行时说明和 Release 资产现在统一使用 `OmniClipRAG.exe`，不再沿用历史遗留的 `launcher.exe` 名称。
 
 ---
 
@@ -192,5 +192,4 @@ flowchart LR
 <div align="center">
   <b>方寸之间 · 连接无穷</b>
 </div>
-
 

@@ -41,7 +41,7 @@ from .reranker import get_local_reranker_dir, is_local_reranker_ready
 from .vector_index import detect_acceleration, get_device_options, get_local_model_dir, is_local_model_ready, resolve_vector_device
 
 APP_TITLE = "OmniClip RAG · 方寸引"
-APP_VERSION = "V0.2.1"
+APP_VERSION = "V0.2.2"
 REPO_URL = "https://github.com/msjsc001/OmniClip-RAG"
 _CONTEXT_PAGE_RE = re.compile(r'^# 笔记名：(.*)$')
 _CONTEXT_FRAGMENT_RE = re.compile(r'^笔记片段\d+：$')
@@ -4616,6 +4616,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
 

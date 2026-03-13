@@ -2,26 +2,23 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import site
 import sys
+import zipfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
 DIST_ROOT = ROOT / 'dist'
-OUTPUT_NAME = 'OmniClipRAG'
-OUTPUT_DIR = DIST_ROOT / OUTPUT_NAME
+VERSION_FILE = ROOT / 'omniclip_rag' / '__init__.py'
+EXE_BASENAME = 'OmniClipRAG'
+STAGING_OUTPUT_NAME = EXE_BASENAME
 LEGACY_OUTPUT_DIR = DIST_ROOT / 'OmniClipRAG_App'
-PROTECTED_RUNTIME_DIR = OUTPUT_DIR / 'runtime'
 STAGING_DIST_ROOT = ROOT / 'build' / 'pyinstaller-dist'
-STAGING_OUTPUT_DIR = STAGING_DIST_ROOT / OUTPUT_NAME
 WORK_DIR = ROOT / 'build' / 'pyinstaller-work'
 SPEC_PATH = ROOT / 'OmniClipRAG.spec'
-RUNTIME_SUPPORT_FILES = {
-    ROOT / 'scripts' / 'install_runtime.ps1': OUTPUT_DIR / 'InstallRuntime.ps1',
-    ROOT / 'RUNTIME_SETUP.md': OUTPUT_DIR / 'RUNTIME_SETUP.md',
-}
 BLACKLIST_FRAGMENTS = (
     'workspaces/',
     'shared/cache/',
@@ -46,6 +43,27 @@ FORBIDDEN_BUNDLE_PACKAGE_PREFIXES = (
     'numpy',
     'pandas',
 )
+_VERSION_PATTERN = re.compile(r"__version__\s*=\s*'([^']+)'")
+
+
+def _read_app_version() -> str:
+    payload = VERSION_FILE.read_text(encoding='utf-8')
+    match = _VERSION_PATTERN.search(payload)
+    if not match:
+        raise RuntimeError(f'Unable to parse app version from {VERSION_FILE}')
+    return match.group(1)
+
+
+APP_VERSION = _read_app_version()
+OUTPUT_NAME = f'{EXE_BASENAME}-v{APP_VERSION}'
+OUTPUT_DIR = DIST_ROOT / OUTPUT_NAME
+PROTECTED_RUNTIME_DIR = OUTPUT_DIR / 'runtime'
+STAGING_OUTPUT_DIR = STAGING_DIST_ROOT / STAGING_OUTPUT_NAME
+RELEASE_ZIP_PATH = DIST_ROOT / f'{OUTPUT_NAME}-win64.zip'
+RUNTIME_SUPPORT_FILES = {
+    ROOT / 'scripts' / 'install_runtime.ps1': OUTPUT_DIR / 'InstallRuntime.ps1',
+    ROOT / 'RUNTIME_SETUP.md': OUTPUT_DIR / 'RUNTIME_SETUP.md',
+}
 
 
 def _normalize(path: Path) -> Path:
@@ -97,11 +115,15 @@ def _clean_output_dir_preserving_runtime() -> None:
 def _clean_previous_outputs(clean: bool) -> None:
     if not clean:
         return
-    _remove_path(WORK_DIR) if WORK_DIR.exists() else None
-    _remove_path(STAGING_DIST_ROOT) if STAGING_DIST_ROOT.exists() else None
+    if WORK_DIR.exists():
+        _remove_path(WORK_DIR)
+    if STAGING_DIST_ROOT.exists():
+        _remove_path(STAGING_DIST_ROOT)
     _clean_output_dir_preserving_runtime()
     if LEGACY_OUTPUT_DIR.exists():
         _remove_path(LEGACY_OUTPUT_DIR)
+    if RELEASE_ZIP_PATH.exists():
+        _remove_path(RELEASE_ZIP_PATH)
 
 
 def _run_pyinstaller() -> None:
@@ -158,9 +180,9 @@ def _is_forbidden_bundle_package(part: str) -> bool:
 
 
 def _audit_bundle() -> None:
-    launcher_exe = OUTPUT_DIR / 'launcher.exe'
-    if not launcher_exe.exists():
-        raise RuntimeError(f'Build output is missing launcher.exe: {launcher_exe}')
+    app_exe = OUTPUT_DIR / f'{EXE_BASENAME}.exe'
+    if not app_exe.exists():
+        raise RuntimeError(f'Build output is missing {EXE_BASENAME}.exe: {app_exe}')
     for required in (
         OUTPUT_DIR / 'InstallRuntime.ps1',
         OUTPUT_DIR / 'RUNTIME_SETUP.md',
@@ -206,17 +228,30 @@ def _core_bundle_size() -> int:
     return total
 
 
+def _build_release_zip() -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(RELEASE_ZIP_PATH, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in sorted(OUTPUT_DIR.rglob('*')):
+            if path.is_dir():
+                continue
+            relative = path.relative_to(OUTPUT_DIR)
+            if relative.parts and relative.parts[0].lower() == 'runtime':
+                continue
+            archive.write(path, arcname=(Path(OUTPUT_NAME) / relative).as_posix())
+
+
 def _summarize() -> None:
     size_mb = _core_bundle_size() / (1024 * 1024)
     print(f'Build succeeded: {OUTPUT_DIR}')
-    print(f'Launcher: {OUTPUT_DIR / "launcher.exe"}')
+    print(f'Executable: {OUTPUT_DIR / f"{EXE_BASENAME}.exe"}')
     if PROTECTED_RUNTIME_DIR.exists():
         print(f'Preserved runtime: {PROTECTED_RUNTIME_DIR}')
+    print(f'Release zip: {RELEASE_ZIP_PATH}')
     print(f'Approx app bundle size (excluding runtime): {size_mb:.1f} MB')
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Build the lean onedir bundle into dist/OmniClipRAG while preserving dist/OmniClipRAG/runtime.')
+    parser = argparse.ArgumentParser(description='Build the lean onedir bundle into a versioned dist/OmniClipRAG-vX.Y.Z folder while preserving any existing local runtime trees.')
     parser.add_argument('--no-clean', action='store_true', help='Keep previous staging/output files if they already exist.')
     parser.add_argument('--skip-audit', action='store_true', help='Skip the post-build purity audit.')
     return parser.parse_args(argv)
@@ -231,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     _copy_runtime_support_files()
     if not args.skip_audit:
         _audit_bundle()
+    _build_release_zip()
     _summarize()
     return 0
 

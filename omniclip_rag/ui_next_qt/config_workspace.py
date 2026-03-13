@@ -1203,19 +1203,19 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _toggle_advanced(self) -> None:
         self._show_advanced = not bool(getattr(self, '_show_advanced', True))
         self._refresh_advanced_visibility()
-    def schedule_device_probe(self, delay_ms: int = 0) -> None:
+    def schedule_device_probe(self, delay_ms: int = 0, *, safe_mode: bool = False) -> None:
         if self._device_probe_scheduled or self._device_probe_worker is not None:
             return
         self._device_probe_scheduled = True
         if delay_ms > 0:
-            QtCore.QTimer.singleShot(delay_ms, self._start_device_probe)
+            QtCore.QTimer.singleShot(delay_ms, lambda safe=safe_mode: self._start_device_probe(safe_mode=safe))
             return
-        self._start_device_probe()
-    def _start_device_probe(self) -> None:
+        self._start_device_probe(safe_mode=safe_mode)
+    def _start_device_probe(self, *, safe_mode: bool = False) -> None:
         self._device_probe_scheduled = False
         if self._device_probe_worker is not None:
             return
-        worker = FunctionWorker(fn=detect_acceleration)
+        worker = FunctionWorker(fn=lambda: detect_acceleration(safe_mode=safe_mode))
         worker.succeeded.connect(self._on_device_probe_success)
         worker.failed.connect(self._on_device_probe_failed)
         worker.finished.connect(self._on_device_probe_finished)
@@ -1852,7 +1852,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 else:
                     detail = self._tr('task_detail_rebuild_vectorizing_counts', encoded=encoded, written=written, total=total)
                 tuning = self._render_vector_tuning(payload)
-                self.task_detail_label.setText(f'{detail}\n{tuning}' if tuning else detail)
+                detail_text = f'{detail}\n{tuning}' if tuning else detail
+                if payload.get('watchdog_stalled'):
+                    detail_text = f"{detail_text}\n{self._tr('task_detail_rebuild_watchdog', seconds=float(payload.get('watchdog_wait_seconds', 0.0) or 0.0), report=str(payload.get('watchdog_report_path') or self._tr('none_value')))}"
+                self.task_detail_label.setText(detail_text)
+        elif payload.get('watchdog_stalled'):
+            self.task_detail_label.setText(self._tr('task_detail_rebuild_watchdog', seconds=float(payload.get('watchdog_wait_seconds', 0.0) or 0.0), report=str(payload.get('watchdog_report_path') or self._tr('none_value'))))
         self._refresh_task_controls()
     def _start_service_task(self, label_key: str, runner, on_success, *, require_vault: bool) -> None:
         if self._busy:

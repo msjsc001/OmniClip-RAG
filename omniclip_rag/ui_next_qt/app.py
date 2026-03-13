@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import ctypes
 import logging
 import os
@@ -13,6 +14,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from .. import __version__
 from ..app_logging import configure_file_logging, install_exception_logging
 from ..config import AppConfig, ensure_data_paths, load_config, normalize_ui_scale_percent, normalize_ui_theme, normalize_vault_path
+from ..runtime_recovery import mark_session_clean_exit, mark_session_running, mark_session_started, prepare_startup_recovery, record_runtime_incident
 from ..ui_i18n import normalize_language
 from .main_window import MainWindow
 from .theme import apply_application_style, build_theme
@@ -59,6 +61,7 @@ def main() -> int:
     _install_exception_logging()
     _normalize_qpa_platform()
     _set_windows_app_user_model_id()
+    bundle: RuntimeBundle | None = None
     try:
         _trace_startup('create QApplication')
         QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -67,6 +70,11 @@ def main() -> int:
         bundle = load_runtime_bundle()
         configure_file_logging(bundle.paths, bundle.config)
         APP_LOGGER.info('Qt app bootstrap started: language=%s theme=%s scale=%s data_root=%s.', bundle.language_code, bundle.theme_code, bundle.scale_percent, getattr(bundle.paths, 'global_root', ''))
+        recovery = prepare_startup_recovery(bundle.paths)
+        mark_session_started(bundle.paths, version=__version__, safe_startup=bool(recovery.get('safe_startup')))
+        atexit.register(lambda paths=bundle.paths: mark_session_clean_exit(paths))
+        if recovery.get('safe_startup'):
+            APP_LOGGER.warning('Previous session ended unexpectedly or hit memory pressure; OmniClip is starting in safe startup mode.')
         _trace_startup('build theme')
         theme = build_theme(bundle.theme_code, bundle.scale_percent)
         apply_application_style(app, theme)
@@ -89,12 +97,20 @@ def main() -> int:
         window.show()
         window.raise_()
         window.activateWindow()
+        mark_session_running(bundle.paths)
+        app.aboutToQuit.connect(lambda paths=bundle.paths: mark_session_clean_exit(paths))
         _trace_startup('main window shown')
         APP_LOGGER.info('Qt main window shown successfully.')
-        QtCore.QTimer.singleShot(60, window.config_workspace.schedule_device_probe)
+        startup_safe_mode = bool(recovery.get('safe_startup'))
+        QtCore.QTimer.singleShot(60, lambda safe=startup_safe_mode, workspace=window.config_workspace: workspace.schedule_device_probe(safe_mode=safe))
         QtCore.QTimer.singleShot(180, window.config_workspace.schedule_initial_status_load)
         return app.exec()
     except Exception as exc:
+        try:
+            if bundle is not None:
+                record_runtime_incident(bundle.paths, kind='startup_failure', detail=str(exc), phase='startup')
+        except Exception:
+            pass
         APP_LOGGER.exception('Qt startup failed with an unhandled exception.')
         _stderr(f'Qt startup failed: {exc.__class__.__name__}: {exc}')
         traceback.print_exc()

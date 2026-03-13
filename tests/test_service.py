@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import shutil
 import threading
 import time
@@ -19,7 +20,7 @@ TEST_DATA_ROOT = ROOT / ".tmp" / "test_service_data"
 class _StubVectorIndex:
     def __init__(self) -> None:
         self.reset_called = False
-    def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None):
+    def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None, progress_offset=0, reset_index=True):
         return None
     def upsert(self, documents):
         return None
@@ -53,7 +54,7 @@ class _FailingVectorIndex(_StubVectorIndex):
         self.deleted_batches.append(list(chunk_ids))
         return None
 class _ProfilingVectorIndex(_StubVectorIndex):
-    def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None):
+    def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None, progress_offset=0, reset_index=True):
         count = int(total or 0)
         if on_progress is not None:
             on_progress(
@@ -72,6 +73,64 @@ class _ProfilingVectorIndex(_StubVectorIndex):
                     'write_flush_count': 3,
                 }
             )
+        return None
+class _ResumeAwareVectorIndex(_StubVectorIndex):
+    def __init__(self, *, fail_once: bool = False) -> None:
+        super().__init__()
+        self.fail_once = fail_once
+        self.rebuild_calls: list[dict[str, object]] = []
+        self.deleted_batches: list[list[str]] = []
+
+    def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None, progress_offset=0, reset_index=True):
+        docs = list(documents)
+        self.rebuild_calls.append({'progress_offset': progress_offset, 'reset_index': reset_index, 'docs': [item.get('chunk_id', '') for item in docs]})
+        if self.fail_once:
+            self.fail_once = False
+            if on_progress is not None:
+                on_progress({
+                    'stage': 'vectorizing',
+                    'current': min(progress_offset + 2, int(total or (progress_offset + len(docs)))),
+                    'total': int(total or (progress_offset + len(docs))),
+                    'encoded_count': progress_offset + 2,
+                    'written_count': progress_offset + 2,
+                    'write_queue_depth': 0,
+                    'write_queue_capacity': 4,
+                    'staged_write_rows': 0,
+                })
+            raise RuntimeError('cuda out of memory while encoding vectors')
+        if on_progress is not None:
+            final_total = int(total or (progress_offset + len(docs)))
+            on_progress({
+                'stage': 'vectorizing',
+                'current': final_total,
+                'total': final_total,
+                'encoded_count': final_total,
+                'written_count': final_total,
+                'write_queue_depth': 0,
+                'write_queue_capacity': 4,
+                'staged_write_rows': 0,
+            })
+        return None
+
+    def delete(self, chunk_ids):
+        self.deleted_batches.append(list(chunk_ids))
+        return None
+class _SlowVectorIndex(_StubVectorIndex):
+    def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None, progress_offset=0, reset_index=True):
+        time.sleep(0.25)
+        docs = list(documents)
+        if on_progress is not None:
+            final_total = int(total or (progress_offset + len(docs)))
+            on_progress({
+                'stage': 'vectorizing',
+                'current': final_total,
+                'total': final_total,
+                'encoded_count': final_total,
+                'written_count': final_total,
+                'write_queue_depth': 0,
+                'write_queue_capacity': 4,
+                'staged_write_rows': 0,
+            })
         return None
 class _LoweringReranker:
     def __init__(self) -> None:
@@ -133,6 +192,8 @@ class ServiceTests(unittest.TestCase):
             ROOT / '.tmp' / 'cancelled_rebuild_data_test',
             ROOT / '.tmp' / 'watch_guard_vault_test',
             ROOT / '.tmp' / 'watch_guard_data_test',
+            ROOT / '.tmp' / 'vector_resume_vault_test',
+            ROOT / '.tmp' / 'vector_resume_data_test',
             ROOT / '.tmp' / 'bootstrap_model_only',
             ROOT / '.tmp' / 'reranker_disabled_vault_test',
             ROOT / '.tmp' / 'reranker_disabled_data_test',
@@ -676,6 +737,90 @@ class ServiceTests(unittest.TestCase):
             self.assertIsNone(resumed.pending_rebuild())
         finally:
             resumed.close()
+    def test_rebuild_resume_state_is_compact(self) -> None:
+        vault_copy = ROOT / '.tmp' / 'resume_vault_test'
+        data_root = ROOT / '.tmp' / 'resume_data_test'
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        (vault_copy / 'page_a.md').write_text('- 第一块\n  id:: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n', encoding='utf-8')
+        (vault_copy / 'page_b.md').write_text('- 第二块\n  id:: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        original_parse = parser_module.parse_markdown_file
+        call_count = {'value': 0}
+
+        def failing_parse(vault_root, absolute_path):
+            call_count['value'] += 1
+            if call_count['value'] == 2:
+                raise RuntimeError('simulated crash')
+            return original_parse(vault_root, absolute_path)
+
+        try:
+            with patch('omniclip_rag.parser.parse_markdown_file', side_effect=failing_parse):
+                with self.assertRaises(RuntimeError):
+                    service.rebuild_index()
+            payload = json.loads(service._rebuild_state_file.read_text(encoding='utf-8'))
+            self.assertIn('manifest_signature', payload)
+            self.assertNotIn('file_manifest', payload)
+            self.assertNotIn('completed_paths', payload)
+            self.assertEqual(int(payload.get('indexing_cursor', 0) or 0), 1)
+        finally:
+            service.close()
+
+    def test_rebuild_can_resume_vector_stage_from_durable_cursor(self) -> None:
+        vault_copy = ROOT / '.tmp' / 'vector_resume_vault_test'
+        data_root = ROOT / '.tmp' / 'vector_resume_data_test'
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        (vault_copy / 'page_a.md').write_text(
+            '- 第一块\n  id:: 11111111-1111-1111-1111-111111111111\n- 第二块\n  id:: 22222222-2222-2222-2222-222222222222\n- 第三块\n  id:: 33333333-3333-3333-3333-333333333333\n',
+            encoding='utf-8',
+        )
+        data_paths = ensure_data_paths(str(data_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _ResumeAwareVectorIndex(fail_once=True)
+        try:
+            with patch('omniclip_rag.service.REBUILD_VECTOR_RESUME_REWIND', 1):
+                with self.assertRaises(RuntimeError):
+                    service.rebuild_index()
+                pending = service.pending_rebuild()
+                self.assertIsNotNone(pending)
+                self.assertEqual(pending['phase'], 'vectorizing')
+                self.assertEqual(int(pending['completed']), 2)
+        finally:
+            service.close()
+
+        resumed = OmniClipService(config, data_paths)
+        tracker = _ResumeAwareVectorIndex(fail_once=False)
+        resumed.vector_index = tracker
+        try:
+            with patch('omniclip_rag.service.REBUILD_VECTOR_RESUME_REWIND', 1):
+                stats = resumed.rebuild_index(resume=True)
+            self.assertEqual(stats['files'], 1)
+            self.assertTrue(tracker.deleted_batches)
+            self.assertEqual(tracker.rebuild_calls[0]['progress_offset'], 1)
+            self.assertFalse(bool(tracker.rebuild_calls[0]['reset_index']))
+        finally:
+            resumed.close()
+
+    def test_rebuild_watchdog_writes_diagnostic_report_when_progress_stalls(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'watchdog_rebuild'))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _SlowVectorIndex()
+        progress_events: list[dict[str, object]] = []
+        try:
+            with patch('omniclip_rag.service.REBUILD_WATCHDOG_INTERVAL_SECONDS', 0.02), \
+                 patch('omniclip_rag.service.REBUILD_WATCHDOG_STALL_SECONDS', 0.05), \
+                 patch('omniclip_rag.service.REBUILD_WATCHDOG_REPEAT_SECONDS', 0.05):
+                service.rebuild_index(on_progress=lambda payload: progress_events.append(dict(payload)))
+            self.assertTrue(any(bool(item.get('watchdog_stalled')) for item in progress_events))
+            diagnostics = sorted((data_paths.logs_dir / 'diagnostics').glob('rebuild-watchdog-*.json'))
+            self.assertTrue(diagnostics)
+        finally:
+            service.close()
+
     def test_rebuild_fails_fast_when_vector_runtime_is_not_ready(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'runtime_precheck'))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), vector_backend='lancedb')

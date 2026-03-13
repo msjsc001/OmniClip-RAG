@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## V0.2.2 - 2026-03-13
+
+### Added
+
+- Added compact rebuild-state persistence that stores durable cursors and manifest signatures instead of giant per-file path payloads.
+- Added large-vault rebuild watchdog diagnostics that emit structured reports when forward progress stalls for too long.
+- Added safe-startup recovery tracking so the next launch can clear process-level vector resources after RAM/VRAM incidents or dirty exits.
+- Added [RELEASE_NOTES_v0.2.2](releases/RELEASE_NOTES_v0.2.2.md) for the large-vault durability and versioned-release build update.
+
+### Changed
+
+- Changed the visible app/release version to `v0.2.2` across the packaged UI, Python package metadata, and release documentation.
+- Changed rendering and query hydration to prefer lazy block/chunk lookup paths instead of eagerly materializing full lookup maps from SQLite.
+- Changed packaged Windows builds to land in versioned folders such as `dist/OmniClipRAG-v0.2.2/`, preserving any existing `runtime/` inside that version folder and leaving older version folders untouched.
+- Changed the packaged executable name from `launcher.exe` to `OmniClipRAG.exe`, aligning the EXE, release asset, runtime instructions, and Windows process name with the product name.
+
+### Fixed
+
+- Fixed rebuild-resume durability so vector continuation now trims a small suffix before replay, reducing dirty tails after crashes, power loss, or forced termination.
+- Fixed large-vault render refreshes that previously needed whole-database block lookup tables in memory before rebuilding visible chunks.
+- Fixed post-memory-pressure packaged startup so a dirty runtime incident is less likely to poison the next launch until the machine is rebooted.
+
 ## V0.2.1 - 2026-03-12
 
 ### Added
@@ -23,9 +45,9 @@
 - Fixed the reranker toggle contract so disabling the optional reranker actually prevents reranker execution in the service layer.
 - Fixed late runtime-guidance surprises by moving vector-runtime preflight checks earlier for rebuild, watch, query, and warmup entry points.
 - Fixed writer-side vector tail handling so memory-pressure retries use smaller write batches without dropping staged rows before a successful write.
-- Fixed packaged large-vault rebuild visibility so recovery periods no longer look like silent hangs with a 
+- Fixed packaged large-vault rebuild visibility so recovery periods no longer look like silent hangs when rebuild progress temporarily stalls under heavy resource pressure.
 
-
+## V0.2.0 - 2026-03-11
 
 ### Added
 
@@ -331,7 +353,6 @@
 - The current stable default remains `torch + bge-m3`.
 - ONNX remains a future optimization path, not the default production route for `V0.1.0`.
 - CLI remains available for debugging and automation, but GUI is now the primary workflow.
-
 
 
 

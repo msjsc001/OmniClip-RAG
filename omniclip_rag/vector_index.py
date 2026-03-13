@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Callable, Protocol
@@ -39,6 +40,8 @@ class VectorIndex(Protocol):
         on_progress: Callable[[dict[str, object]], None] | None = None,
         pause_event: threading.Event | None = None,
         cancel_event: threading.Event | None = None,
+        progress_offset: int = 0,
+        reset_index: bool = True,
     ) -> None: ...
 
     def upsert(self, documents: list[dict[str, str]]) -> None: ...
@@ -73,6 +76,16 @@ _MIN_SAFE_WRITE_BATCH_ROWS = 32
 _MIN_RETRY_WRITE_BATCH_ROWS = 8
 _VECTOR_PROGRESS_HEARTBEAT_SECONDS = 0.75
 _VECTOR_PRESSURE_SLEEP_SECONDS = 0.35
+_VECTOR_TEXT_CHAR_LIMITS = {
+    'cpu': 8000,
+    'cuda': 8000,
+}
+_VECTOR_BATCH_CHAR_BUDGETS = {
+    'cpu': {'quiet': 16000, 'balanced': 20000, 'peak': 24000},
+    'cuda': {'quiet': 20000, 'balanced': 26000, 'peak': 32000},
+}
+_VECTOR_SLOW_BATCH_WARNING_SECONDS = 12.0
+_VECTOR_STALL_STACK_DUMP_SECONDS = 45.0
 
 LOGGER = logging.getLogger(__name__)
 
@@ -86,6 +99,8 @@ class NullVectorIndex:
         on_progress: Callable[[dict[str, object]], None] | None = None,
         pause_event: threading.Event | None = None,
         cancel_event: threading.Event | None = None,
+        progress_offset: int = 0,
+        reset_index: bool = True,
     ) -> None:
         return None
 
@@ -136,6 +151,8 @@ class MissingRuntimeVectorIndex:
         on_progress: Callable[[dict[str, object]], None] | None = None,
         pause_event: threading.Event | None = None,
         cancel_event: threading.Event | None = None,
+        progress_offset: int = 0,
+        reset_index: bool = True,
     ) -> None:
         self._raise_runtime()
 
@@ -183,8 +200,11 @@ class LanceDbVectorIndex:
         on_progress: Callable[[dict[str, object]], None] | None = None,
         pause_event: threading.Event | None = None,
         cancel_event: threading.Event | None = None,
+        progress_offset: int = 0,
+        reset_index: bool = True,
     ) -> None:
-        self.reset()
+        if reset_index:
+            self.reset()
         if total is None:
             try:
                 total = len(documents)  # type: ignore[arg-type]
@@ -199,8 +219,8 @@ class LanceDbVectorIndex:
             documents = [first_document, *iterator]
             total = len(documents)
 
-        processed = 0
-        encoded = 0
+        processed = max(int(progress_offset or 0), 0)
+        encoded = max(int(progress_offset or 0), 0)
         encode_elapsed_total_ms = 0.0
         prepare_elapsed_total_ms = 0.0
         write_elapsed_total_ms = 0.0
@@ -217,6 +237,8 @@ class LanceDbVectorIndex:
         completion_queue: queue.Queue = queue.Queue()
         writer_stop = threading.Event()
         writer_thread: threading.Thread | None = None
+        progress_emit_lock = threading.Lock()
+        pending_prepared_document: tuple[dict[str, str], str, dict[str, int | bool]] | None = None
 
         def progress_display_current() -> int:
             return min(total, processed) if total and total > 0 else processed
@@ -229,35 +251,38 @@ class LanceDbVectorIndex:
 
         last_vector_heartbeat_at = 0.0
 
-        def emit_vector_progress(snapshot, *, stage_status: str | None = None) -> None:
-            payload: dict[str, object] = {
-                'stage': 'vectorizing',
-                'current': progress_display_current(),
-                'total': total,
-                'encoded_count': encoded,
-                'written_count': processed,
-                'write_queue_depth': write_queue.qsize(),
-                'write_queue_capacity': write_queue_capacity,
-                'staged_write_rows': staged_rows_hint,
-                'encode_elapsed_total_ms': round(encode_elapsed_total_ms, 3),
-                'prepare_elapsed_total_ms': round(prepare_elapsed_total_ms, 3),
-                'write_elapsed_total_ms': round(write_elapsed_total_ms, 3),
-                'write_flush_count': write_flush_count,
-            }
-            if stage_status:
-                payload['stage_status'] = stage_status
-            elif encoded > processed:
-                payload['stage_status'] = 'writing' if encoded >= total else 'encoding'
-            payload.update(snapshot.to_progress_payload())
-            _emit_progress(on_progress, payload)
+        def emit_vector_progress(snapshot, *, stage_status: str | None = None, extra: dict[str, object] | None = None) -> None:
+            with progress_emit_lock:
+                payload: dict[str, object] = {
+                    'stage': 'vectorizing',
+                    'current': progress_display_current(),
+                    'total': total,
+                    'encoded_count': encoded,
+                    'written_count': processed,
+                    'write_queue_depth': write_queue.qsize(),
+                    'write_queue_capacity': write_queue_capacity,
+                    'staged_write_rows': staged_rows_hint,
+                    'encode_elapsed_total_ms': round(encode_elapsed_total_ms, 3),
+                    'prepare_elapsed_total_ms': round(prepare_elapsed_total_ms, 3),
+                    'write_elapsed_total_ms': round(write_elapsed_total_ms, 3),
+                    'write_flush_count': write_flush_count,
+                }
+                if stage_status:
+                    payload['stage_status'] = stage_status
+                elif encoded > processed:
+                    payload['stage_status'] = 'writing' if encoded >= total else 'encoding'
+                payload.update(snapshot.to_progress_payload())
+                if extra:
+                    payload.update(extra)
+                _emit_progress(on_progress, payload)
 
-        def maybe_emit_vector_heartbeat(snapshot, *, stage_status: str, min_interval_seconds: float = _VECTOR_PROGRESS_HEARTBEAT_SECONDS) -> None:
+        def maybe_emit_vector_heartbeat(snapshot, *, stage_status: str, min_interval_seconds: float = _VECTOR_PROGRESS_HEARTBEAT_SECONDS, extra: dict[str, object] | None = None) -> None:
             nonlocal last_vector_heartbeat_at
             now = time.time()
             if now - last_vector_heartbeat_at < max(float(min_interval_seconds), 0.0):
                 return
             last_vector_heartbeat_at = now
-            emit_vector_progress(snapshot, stage_status=stage_status)
+            emit_vector_progress(snapshot, stage_status=stage_status, extra=extra)
 
         def guard_resource_pressure() -> bool:
             sample = controller.monitor.sample(force=False)
@@ -449,9 +474,121 @@ class LanceDbVectorIndex:
                     time.sleep(min(_VECTOR_PRESSURE_SLEEP_SECONDS, 0.25))
                     continue
 
+        def collect_vector_batch(desired_batch: int, *, item_char_limit: int, batch_char_budget: int) -> tuple[list[dict[str, str]], list[str], dict[str, int]]:
+            nonlocal pending_prepared_document
+            batch: list[dict[str, str]] = []
+            batch_texts: list[str] = []
+            total_vector_chars = 0
+            max_source_chars = 0
+            max_vector_chars = 0
+            truncated_count = 0
+
+            while len(batch) < max(int(desired_batch), 1):
+                if pending_prepared_document is not None:
+                    document, vector_text, meta = pending_prepared_document
+                    pending_prepared_document = None
+                else:
+                    try:
+                        document = next(iterator)
+                    except StopIteration:
+                        break
+                    vector_text, meta = _prepare_vector_text(document.get('rendered_text', ''), max_chars=item_char_limit)
+                candidate_total_chars = total_vector_chars + int(meta['vector_chars'])
+                if batch and candidate_total_chars > batch_char_budget:
+                    pending_prepared_document = (document, vector_text, meta)
+                    break
+                batch.append(document)
+                batch_texts.append(vector_text)
+                total_vector_chars = candidate_total_chars
+                max_source_chars = max(max_source_chars, int(meta['source_chars']))
+                max_vector_chars = max(max_vector_chars, int(meta['vector_chars']))
+                truncated_count += int(bool(meta['truncated']))
+
+            return batch, batch_texts, {
+                'documents': len(batch),
+                'total_vector_chars': total_vector_chars,
+                'max_source_chars': max_source_chars,
+                'max_vector_chars': max_vector_chars,
+                'truncated_count': truncated_count,
+            }
+
+        def encode_batch_with_watchdog(batch_texts: list[str], batch_stats: dict[str, int]):
+            encode_started_at = time.perf_counter()
+            encode_done = threading.Event()
+
+            def heartbeat() -> None:
+                slow_logged = False
+                stack_dumped = False
+                poll_seconds = max(min(_VECTOR_PROGRESS_HEARTBEAT_SECONDS, 0.5), 0.1)
+                while not encode_done.wait(timeout=poll_seconds):
+                    elapsed = time.perf_counter() - encode_started_at
+                    if elapsed >= _VECTOR_SLOW_BATCH_WARNING_SECONDS and not slow_logged:
+                        LOGGER.warning(
+                            'Vector encode batch is still running after %.1fs (docs=%s vector_chars=%s max_source_chars=%s truncated=%s encoded=%s written=%s queue=%s/%s).',
+                            elapsed,
+                            batch_stats['documents'],
+                            batch_stats['total_vector_chars'],
+                            batch_stats['max_source_chars'],
+                            batch_stats['truncated_count'],
+                            encoded,
+                            processed,
+                            write_queue.qsize(),
+                            write_queue_capacity,
+                        )
+                        slow_logged = True
+                    if elapsed >= _VECTOR_STALL_STACK_DUMP_SECONDS and not stack_dumped:
+                        _log_thread_stacks(
+                            'Vector encode batch appears stalled',
+                            docs=batch_stats['documents'],
+                            vector_chars=batch_stats['total_vector_chars'],
+                            max_source_chars=batch_stats['max_source_chars'],
+                            encoded=encoded,
+                            written=processed,
+                            queue_depth=write_queue.qsize(),
+                            queue_capacity=write_queue_capacity,
+                        )
+                        stack_dumped = True
+                    snapshot = controller.snapshot(controller.monitor.sample(force=False), action='hold', reason='encode_active')
+                    maybe_emit_vector_heartbeat(
+                        snapshot,
+                        stage_status='encoding',
+                        min_interval_seconds=max(_VECTOR_PROGRESS_HEARTBEAT_SECONDS, 0.25),
+                        extra={
+                            'encoding_batch_docs': batch_stats['documents'],
+                            'encoding_batch_chars': batch_stats['total_vector_chars'],
+                            'encoding_batch_max_chars': batch_stats['max_source_chars'],
+                            'encoding_batch_truncated': batch_stats['truncated_count'],
+                            'encoding_elapsed_seconds': round(elapsed, 2),
+                        },
+                    )
+
+            watchdog_thread = threading.Thread(target=heartbeat, daemon=True)
+            watchdog_thread.start()
+            try:
+                return self._encode(
+                    batch_texts,
+                    batch_size=min(len(batch_texts), controller.current_encode_batch_size),
+                )
+            finally:
+                encode_done.set()
+                watchdog_thread.join(timeout=0.1)
+
         _wait_for_controls(pause_event, cancel_event)
         emit_vector_progress(controller.snapshot(), stage_status='loading_model')
-        self._load_embedder()
+        embedder = self._load_embedder()
+        vector_text_char_limit = _infer_vector_text_char_limit(embedder, resolved_device=resolved_device)
+        vector_batch_char_budget = _infer_vector_batch_char_budget(
+            vector_text_char_limit,
+            resolved_device=resolved_device,
+            profile=controller.profile,
+        )
+        LOGGER.info(
+            'Vector encode safeguards enabled: text_char_limit=%s batch_char_budget=%s device=%s profile=%s.',
+            vector_text_char_limit,
+            vector_batch_char_budget,
+            resolved_device,
+            controller.profile,
+        )
         writer_thread = threading.Thread(target=writer, daemon=True)
         writer_thread.start()
 
@@ -464,23 +601,28 @@ class LanceDbVectorIndex:
                     continue
 
                 desired_batch = max(controller.current_encode_batch_size, 1)
-                batch: list[dict[str, str]] = []
-                for _ in range(desired_batch):
-                    try:
-                        batch.append(next(iterator))
-                    except StopIteration:
-                        break
+                batch, batch_texts, batch_stats = collect_vector_batch(
+                    desired_batch,
+                    item_char_limit=vector_text_char_limit,
+                    batch_char_budget=vector_batch_char_budget,
+                )
                 if not batch:
                     break
+                if batch_stats['truncated_count'] > 0:
+                    LOGGER.warning(
+                        'Vector batch includes %s oversized chunks; embedding text was trimmed to <=%s chars (max source chars=%s, docs=%s, vector chars=%s).',
+                        batch_stats['truncated_count'],
+                        vector_text_char_limit,
+                        batch_stats['max_source_chars'],
+                        batch_stats['documents'],
+                        batch_stats['total_vector_chars'],
+                    )
 
                 encode_elapsed_ms = 0.0
                 while True:
                     started = time.perf_counter()
                     try:
-                        vectors = self._encode(
-                            [item['rendered_text'] for item in batch],
-                            batch_size=min(len(batch), controller.current_encode_batch_size),
-                        )
+                        vectors = encode_batch_with_watchdog(batch_texts, batch_stats)
                         encode_elapsed_ms = max((time.perf_counter() - started) * 1000.0, 0.0)
                         break
                     except RuntimeError as exc:
@@ -496,6 +638,7 @@ class LanceDbVectorIndex:
                 encoded += len(batch)
                 encode_elapsed_total_ms += encode_elapsed_ms
                 dispatch_encoded_batch(batch, vectors)
+                del batch_texts
                 del vectors
                 drained_prepare_ms, drained_write_ms = drain_write_completions()
                 tuning = controller.observe(
@@ -882,13 +1025,13 @@ def inspect_runtime_environment() -> dict[str, object]:
     }
 
 
-def detect_acceleration(*, force_refresh: bool = False) -> dict[str, object]:
+def detect_acceleration(*, force_refresh: bool = False, safe_mode: bool = False) -> dict[str, object]:
     global _ACCELERATION_CACHE
-    if not force_refresh and _ACCELERATION_CACHE is not None:
+    if not safe_mode and not force_refresh and _ACCELERATION_CACHE is not None:
         return dict(_ACCELERATION_CACHE)
 
     with _ACCELERATION_LOCK:
-        if not force_refresh and _ACCELERATION_CACHE is not None:
+        if not safe_mode and not force_refresh and _ACCELERATION_CACHE is not None:
             return dict(_ACCELERATION_CACHE)
 
         runtime_state = inspect_runtime_environment()
@@ -911,6 +1054,7 @@ def detect_acceleration(*, force_refresh: bool = False) -> dict[str, object]:
             'runtime_exists': runtime_state['runtime_exists'],
             'runtime_complete': runtime_state['runtime_complete'],
             'runtime_missing_items': list(runtime_state['runtime_missing_items']),
+            'safe_mode': bool(safe_mode),
         }
 
         gpu_names = _detect_nvidia_gpus()
@@ -922,6 +1066,12 @@ def detect_acceleration(*, force_refresh: bool = False) -> dict[str, object]:
         if nvcc_version:
             payload["nvcc_available"] = True
             payload["nvcc_version"] = nvcc_version
+
+        if safe_mode:
+            if payload['gpu_present']:
+                payload['device_options'] = ["auto", "cpu", "cuda"]
+            payload['torch_error'] = 'safe startup deferred torch probe'
+            return dict(payload)
 
         try:
             import torch
@@ -1183,6 +1333,7 @@ def _configure_huggingface_environment(hf_home_dir: Path) -> None:
     os.environ["HF_HUB_DISABLE_XET"] = "1"
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     try:
         from huggingface_hub import constants as hf_constants
@@ -1220,6 +1371,62 @@ def _is_memory_pressure_exception(exc: Exception) -> bool:
     ))
 
 
+def _infer_vector_text_char_limit(embedder: object, *, resolved_device: str) -> int:
+    device_key = 'cuda' if (resolved_device or '').strip().lower() == 'cuda' else 'cpu'
+    default_limit = int(_VECTOR_TEXT_CHAR_LIMITS[device_key])
+    try:
+        model_limit = int(getattr(embedder, 'max_seq_length', 0) or 0)
+    except Exception:
+        model_limit = 0
+    if model_limit <= 0:
+        return default_limit
+    return max(2048, min(default_limit, model_limit * 4))
+
+
+def _infer_vector_batch_char_budget(item_char_limit: int, *, resolved_device: str, profile: str) -> int:
+    device_key = 'cuda' if (resolved_device or '').strip().lower() == 'cuda' else 'cpu'
+    normalized_profile = str(profile or 'balanced').strip().lower() or 'balanced'
+    default_budget = int(_VECTOR_BATCH_CHAR_BUDGETS[device_key].get(normalized_profile, _VECTOR_BATCH_CHAR_BUDGETS[device_key]['balanced']))
+    return max(int(item_char_limit), default_budget)
+
+
+def _prepare_vector_text(text: str, *, max_chars: int) -> tuple[str, dict[str, int | bool]]:
+    normalized = str(text or '')
+    source_chars = len(normalized)
+    safe_limit = max(int(max_chars or 0), 256)
+    if source_chars <= safe_limit:
+        return normalized, {
+            'source_chars': source_chars,
+            'vector_chars': source_chars,
+            'truncated': False,
+        }
+    head_chars = max(int(safe_limit * 0.72), 192)
+    tail_chars = max(safe_limit - head_chars - 5, 64)
+    if head_chars + tail_chars + 5 > safe_limit:
+        tail_chars = max(safe_limit - head_chars - 5, 0)
+    if tail_chars > 0:
+        clipped = f"{normalized[:head_chars].rstrip()}\n...\n{normalized[-tail_chars:].lstrip()}"
+    else:
+        clipped = normalized[:safe_limit]
+    return clipped, {
+        'source_chars': source_chars,
+        'vector_chars': len(clipped),
+        'truncated': True,
+    }
+
+
+def _log_thread_stacks(label: str, **context: object) -> None:
+    context_line = ', '.join(f'{key}={value}' for key, value in context.items() if value is not None)
+    frames = sys._current_frames()
+    threads = {thread.ident: thread.name for thread in threading.enumerate() if thread.ident is not None}
+    sections: list[str] = []
+    for thread_id, frame in frames.items():
+        name = threads.get(thread_id, 'unknown')
+        stack = ''.join(traceback.format_stack(frame)[-8:])
+        sections.append(f'--- Thread {name} ({thread_id}) ---\n{stack}')
+    LOGGER.warning('%s%s\n%s', label, f' [{context_line}]' if context_line else '', '\n'.join(sections))
+
+
 def _clear_cuda_cache() -> None:
     try:
         import torch
@@ -1228,8 +1435,19 @@ def _clear_cuda_cache() -> None:
     try:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            ipc_collect = getattr(torch.cuda, 'ipc_collect', None)
+            if callable(ipc_collect):
+                ipc_collect()
     except Exception:
         return
+
+
+def release_process_vector_resources(*, clear_cuda: bool = True, reset_acceleration: bool = True) -> None:
+    global _ACCELERATION_CACHE
+    _EMBEDDER_CACHE.clear()
+    if reset_acceleration:
+        _ACCELERATION_CACHE = None
+    _release_vector_memory(clear_cuda=clear_cuda)
 
 
 def _release_vector_memory(*, clear_cuda: bool = False) -> None:
@@ -1326,6 +1544,7 @@ def _wait_for_controls(pause_event: threading.Event | None, cancel_event: thread
         if pause_event is None or not pause_event.is_set():
             return
         time.sleep(0.12)
+
 
 
 

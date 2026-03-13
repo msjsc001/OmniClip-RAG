@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import gc
+import hashlib
+import itertools
 import json
 import logging
 import os
 import re
 import shutil
+import sys
 import threading
 import time
+import traceback
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict
@@ -23,9 +28,10 @@ from .query_runtime import QueryRuntimeAdvisor, select_query_hits
 from .retrieval_policy import QueryProfile, build_query_profile, rank_candidates
 from .reranker import CrossEncoderReranker, create_reranker, is_local_reranker_ready
 from .preflight import estimate_storage_for_vault
+from .runtime_recovery import record_runtime_incident
 from .storage import MetadataStore
 from .timing import BuildEtaTracker, append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
-from .vector_index import create_vector_index, is_local_model_ready, prepare_local_model_snapshot, resolve_vector_device, runtime_dependency_issue
+from .vector_index import create_vector_index, is_local_model_ready, prepare_local_model_snapshot, release_process_vector_resources, resolve_vector_device, runtime_dependency_issue
 
 try:
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -50,10 +56,18 @@ WATCH_STABLE_FILE_SECONDS = 1.2
 WATCH_DELETE_CONFIRM_SECONDS = 3.0
 WATCH_REPAIR_INTERVAL_SECONDS = 20.0
 WATCH_STATE_VERSION = 1
-REBUILD_STATE_VERSION = 1
+REBUILD_STATE_VERSION = 2
 INDEX_STATE_VERSION = 1
 REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS = 0.03
 REBUILD_PROGRESS_EMIT_ROW_INTERVAL = 1
+REBUILD_STATE_CHECKPOINT_SECONDS = 0.8
+REBUILD_INDEXING_CHECKPOINT_ROWS = 32
+REBUILD_RENDERING_CHECKPOINT_ROWS = 1024
+REBUILD_VECTOR_RESUME_REWIND = 512
+REBUILD_WATCHDOG_INTERVAL_SECONDS = 5.0
+REBUILD_WATCHDOG_STALL_SECONDS = 120.0
+REBUILD_WATCHDOG_REPEAT_SECONDS = 60.0
+REBUILD_DIAGNOSTIC_MAX_FILES = 12
 RENDER_UPDATE_BATCH_SIZE = 1024
 VECTOR_UPSERT_BATCH_SIZE = 256
 WATCH_READY_BATCH_LIMITS = {
@@ -102,6 +116,32 @@ EXTENDED_REDACTION_PATTERNS = [
 LOGGER = logging.getLogger(__name__)
 
 
+class _LazyBlockLookup:
+    def __init__(self, store: MetadataStore) -> None:
+        self._store = store
+        self._cache: dict[str, object] = {}
+
+    def get(self, block_id: str):
+        if not block_id:
+            return None
+        if block_id not in self._cache:
+            self._cache[block_id] = self._store.fetch_block_row(block_id)
+        return self._cache[block_id]
+
+
+class _LazyChunkLookup:
+    def __init__(self, store: MetadataStore, initial_rows: dict[str, object] | None = None) -> None:
+        self._store = store
+        self._cache: dict[str, object] = dict(initial_rows or {})
+
+    def get(self, chunk_id: str):
+        if not chunk_id:
+            return None
+        if chunk_id not in self._cache:
+            self._cache[chunk_id] = self._store.fetch_chunk_row(chunk_id)
+        return self._cache[chunk_id]
+
+
 class OmniClipService:
     def __init__(self, config: AppConfig, paths: DataPaths) -> None:
         self.config = config
@@ -118,6 +158,10 @@ class OmniClipService:
         self.reranker = create_reranker(config, paths)
 
     def close(self) -> None:
+        try:
+            release_process_vector_resources(clear_cuda=True, reset_acceleration=False)
+        except Exception:
+            pass
         self.store.close()
 
     def save_runtime_config(self) -> None:
@@ -154,20 +198,37 @@ class OmniClipService:
             raise RuntimeError('当前索引未完成，暂时不能查询。请先继续或重新完成全量建库。')
         raise RuntimeError('索引还没建立，暂时不能查询。请先完成一次全量建库。')
 
-    # Why: 真正影响速度的是目录遍历是否剪枝，而不是后面解析器里再过滤一次。
-    def scan_vault(self) -> list[Path]:
+    # Why: 百万级文件时不能把所有 Path 长时间常驻内存；用稳定顺序的流式遍历更稳。
+    def iter_vault_files(self):
         if not self.config.vault_path:
-            return []
+            return
         ignore = set(self.config.ignore_dirs)
-        files: list[Path] = []
         for root, dirnames, filenames in os.walk(self.config.vault_dir, topdown=True):
-            dirnames[:] = [name for name in dirnames if name not in ignore]
+            dirnames[:] = sorted(name for name in dirnames if name not in ignore)
             current_root = Path(root)
-            for filename in filenames:
+            for filename in sorted(filenames):
                 if not filename.lower().endswith('.md'):
                     continue
-                files.append((current_root / filename).resolve())
-        return sorted(files)
+                yield (current_root / filename).resolve()
+
+    def scan_vault(self) -> list[Path]:
+        return list(self.iter_vault_files() or [])
+
+    def _scan_manifest_signature_and_count(self) -> tuple[str, int]:
+        digest = hashlib.sha1()
+        total = 0
+        for path in self.iter_vault_files() or []:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            relative = path.relative_to(self.config.vault_dir).as_posix()
+            digest.update(relative.encode('utf-8', errors='ignore'))
+            digest.update(b'\0')
+            digest.update(f"{stat.st_mtime_ns}:{stat.st_size}".encode('ascii', errors='ignore'))
+            digest.update(b'\n')
+            total += 1
+        return digest.hexdigest(), total
 
     def estimate_space(
         self,
@@ -215,202 +276,431 @@ class OmniClipService:
         vector_enabled = (self.config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
         if vector_enabled:
             self._ensure_vector_runtime_ready()
-        files = self.scan_vault()
-        manifest = self._build_file_manifest(files)
+        manifest_signature, total_files = self._scan_manifest_signature_and_count()
         state = self._read_rebuild_state() if resume else None
-        if state is None or not self._can_resume_rebuild_state(state, manifest):
+        if state is None or not self._can_resume_rebuild_state(state, manifest_signature, total_files):
             if resume and self._rebuild_state_file.exists():
                 self.discard_pending_rebuild()
             self._clear_index_state()
-            self._start_fresh_rebuild_state(manifest)
+            state = self._start_fresh_rebuild_state(manifest_signature, total_files)
             self.store.reset_all()
             self.vector_index.reset()
-            state = self._read_rebuild_state() or self._start_fresh_rebuild_state(manifest)
         else:
-            state['file_manifest'] = manifest
-            state['total_files'] = len(manifest)
+            state['manifest_signature'] = manifest_signature
+            state['total_files'] = total_files
+            state.setdefault('indexing_cursor', 0)
+            state.setdefault('readable_count', 0)
+            state.setdefault('skipped_count', 0)
+            state.setdefault('parsed_chunk_count', int(self.store.stats().get('chunks', 0)))
+            state.setdefault('duplicate_block_ids', 0)
+            state.setdefault('rendering_cursor', 0)
+            state.setdefault('total_render_rows', 0)
+            state.setdefault('vector_encoded_count', 0)
+            state.setdefault('vector_written_count', 0)
+            state.setdefault('total_vector_documents', 0)
             self._write_rebuild_state(state)
 
         model_ready = (not vector_enabled) or is_local_model_ready(self.config, self.paths)
         history_entry = find_matching_history(self._build_history_file, self.config)
         eta_tracker = BuildEtaTracker(self.config, history_entry=history_entry, vector_enabled=vector_enabled, model_ready=model_ready)
         resolved_device = resolve_vector_device(self.config.vector_device)
-        LOGGER.info('Starting full rebuild: resume=%s requested_device=%s resolved_device=%s build_profile=%s vector_backend=%s files=%s.', resume, getattr(self.config, 'vector_device', 'auto'), resolved_device, getattr(self.config, 'build_resource_profile', 'balanced'), getattr(self.config, 'vector_backend', 'disabled'), len(files))
+        LOGGER.info(
+            'Starting full rebuild: resume=%s requested_device=%s resolved_device=%s build_profile=%s vector_backend=%s files=%s.',
+            resume,
+            getattr(self.config, 'vector_device', 'auto'),
+            resolved_device,
+            getattr(self.config, 'build_resource_profile', 'balanced'),
+            getattr(self.config, 'vector_backend', 'disabled'),
+            total_files,
+        )
         if str(getattr(self.config, 'vector_device', '') or '').strip().lower() == 'cuda' and resolved_device != 'cuda':
             LOGGER.warning('CUDA was requested for rebuild, but OmniClip fell back to %s.', resolved_device)
 
-        completed_paths = set(state.get('completed_paths', []))
-        readable_paths = list(dict.fromkeys(state.get('readable_paths', [])))
-        skipped_paths = list(dict.fromkeys(state.get('skipped_paths', [])))
-        duplicate_block_ids = int(state.get('duplicate_block_ids', 0))
-        parsed_chunk_count = int(state.get('parsed_chunk_count', self.store.stats().get('chunks', 0)))
-        total_files = len(manifest)
+        phase_on_resume = str(state.get('phase', 'indexing') or 'indexing').strip().lower() or 'indexing'
+        indexing_cursor = min(max(int(state.get('indexing_cursor', 0) or 0), 0), total_files)
+        readable_count = max(int(state.get('readable_count', 0) or 0), 0)
+        skipped_count = max(int(state.get('skipped_count', 0) or 0), 0)
+        duplicate_block_ids = int(state.get('duplicate_block_ids', 0) or 0)
+        parsed_chunk_count = int(state.get('parsed_chunk_count', self.store.stats().get('chunks', 0)) or 0)
 
         rebuild_started_at = time.time()
         indexing_started_at = rebuild_started_at
         rendering_started_at = 0.0
         vectorizing_started_at = 0.0
+        last_state_write_at = 0.0
+        last_state_write_phase = ''
+        last_state_write_cursor = -1
 
-        for path in files:
+        def state_cursor(payload: dict[str, object]) -> int:
+            phase = str(payload.get('phase', 'indexing') or 'indexing').strip().lower() or 'indexing'
+            if phase == 'indexing':
+                return int(payload.get('indexing_cursor', 0) or 0)
+            if phase == 'rendering':
+                return int(payload.get('rendering_cursor', 0) or 0)
+            return int(payload.get('vector_written_count', 0) or 0)
+
+        def checkpoint_state(*, force: bool = False) -> None:
+            nonlocal last_state_write_at, last_state_write_phase, last_state_write_cursor
+            phase = str(state.get('phase', 'indexing') or 'indexing').strip().lower() or 'indexing'
+            cursor = state_cursor(state)
+            now = time.time()
+            row_threshold = {
+                'indexing': REBUILD_INDEXING_CHECKPOINT_ROWS,
+                'rendering': REBUILD_RENDERING_CHECKPOINT_ROWS,
+                'vectorizing': max(VECTOR_UPSERT_BATCH_SIZE, 64),
+            }.get(phase, REBUILD_INDEXING_CHECKPOINT_ROWS)
+            if (
+                not force
+                and phase == last_state_write_phase
+                and (now - last_state_write_at) < REBUILD_STATE_CHECKPOINT_SECONDS
+                and (cursor - last_state_write_cursor) < row_threshold
+            ):
+                return
+            state['updated_at'] = _utc_now()
+            self._write_rebuild_state(state)
+            last_state_write_at = now
+            last_state_write_phase = phase
+            last_state_write_cursor = cursor
+
+        watchdog_lock = threading.Lock()
+        watchdog_state: dict[str, object] = {
+            'phase': str(state.get('phase', 'indexing') or 'indexing'),
+            'current': int(indexing_cursor),
+            'total': int(total_files),
+            'encoded_count': 0,
+            'written_count': 0,
+            'current_path': str(state.get('current_path', '') or ''),
+            'stage_status': '',
+            'overall_percent': 0.0,
+            'last_progress_at': time.time(),
+            'last_forward_at': time.time(),
+            'last_report_at': 0.0,
+            'forward_signature': ('indexing', int(indexing_cursor), 0, 0, str(state.get('current_path', '') or '')),
+        }
+        watchdog_stop = threading.Event()
+
+        def update_watchdog(payload: dict[str, object]) -> None:
+            phase = str(payload.get('stage', state.get('phase', 'indexing')) or 'indexing').strip().lower() or 'indexing'
+            current = int(payload.get('current', 0) or 0)
+            total = int(payload.get('total', 0) or 0)
+            encoded_count = int(payload.get('encoded_count', current) or current)
+            written_count = int(payload.get('written_count', current) or current)
+            current_path = str(payload.get('current_path') or state.get('current_path', '') or '')
+            signature = (phase, current, encoded_count, written_count, current_path)
+            now = time.time()
+            with watchdog_lock:
+                previous_signature = watchdog_state.get('forward_signature')
+                watchdog_state.update(
+                    {
+                        'phase': phase,
+                        'current': current,
+                        'total': total,
+                        'encoded_count': encoded_count,
+                        'written_count': written_count,
+                        'current_path': current_path,
+                        'stage_status': str(payload.get('stage_status') or ''),
+                        'overall_percent': float(payload.get('overall_percent', 0.0) or 0.0),
+                        'last_progress_at': now,
+                    }
+                )
+                if previous_signature != signature:
+                    watchdog_state['forward_signature'] = signature
+                    watchdog_state['last_forward_at'] = now
+
+        def emit_rebuild_progress(payload: dict[str, object]) -> None:
+            update_watchdog(payload)
+            _emit_progress(on_progress, payload)
+
+        def watchdog_loop() -> None:
+            while not watchdog_stop.wait(REBUILD_WATCHDOG_INTERVAL_SECONDS):
+                now = time.time()
+                with watchdog_lock:
+                    snapshot = dict(watchdog_state)
+                stalled_seconds = max(now - float(snapshot.get('last_forward_at', now) or now), 0.0)
+                last_report_at = float(snapshot.get('last_report_at', 0.0) or 0.0)
+                if stalled_seconds < REBUILD_WATCHDOG_STALL_SECONDS:
+                    continue
+                if last_report_at > 0.0 and (now - last_report_at) < REBUILD_WATCHDOG_REPEAT_SECONDS:
+                    continue
+                actions = ['force_checkpoint']
+                checkpoint_state(force=True)
+                try:
+                    gc.collect()
+                    actions.append('gc_collect')
+                except Exception:
+                    pass
+                phase = str(snapshot.get('phase', 'indexing') or 'indexing')
+                if phase == 'vectorizing':
+                    try:
+                        record_runtime_incident(self.paths, kind='memory_pressure', detail='watchdog detected stalled rebuild progress', phase=phase)
+                        actions.append('record_runtime_incident')
+                    except Exception:
+                        pass
+                report_path = _write_rebuild_diagnostic(
+                    self.paths,
+                    {
+                        'generated_at': _utc_now(),
+                        'reason': 'watchdog_stall',
+                        'stalled_seconds': round(stalled_seconds, 1),
+                        'state': snapshot,
+                        'actions': actions,
+                        'rebuild_state': dict(state),
+                        'thread_stacks': _collect_thread_stack_snapshots(),
+                    },
+                )
+                actions.append('write_diagnostic_report')
+                warning_payload = {
+                    'stage': phase,
+                    'current': int(snapshot.get('current', 0) or 0),
+                    'total': int(snapshot.get('total', 0) or 0),
+                    'encoded_count': int(snapshot.get('encoded_count', 0) or 0),
+                    'written_count': int(snapshot.get('written_count', 0) or 0),
+                    'overall_percent': float(snapshot.get('overall_percent', 0.0) or 0.0),
+                    'stage_status': str(snapshot.get('stage_status') or ''),
+                    'watchdog_stalled': True,
+                    'watchdog_wait_seconds': round(stalled_seconds, 1),
+                    'watchdog_report_path': str(report_path),
+                    'watchdog_actions': list(actions),
+                    'current_path': str(snapshot.get('current_path', '') or ''),
+                }
+                emit_rebuild_progress(warning_payload)
+                LOGGER.warning('Rebuild watchdog detected no forward progress for %.1fs during %s. Diagnostic report: %s', stalled_seconds, phase, report_path)
+                with watchdog_lock:
+                    watchdog_state['last_report_at'] = now
+
+        watchdog_thread = threading.Thread(target=watchdog_loop, daemon=True, name='rebuild-watchdog')
+        watchdog_thread.start()
+
+        try:
+            for index, path in enumerate(self.iter_vault_files() or [], start=1):
+                _wait_for_worker_controls(pause_event, cancel_event)
+                if index <= indexing_cursor:
+                    continue
+                relative_path = path.relative_to(self.config.vault_dir).as_posix()
+                try:
+                    parsed = parse_markdown_file(self.config.vault_dir, path)
+                except OSError:
+                    skipped_count += 1
+                else:
+                    duplicate_block_ids += len(self.store.replace_file(parsed))
+                    readable_count += 1
+                    parsed_chunk_count += len(parsed.chunks)
+                indexing_cursor = index
+                state.update(
+                    {
+                        'phase': 'indexing',
+                        'indexing_cursor': indexing_cursor,
+                        'readable_count': readable_count,
+                        'skipped_count': skipped_count,
+                        'duplicate_block_ids': duplicate_block_ids,
+                        'parsed_chunk_count': parsed_chunk_count,
+                        'current_path': relative_path,
+                    }
+                )
+                checkpoint_state(force=indexing_cursor >= total_files)
+                completed_count = indexing_cursor
+                estimated_total_chunks = parsed_chunk_count
+                if completed_count > 0:
+                    estimated_total_chunks = max(parsed_chunk_count, int(parsed_chunk_count / completed_count * max(total_files, 1)))
+                eta_seconds, overall_percent = eta_tracker.estimate(
+                    stage='indexing',
+                    current=completed_count,
+                    total=total_files,
+                    elapsed_total=time.time() - rebuild_started_at,
+                    stage_elapsed=time.time() - indexing_started_at,
+                    parsed_chunks=parsed_chunk_count,
+                    estimated_total_chunks=estimated_total_chunks,
+                )
+                emit_rebuild_progress(
+                    {
+                        'stage': 'indexing',
+                        'current': completed_count,
+                        'total': total_files,
+                        'current_path': relative_path,
+                        'duplicate_block_ids': duplicate_block_ids,
+                        'parsed_chunks': parsed_chunk_count,
+                        'estimated_total_chunks': estimated_total_chunks,
+                        'eta_seconds': eta_seconds,
+                        'overall_percent': overall_percent,
+                    },
+                )
+
+            indexing_seconds = max(time.time() - indexing_started_at, 0.0)
             _wait_for_worker_controls(pause_event, cancel_event)
-            relative_path = path.relative_to(self.config.vault_dir).as_posix()
-            if relative_path in completed_paths:
-                continue
-            try:
-                parsed = parse_markdown_file(self.config.vault_dir, path)
-            except OSError:
-                skipped_paths.append(relative_path)
-            else:
-                duplicate_block_ids += len(self.store.replace_file(parsed))
-                readable_paths.append(relative_path)
-                parsed_chunk_count += len(parsed.chunks)
-            completed_paths.add(relative_path)
+            rendering_start_offset = 0
+            if phase_on_resume in {'rendering', 'vectorizing'}:
+                rendering_start_offset = max(int(state.get('rendering_cursor', 0) or 0), 0)
+            state.update({'phase': 'rendering', 'current_path': '', 'total_render_rows': int(state.get('total_render_rows', 0) or 0)})
+            checkpoint_state(force=True)
+            rendering_started_at = time.time()
+
+            def update_render_checkpoint(current: int, total_rows: int, source_path: str) -> None:
+                state.update(
+                    {
+                        'phase': 'rendering',
+                        'rendering_cursor': current,
+                        'total_render_rows': total_rows,
+                        'current_path': source_path,
+                    }
+                )
+                checkpoint_state(force=current >= total_rows)
+
+            total_render_rows = self._refresh_rendered(
+                None,
+                pause_event=pause_event,
+                cancel_event=cancel_event,
+                on_progress=emit_rebuild_progress,
+                rebuild_started_at=rebuild_started_at,
+                history_entry=history_entry,
+                vector_enabled=vector_enabled,
+                model_ready=model_ready,
+                eta_tracker=eta_tracker,
+                start_offset=rendering_start_offset,
+                checkpoint=update_render_checkpoint,
+            )
+            state.update({'phase': 'rendering', 'rendering_cursor': total_render_rows, 'total_render_rows': total_render_rows, 'current_path': ''})
+            checkpoint_state(force=True)
+            rendering_seconds = max(time.time() - rendering_started_at, 0.0)
+
+            _wait_for_worker_controls(pause_event, cancel_event)
+            total_documents = self.store.count_vector_documents()
+            resume_vector_from = 0
+            reset_vector_index = True
+            if phase_on_resume == 'vectorizing':
+                durable_written = min(max(int(state.get('vector_written_count', 0) or 0), 0), total_documents)
+                if durable_written > 0:
+                    rewind = min(REBUILD_VECTOR_RESUME_REWIND, durable_written)
+                    resume_vector_from = max(durable_written - rewind, 0)
+                    LOGGER.info('Resuming vector stage from cursor=%s (durable_written=%s rewind=%s total=%s).', resume_vector_from, durable_written, rewind, total_documents)
+                    self._trim_vector_suffix(resume_vector_from)
+                    reset_vector_index = resume_vector_from <= 0
+            if resume_vector_from <= 0 and reset_vector_index:
+                self.vector_index.reset()
+            documents = itertools.islice(self.store.iter_vector_documents(), resume_vector_from, None)
             state.update(
                 {
-                    'phase': 'indexing',
-                    'completed_paths': sorted(completed_paths),
-                    'readable_paths': list(dict.fromkeys(readable_paths)),
-                    'skipped_paths': sorted(set(skipped_paths)),
-                    'duplicate_block_ids': duplicate_block_ids,
-                    'parsed_chunk_count': parsed_chunk_count,
-                    'current_path': relative_path,
-                    'updated_at': _utc_now(),
+                    'phase': 'vectorizing',
+                    'current_path': '',
+                    'total_vector_documents': total_documents,
+                    'vector_encoded_count': resume_vector_from,
+                    'vector_written_count': resume_vector_from,
                 }
             )
-            self._write_rebuild_state(state)
-            completed_count = len(completed_paths)
-            estimated_total_chunks = parsed_chunk_count
-            if completed_count > 0:
-                estimated_total_chunks = max(parsed_chunk_count, int(parsed_chunk_count / completed_count * max(total_files, 1)))
-            eta_seconds, overall_percent = eta_tracker.estimate(
-                stage='indexing',
-                current=completed_count,
-                total=total_files,
-                elapsed_total=time.time() - rebuild_started_at,
-                stage_elapsed=time.time() - indexing_started_at,
-                parsed_chunks=parsed_chunk_count,
-                estimated_total_chunks=estimated_total_chunks,
-            )
-            _emit_progress(
-                on_progress,
-                {
-                    'stage': 'indexing',
-                    'current': completed_count,
-                    'total': total_files,
-                    'current_path': relative_path,
-                    'duplicate_block_ids': duplicate_block_ids,
-                    'parsed_chunks': parsed_chunk_count,
-                    'estimated_total_chunks': estimated_total_chunks,
-                    'eta_seconds': eta_seconds,
-                    'overall_percent': overall_percent,
-                },
-            )
-
-        indexing_seconds = max(time.time() - indexing_started_at, 0.0)
-        readable_paths = list(dict.fromkeys(readable_paths))
-        _wait_for_worker_controls(pause_event, cancel_event)
-        state.update({'phase': 'rendering', 'updated_at': _utc_now(), 'current_path': ''})
-        self._write_rebuild_state(state)
-        rendering_started_at = time.time()
-        total_render_rows = self._refresh_rendered(
-            readable_paths,
-            pause_event=pause_event,
-            cancel_event=cancel_event,
-            on_progress=on_progress,
-            rebuild_started_at=rebuild_started_at,
-            history_entry=history_entry,
-            vector_enabled=vector_enabled,
-            model_ready=model_ready,
-            eta_tracker=eta_tracker,
-        )
-        rendering_seconds = max(time.time() - rendering_started_at, 0.0)
-
-        _wait_for_worker_controls(pause_event, cancel_event)
-        total_documents = self.store.count_vector_documents()
-        documents = self.store.iter_vector_documents()
-        state.update({'phase': 'vectorizing', 'updated_at': _utc_now(), 'current_path': ''})
-        self._write_rebuild_state(state)
-        vectorizing_started_at = time.time()
-        eta_seconds, overall_percent = eta_tracker.estimate(
-            stage='vectorizing',
-            current=0,
-            total=total_documents,
-            elapsed_total=time.time() - rebuild_started_at,
-            stage_elapsed=0.0,
-            parsed_chunks=parsed_chunk_count,
-            estimated_total_chunks=max(total_documents, parsed_chunk_count),
-        )
-        _emit_progress(
-            on_progress,
-            {
-                'stage': 'vectorizing',
-                'current': 0,
-                'total': total_documents,
-                'eta_seconds': eta_seconds,
-                'overall_percent': overall_percent,
-                'stage_status': 'loading_model',
-            },
-        )
-
-        LOGGER.info('Vector stage is starting with %s documents.', total_documents)
-        vector_metrics: dict[str, object] = {}
-
-        def emit_vector_progress(progress: dict[str, object]) -> None:
-            current = max(0, int(progress.get('current', 0) or 0))
-            total = max(0, int(progress.get('total', total_documents) or total_documents))
+            checkpoint_state(force=True)
+            vectorizing_started_at = time.time()
             eta_seconds, overall_percent = eta_tracker.estimate(
                 stage='vectorizing',
-                current=current,
-                total=total,
+                current=resume_vector_from,
+                total=total_documents,
                 elapsed_total=time.time() - rebuild_started_at,
-                stage_elapsed=time.time() - vectorizing_started_at,
+                stage_elapsed=0.0,
                 parsed_chunks=parsed_chunk_count,
                 estimated_total_chunks=max(total_documents, parsed_chunk_count),
             )
-            state['updated_at'] = _utc_now()
-            self._write_rebuild_state(state)
-            enriched = dict(progress)
-            enriched['eta_seconds'] = eta_seconds
-            enriched['overall_percent'] = overall_percent
-            for key in (
-                'encode_elapsed_total_ms',
-                'prepare_elapsed_total_ms',
-                'write_elapsed_total_ms',
-                'write_flush_count',
-                'encoded_count',
-                'written_count',
-                'write_queue_depth',
-                'write_queue_capacity',
-                'staged_write_rows',
-            ):
-                if key in enriched:
-                    vector_metrics[key] = enriched[key]
-            _emit_progress(on_progress, enriched)
+            emit_rebuild_progress(
+                {
+                    'stage': 'vectorizing',
+                    'current': resume_vector_from,
+                    'total': total_documents,
+                    'eta_seconds': eta_seconds,
+                    'overall_percent': overall_percent,
+                    'stage_status': 'loading_model',
+                    'encoded_count': resume_vector_from,
+                    'written_count': resume_vector_from,
+                },
+            )
 
-        self.vector_index.rebuild(documents, total=total_documents, on_progress=emit_vector_progress, pause_event=pause_event, cancel_event=cancel_event)
-        vectorizing_seconds = max(time.time() - vectorizing_started_at, 0.0)
+            LOGGER.info('Vector stage is starting with %s documents (resume_from=%s).', total_documents, resume_vector_from)
+            vector_metrics: dict[str, object] = {}
 
-        stats = {**self.store.stats(), 'duplicate_block_ids': duplicate_block_ids}
-        self._record_build_history(
-            files=stats.get('files', total_files),
-            chunks=stats.get('chunks', parsed_chunk_count),
-            refs=stats.get('refs', 0),
-            indexing_seconds=indexing_seconds,
-            rendering_seconds=rendering_seconds,
-            vectorizing_seconds=vectorizing_seconds,
-            vector_tail_seconds_per_chunk=eta_tracker.recent_rate('vectorizing') or 0.0,
-            resolved_device=resolved_device,
-            total_seconds=max(time.time() - rebuild_started_at, 0.0),
-            vector_prepare_seconds=float(vector_metrics.get('prepare_elapsed_total_ms', 0.0) or 0.0) / 1000.0,
-            vector_write_seconds=float(vector_metrics.get('write_elapsed_total_ms', 0.0) or 0.0) / 1000.0,
-            vector_write_flush_count=int(vector_metrics.get('write_flush_count', 0) or 0),
-        )
-        self._clear_rebuild_state()
-        self._clear_watch_state()
-        self._write_index_state(stats)
-        LOGGER.info('Full rebuild finished: files=%s chunks=%s refs=%s duplicate_block_ids=%s.', stats.get('files', 0), stats.get('chunks', 0), stats.get('refs', 0), stats.get('duplicate_block_ids', 0))
-        return stats
+            def emit_vector_progress(progress: dict[str, object]) -> None:
+                current = max(0, int(progress.get('current', resume_vector_from) or resume_vector_from))
+                total = max(0, int(progress.get('total', total_documents) or total_documents))
+                eta_seconds, overall_percent = eta_tracker.estimate(
+                    stage='vectorizing',
+                    current=current,
+                    total=total,
+                    elapsed_total=time.time() - rebuild_started_at,
+                    stage_elapsed=time.time() - vectorizing_started_at,
+                    parsed_chunks=parsed_chunk_count,
+                    estimated_total_chunks=max(total_documents, parsed_chunk_count),
+                )
+                enriched = dict(progress)
+                enriched['eta_seconds'] = eta_seconds
+                enriched['overall_percent'] = overall_percent
+                state.update(
+                    {
+                        'phase': 'vectorizing',
+                        'vector_encoded_count': int(enriched.get('encoded_count', current) or current),
+                        'vector_written_count': int(enriched.get('written_count', current) or current),
+                        'total_vector_documents': total_documents,
+                    }
+                )
+                checkpoint_state(force=int(state.get('vector_written_count', 0) or 0) >= total_documents)
+                for key in (
+                    'encode_elapsed_total_ms',
+                    'prepare_elapsed_total_ms',
+                    'write_elapsed_total_ms',
+                    'write_flush_count',
+                    'encoded_count',
+                    'written_count',
+                    'write_queue_depth',
+                    'write_queue_capacity',
+                    'staged_write_rows',
+                ):
+                    if key in enriched:
+                        vector_metrics[key] = enriched[key]
+                emit_rebuild_progress(enriched)
 
+            self.vector_index.rebuild(
+                documents,
+                total=total_documents,
+                on_progress=emit_vector_progress,
+                pause_event=pause_event,
+                cancel_event=cancel_event,
+                progress_offset=resume_vector_from,
+                reset_index=not bool(resume_vector_from),
+            )
+            vectorizing_seconds = max(time.time() - vectorizing_started_at, 0.0)
+
+            stats = {**self.store.stats(), 'duplicate_block_ids': duplicate_block_ids}
+            self._record_build_history(
+                files=stats.get('files', total_files),
+                chunks=stats.get('chunks', parsed_chunk_count),
+                refs=stats.get('refs', 0),
+                indexing_seconds=indexing_seconds,
+                rendering_seconds=rendering_seconds,
+                vectorizing_seconds=vectorizing_seconds,
+                vector_tail_seconds_per_chunk=eta_tracker.recent_rate('vectorizing') or 0.0,
+                resolved_device=resolved_device,
+                total_seconds=max(time.time() - rebuild_started_at, 0.0),
+                vector_prepare_seconds=float(vector_metrics.get('prepare_elapsed_total_ms', 0.0) or 0.0) / 1000.0,
+                vector_write_seconds=float(vector_metrics.get('write_elapsed_total_ms', 0.0) or 0.0) / 1000.0,
+                vector_write_flush_count=int(vector_metrics.get('write_flush_count', 0) or 0),
+            )
+            self._clear_rebuild_state()
+            self._clear_watch_state()
+            self._write_index_state(stats)
+            LOGGER.info(
+                'Full rebuild finished: files=%s chunks=%s refs=%s duplicate_block_ids=%s.',
+                stats.get('files', 0),
+                stats.get('chunks', 0),
+                stats.get('refs', 0),
+                stats.get('duplicate_block_ids', 0),
+            )
+            return stats
+        except BuildCancelledError:
+            checkpoint_state(force=True)
+            raise
+        except Exception as exc:
+            checkpoint_state(force=True)
+            if _is_memory_pressure_error(exc):
+                record_runtime_incident(self.paths, kind='vector_oom', detail=str(exc), phase=str(state.get('phase', 'indexing') or 'indexing'))
+            raise
+        finally:
+            watchdog_stop.set()
+            if watchdog_thread.is_alive():
+                watchdog_thread.join(timeout=0.3)
     def reindex_paths(self, changed_relative_paths: list[str], deleted_relative_paths: list[str]) -> dict[str, object]:
         from .parser import parse_markdown_file
 
@@ -461,6 +751,23 @@ class OmniClipService:
             stats['vector_dirty'] = 1
             stats['vector_error'] = vector_error
         return stats
+
+    def _trim_vector_suffix(self, start_offset: int) -> None:
+        safe_start = max(int(start_offset or 0), 0)
+        if safe_start <= 0:
+            self.vector_index.reset()
+            return
+        chunk_ids: list[str] = []
+        for document in itertools.islice(self.store.iter_vector_documents(), safe_start, None):
+            chunk_id = str(document.get('chunk_id') or '').strip()
+            if not chunk_id:
+                continue
+            chunk_ids.append(chunk_id)
+            if len(chunk_ids) >= VECTOR_UPSERT_BATCH_SIZE:
+                self.vector_index.delete(chunk_ids)
+                chunk_ids = []
+        if chunk_ids:
+            self.vector_index.delete(chunk_ids)
 
     def _sync_vector_documents(self, *, affected_paths: list[str], deleted_chunk_ids: list[str]) -> str | None:
         vector_paths = sorted({item for item in affected_paths if item})
@@ -597,8 +904,8 @@ class OmniClipService:
     def _hydrate_display_hits(self, query_text: str, hits: list[SearchHit]) -> None:
         if not hits:
             return
-        block_lookup = self.store.fetch_block_lookup()
-        chunk_lookup = self.store.fetch_chunk_lookup()
+        block_lookup = _LazyBlockLookup(self.store)
+        chunk_lookup = _LazyChunkLookup(self.store, self.store.fetch_chunk_lookup([hit.chunk_id for hit in hits]))
         file_cache: dict[str, list[str]] = {}
         for hit in hits:
             row = chunk_lookup.get(hit.chunk_id)
@@ -746,11 +1053,20 @@ class OmniClipService:
         state = self._read_rebuild_state()
         if state is None:
             return None
-        completed = len(state.get('completed_paths', []))
+        phase = str(state.get('phase', 'indexing') or 'indexing').strip().lower() or 'indexing'
+        if phase == 'indexing':
+            completed = int(state.get('indexing_cursor', 0) or 0)
+            total = int(state.get('total_files', 0) or 0)
+        elif phase == 'rendering':
+            completed = int(state.get('rendering_cursor', 0) or 0)
+            total = int(state.get('total_render_rows', 0) or 0)
+        else:
+            completed = int(state.get('vector_written_count', 0) or 0)
+            total = int(state.get('total_vector_documents', 0) or 0)
         return {
-            'phase': state.get('phase', 'indexing'),
+            'phase': phase,
             'completed': completed,
-            'total': int(state.get('total_files', 0)),
+            'total': total,
             'started_at': state.get('started_at', ''),
             'updated_at': state.get('updated_at', ''),
             'current_path': state.get('current_path', ''),
@@ -1001,7 +1317,7 @@ class OmniClipService:
 
     def _refresh_rendered(
         self,
-        relative_paths: list[str],
+        relative_paths: list[str] | None,
         pause_event: threading.Event | None = None,
         cancel_event: threading.Event | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
@@ -1010,40 +1326,49 @@ class OmniClipService:
         vector_enabled: bool = False,
         model_ready: bool = False,
         eta_tracker: BuildEtaTracker | None = None,
+        start_offset: int = 0,
+        checkpoint: Callable[[int, int, str], None] | None = None,
     ) -> int:
-        block_lookup = self.store.fetch_block_lookup()
+        block_lookup = _LazyBlockLookup(self.store)
         payloads: list[tuple[str, str]] = []
         total_rows = self.store.count_render_rows(relative_paths)
         stage_started_at = time.time()
         last_emit_at = 0.0
+        current = min(max(int(start_offset or 0), 0), total_rows)
+        committed = current
+        last_source_path = ''
 
         if total_rows > 0:
-            eta_seconds, overall_percent = (eta_tracker.estimate(
-                stage='rendering',
-                current=0,
-                total=total_rows,
-                elapsed_total=max(time.time() - rebuild_started_at, 0.1),
-                stage_elapsed=0.0,
-                parsed_chunks=total_rows,
-                estimated_total_chunks=total_rows,
-            ) if eta_tracker is not None else estimate_remaining_build_seconds(
-                self.config,
-                stage='rendering',
-                current=0,
-                total=total_rows,
-                elapsed_total=max(time.time() - rebuild_started_at, 0.1),
-                stage_elapsed=0.0,
-                parsed_chunks=total_rows,
-                estimated_total_chunks=total_rows,
-                history_entry=history_entry,
-                vector_enabled=vector_enabled,
-                model_ready=model_ready,
-            ))
+            eta_seconds, overall_percent = (
+                eta_tracker.estimate(
+                    stage='rendering',
+                    current=current,
+                    total=total_rows,
+                    elapsed_total=max(time.time() - rebuild_started_at, 0.1),
+                    stage_elapsed=0.0,
+                    parsed_chunks=total_rows,
+                    estimated_total_chunks=total_rows,
+                )
+                if eta_tracker is not None
+                else estimate_remaining_build_seconds(
+                    self.config,
+                    stage='rendering',
+                    current=current,
+                    total=total_rows,
+                    elapsed_total=max(time.time() - rebuild_started_at, 0.1),
+                    stage_elapsed=0.0,
+                    parsed_chunks=total_rows,
+                    estimated_total_chunks=total_rows,
+                    history_entry=history_entry,
+                    vector_enabled=vector_enabled,
+                    model_ready=model_ready,
+                )
+            )
             _emit_progress(
                 on_progress,
                 {
                     'stage': 'rendering',
-                    'current': 0,
+                    'current': current,
                     'total': total_rows,
                     'eta_seconds': eta_seconds,
                     'overall_percent': overall_percent,
@@ -1052,40 +1377,51 @@ class OmniClipService:
 
         for index, row in enumerate(self.store.iter_render_rows(relative_paths), start=1):
             _wait_for_worker_controls(pause_event, cancel_event)
+            if index <= current:
+                continue
             payloads.append((row['chunk_id'], _render_row(row, block_lookup)))
+            current = index
+            last_source_path = str(row['source_path'] or '')
             if len(payloads) >= RENDER_UPDATE_BATCH_SIZE:
                 self.store.update_rendered_chunks(payloads)
                 payloads = []
+                committed = current
+                if checkpoint is not None:
+                    checkpoint(committed, total_rows, last_source_path)
             now = time.time()
-            if index == total_rows or (index % REBUILD_PROGRESS_EMIT_ROW_INTERVAL) == 0 or (now - last_emit_at) >= REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS:
+            if current == total_rows or (current % REBUILD_PROGRESS_EMIT_ROW_INTERVAL) == 0 or (now - last_emit_at) >= REBUILD_PROGRESS_EMIT_INTERVAL_SECONDS:
                 last_emit_at = now
-                eta_seconds, overall_percent = (eta_tracker.estimate(
-                    stage='rendering',
-                    current=index,
-                    total=total_rows,
-                    elapsed_total=max(now - rebuild_started_at, 0.1),
-                    stage_elapsed=max(now - stage_started_at, 0.0),
-                    parsed_chunks=total_rows,
-                    estimated_total_chunks=total_rows,
-                    timestamp=now,
-                ) if eta_tracker is not None else estimate_remaining_build_seconds(
-                    self.config,
-                    stage='rendering',
-                    current=index,
-                    total=total_rows,
-                    elapsed_total=max(now - rebuild_started_at, 0.1),
-                    stage_elapsed=max(now - stage_started_at, 0.0),
-                    parsed_chunks=total_rows,
-                    estimated_total_chunks=total_rows,
-                    history_entry=history_entry,
-                    vector_enabled=vector_enabled,
-                    model_ready=model_ready,
-                ))
+                eta_seconds, overall_percent = (
+                    eta_tracker.estimate(
+                        stage='rendering',
+                        current=current,
+                        total=total_rows,
+                        elapsed_total=max(now - rebuild_started_at, 0.1),
+                        stage_elapsed=max(now - stage_started_at, 0.0),
+                        parsed_chunks=total_rows,
+                        estimated_total_chunks=total_rows,
+                        timestamp=now,
+                    )
+                    if eta_tracker is not None
+                    else estimate_remaining_build_seconds(
+                        self.config,
+                        stage='rendering',
+                        current=current,
+                        total=total_rows,
+                        elapsed_total=max(now - rebuild_started_at, 0.1),
+                        stage_elapsed=max(now - stage_started_at, 0.0),
+                        parsed_chunks=total_rows,
+                        estimated_total_chunks=total_rows,
+                        history_entry=history_entry,
+                        vector_enabled=vector_enabled,
+                        model_ready=model_ready,
+                    )
+                )
                 _emit_progress(
                     on_progress,
                     {
                         'stage': 'rendering',
-                        'current': index,
+                        'current': current,
                         'total': total_rows,
                         'eta_seconds': eta_seconds,
                         'overall_percent': overall_percent,
@@ -1093,6 +1429,9 @@ class OmniClipService:
                 )
         if payloads:
             self.store.update_rendered_chunks(payloads)
+            committed = total_rows
+        if checkpoint is not None and total_rows > 0:
+            checkpoint(committed, total_rows, '' if committed >= total_rows else last_source_path)
         return total_rows
 
     def _record_build_history(
@@ -1135,17 +1474,7 @@ class OmniClipService:
             },
         )
 
-    def _build_file_manifest(self, files: list[Path]) -> dict[str, dict[str, float | int]]:
-        manifest: dict[str, dict[str, float | int]] = {}
-        for path in files:
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            manifest[path.relative_to(self.config.vault_dir).as_posix()] = {'mtime': stat.st_mtime, 'size': stat.st_size}
-        return manifest
-
-    def _start_fresh_rebuild_state(self, manifest: dict[str, dict[str, float | int]]) -> dict[str, object]:
+    def _start_fresh_rebuild_state(self, manifest_signature: str, total_files: int) -> dict[str, object]:
         state = {
             'version': REBUILD_STATE_VERSION,
             'vault_path': str(self.config.vault_dir),
@@ -1156,19 +1485,24 @@ class OmniClipService:
             'started_at': _utc_now(),
             'updated_at': _utc_now(),
             'phase': 'indexing',
-            'total_files': len(manifest),
-            'file_manifest': manifest,
-            'completed_paths': [],
-            'readable_paths': [],
-            'skipped_paths': [],
+            'manifest_signature': manifest_signature,
+            'total_files': int(total_files),
+            'indexing_cursor': 0,
+            'readable_count': 0,
+            'skipped_count': 0,
             'duplicate_block_ids': 0,
             'parsed_chunk_count': 0,
+            'rendering_cursor': 0,
+            'total_render_rows': 0,
+            'vector_encoded_count': 0,
+            'vector_written_count': 0,
+            'total_vector_documents': 0,
             'current_path': '',
         }
         self._write_rebuild_state(state)
         return state
 
-    def _can_resume_rebuild_state(self, state: dict[str, object], manifest: dict[str, dict[str, float | int]]) -> bool:
+    def _can_resume_rebuild_state(self, state: dict[str, object], manifest_signature: str, total_files: int) -> bool:
         if not state:
             return False
         if int(state.get('version', 0) or 0) != REBUILD_STATE_VERSION:
@@ -1183,7 +1517,9 @@ class OmniClipService:
         ):
             if (state.get(key) or '') != (expected or ''):
                 return False
-        return state.get('file_manifest') == manifest
+        if str(state.get('manifest_signature') or '') != manifest_signature:
+            return False
+        return int(state.get('total_files', 0) or 0) == int(total_files)
 
     def _read_rebuild_state(self) -> dict[str, object] | None:
         if not self._rebuild_state_file.exists():
@@ -2259,6 +2595,41 @@ def _wait_for_worker_controls(pause_event: threading.Event | None, cancel_event:
         if pause_event is None or not pause_event.is_set():
             return
         time.sleep(0.12)
+
+
+def _is_memory_pressure_error(exc: BaseException) -> bool:
+    if isinstance(exc, MemoryError):
+        return True
+    message = str(exc or '').strip().lower()
+    return any(token in message for token in ('out of memory', 'cuda out of memory', 'allocator', 'bad alloc', 'not enough memory'))
+
+
+def _collect_thread_stack_snapshots(limit: int = 10) -> dict[str, str]:
+    frames = sys._current_frames()
+    thread_names = {thread.ident: thread.name for thread in threading.enumerate() if thread.ident is not None}
+    snapshots: dict[str, str] = {}
+    for index, (thread_id, frame) in enumerate(frames.items()):
+        if index >= max(int(limit), 1):
+            break
+        name = thread_names.get(thread_id, 'unknown')
+        snapshots[f'{name}:{thread_id}'] = ''.join(traceback.format_stack(frame)[-12:])
+    return snapshots
+
+
+def _write_rebuild_diagnostic(paths: DataPaths, payload: dict[str, object]) -> Path:
+    diagnostics_dir = paths.logs_dir / 'diagnostics'
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+    target = diagnostics_dir / f'rebuild-watchdog-{timestamp}.json'
+    _write_json_atomic(target, payload)
+    files = sorted(diagnostics_dir.glob('rebuild-watchdog-*.json'))
+    if len(files) > REBUILD_DIAGNOSTIC_MAX_FILES:
+        for stale in files[:-REBUILD_DIAGNOSTIC_MAX_FILES]:
+            try:
+                stale.unlink()
+            except OSError:
+                continue
+    return target
 
 
 def _emit_watch_update(
