@@ -74,6 +74,23 @@ The foundation is built as a single portable green EXE. No complicated scripting
   <img alt="Smart Search and Result Review" src="https://github.com/user-attachments/assets/e537ebfc-53cf-44cc-8598-9019b2fcae02" width="800" />
 </div>
 
+### 💡 Appendix: Recommended Prompt for AI
+
+When pasting your retrieved context packs to an AI, you may want the AI to utilize the knowledge effectively without just "summarizing" or "parroting" your notes. We highly recommend including the following guidelines in your System Prompt or initial message to the AI:
+
+```text
+- In our conversation, I may sometimes include RAG semantic retrieval snippets (not the full text) related to the topic as background information for our discussion.
+	- This information comes from my local RAG retrieval software, which searches all relevant snippets within my local note vault. This allows me to establish a deep, critical connection between you and my knowledge base, without the time and effort of uploading the entire vault, thus maximizing the privacy of my notes while enabling in-depth interaction.
+	- The sole purpose of providing these snippets is to synchronize you with my knowledge boundaries and make our conversation deeper and more meaningful.
+		- Some of the snippets I provide may be irrelevant; please ignore this noise on your own.
+		- Please directly treat these snippets as known premises and converse with me based on them. Absolutely do not summarize, simply agree with, parrot back, or distill this background information.
+		- When you find it necessary, or when your reply is inspired by a specific snippet:
+			- Please naturally mention the relevant note title and paragraph so I can accurately locate it locally (this also helps me with subsequent additions, deletions, or modifications to my local notes).
+	- During your reasoning and our conversation, you can ask me to provide supplemental information at any time if needed.
+		- If you need specific support, please explicitly tell me the exact words or phrases to search for. I will use those to retrieve the key snippets and return them to you.
+		- If you find that key content is truncated when reviewing a snippet, you can directly ask me to provide the complete note page.
+```
+
 ---
 
 ## ✨ Current Capabilities & Bulletproof Infrastructure
