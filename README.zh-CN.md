@@ -4,7 +4,7 @@
 
 **方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。**
 
-[![Version](https://img.shields.io/badge/version-v0.2.3-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.2.4-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md)
 
@@ -111,15 +111,14 @@
 
 ---
 
-## 🔄 V0.2.3 重点更新视角
+## 🔄 V0.2.4 重点更新视角
 
-`v0.2.3` 是建立在 `v0.2.2` 之上的一轮可用性收口版本：重点不是再扩功能，而是把 `BAAI/bge-m3` 缺失时的模型下载引导做成真正能执行、能复制、能恢复的闭环。
+`v0.2.4` 是建立在 `v0.2.3` 之上的一轮查询界面打磨版本：重点不是动检索后端，而是让检索结果出来之后更容易看、更容易知道自己正在看第几条。
 
-- ⬇️ **模型下载正式拆成自动与手动两条路径**：当 `BAAI/bge-m3` 缺失时，界面会明确让用户选择自动下载，或进入手动下载说明，不再只给一个弱提示。
-- 📋 **Qt 主界面补上可复制的手动下载窗口**：现在会直接展示目标目录、Hugging Face CLI 安装命令、官方源链接、镜像链接，以及可直接执行的 Windows 终端命令。
-- 🧭 **手动命令按真实本机路径生成**：程序会先创建模型目录，再按当前用户自己的 AppData 路径生成下载命令，不再要求用户自己猜缓存目录该怎么拼。
-- 📎 **旧 Tk 界面也复用了同一套命令逻辑**：老界面虽然还是消息框，但已经在弹窗前自动把完整说明复制到剪贴板，减少无法选中文本的老问题。
-- 📝 **文档与后续蓝图同步补齐**：README 的项目定位做了刷新，扩展格式隔离子系统的实施计划也已经正式写入仓库，方便后续继续推进。
+- 🔢 **结果列表最左侧补上序号列**：每条结果现在都有明确的行号，方便你在浏览时快速知道当前看到第几条，也更容易和总结果数建立直觉。
+- 🧹 **查询台顶部按钮进一步收敛**：`查询并复制` 和 `复制当前上下文` 已从顶部查询行去除，让主操作只剩“查询”，避免高频区域堆太多意义接近的按钮。
+- 👀 **查询后的阅读动线更干净**：界面把注意力重新放回结果表和下方详情，而不是让用户在已经命中结果后还要判断顶部该点哪个复制按钮。
+- 📐 **结果表宽度随新序号列一起重排**：在增加序号列的同时，页面、命中原因、语义路径和相关性这些原有列的可读性也一起做了平衡。
 
 ---
 

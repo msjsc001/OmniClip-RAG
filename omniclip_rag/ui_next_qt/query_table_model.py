@@ -9,18 +9,19 @@ class QueryResultsTableModel(QtCore.QAbstractTableModel):
     selectionChanged = QtCore.Signal()
     orderingChanged = QtCore.Signal()
 
-    COLUMN_INCLUDE = 0
-    COLUMN_TITLE = 1
-    COLUMN_REASON = 2
-    COLUMN_ANCHOR = 3
-    COLUMN_SCORE = 4
+    COLUMN_INDEX = 0
+    COLUMN_INCLUDE = 1
+    COLUMN_TITLE = 2
+    COLUMN_REASON = 3
+    COLUMN_ANCHOR = 4
+    COLUMN_SCORE = 5
 
     def __init__(self, tr, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self._tr = tr
         self._hits: list[object] = []
         self._selected_chunk_ids: set[str] = set()
-        self._header_keys = ('col_include', 'col_page', 'col_reason', 'col_anchor', 'col_score')
+        self._header_keys = ('col_index', 'col_include', 'col_page', 'col_reason', 'col_anchor', 'col_score')
         self._sort_column: int | None = None
         self._sort_reverse = False
         self._page_sort_active = False
@@ -51,7 +52,7 @@ class QueryResultsTableModel(QtCore.QAbstractTableModel):
             return super().headerData(section, orientation, role)
         if role == QtCore.Qt.ItemDataRole.DisplayRole and 0 <= section < len(self._header_keys):
             return self._tr(self._header_keys[section])
-        if role == QtCore.Qt.ItemDataRole.TextAlignmentRole and section in {self.COLUMN_INCLUDE, self.COLUMN_SCORE}:
+        if role == QtCore.Qt.ItemDataRole.TextAlignmentRole and section in {self.COLUMN_INDEX, self.COLUMN_INCLUDE, self.COLUMN_SCORE}:
             return int(QtCore.Qt.AlignmentFlag.AlignCenter)
         return super().headerData(section, orientation, role)
 
@@ -63,6 +64,8 @@ class QueryResultsTableModel(QtCore.QAbstractTableModel):
         if role == QtCore.Qt.ItemDataRole.CheckStateRole and column == self.COLUMN_INCLUDE:
             return QtCore.Qt.CheckState.Checked if getattr(hit, 'chunk_id', '') in self._selected_chunk_ids else QtCore.Qt.CheckState.Unchecked
         if role == QtCore.Qt.ItemDataRole.DisplayRole:
+            if column == self.COLUMN_INDEX:
+                return str(index.row() + 1)
             if column == self.COLUMN_INCLUDE:
                 return ''
             if column == self.COLUMN_TITLE:
@@ -73,7 +76,7 @@ class QueryResultsTableModel(QtCore.QAbstractTableModel):
                 return getattr(hit, 'anchor', '')
             if column == self.COLUMN_SCORE:
                 return f"{float(getattr(hit, 'score', 0.0) or 0.0):.1f}"
-        if role == QtCore.Qt.ItemDataRole.TextAlignmentRole and column in {self.COLUMN_INCLUDE, self.COLUMN_SCORE}:
+        if role == QtCore.Qt.ItemDataRole.TextAlignmentRole and column in {self.COLUMN_INDEX, self.COLUMN_INCLUDE, self.COLUMN_SCORE}:
             return int(QtCore.Qt.AlignmentFlag.AlignCenter)
         if role == QtCore.Qt.ItemDataRole.UserRole:
             return getattr(hit, 'chunk_id', '')
@@ -209,6 +212,16 @@ class QueryResultsTableModel(QtCore.QAbstractTableModel):
             self._restore_order = []
             self._restore_sort_column = None
             self._restore_sort_reverse = False
+        if column == self.COLUMN_INDEX:
+            if self._sort_column == column:
+                self._sort_reverse = not self._sort_reverse
+                self._hits.reverse()
+            else:
+                self._sort_column = column
+                self._sort_reverse = False
+            self.layoutChanged.emit()
+            self.orderingChanged.emit()
+            return
         if self._sort_column == column:
             self._sort_reverse = not self._sort_reverse
         else:

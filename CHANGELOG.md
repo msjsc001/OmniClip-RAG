@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## V0.2.4 - 2026-03-14
+
+### Added
+
+- Added a dedicated leftmost result-index column in the Qt query results table so each hit now shows its visible sequence number during review.
+- Added [RELEASE_NOTES_v0.2.4](releases/RELEASE_NOTES_v0.2.4.md) for the query-workspace readability release.
+
+### Changed
+
+- Changed the Qt query toolbar to remove `Search and copy` plus `Copy current context`, leaving `Search` as the single primary action in the top input row.
+- Changed result-table column sizing so the new sequence column fits without collapsing the main page, reason, anchor, and score columns too aggressively.
+- Changed the idle query-status copy so it now points only at the remaining visible top-row action.
+
+### Fixed
+
+- Fixed the lack of row-level counting in `Results & Details`, which previously made it harder to tell which hit you were currently reading in a longer result list.
+
 ## V0.2.3 - 2026-03-13
 
 ### Added

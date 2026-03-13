@@ -8,7 +8,7 @@ from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import omniclip_rag  # noqa: F401
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from omniclip_rag.app_entry.desktop import launch_desktop, main as desktop_main
 from omniclip_rag.ui_next_qt import app as qt_app
@@ -85,8 +85,11 @@ class QtUiTests(unittest.TestCase):
             SearchHit(score=72.0, title='Page B', anchor='B-1', source_path='b.md', rendered_text='B1', chunk_id='b1', reason='x'),
             SearchHit(score=92.0, title='Page A', anchor='A-2', source_path='a.md', rendered_text='A2', chunk_id='a2', reason='x'),
         ])
+        self.assertEqual(model.data(model.index(0, QueryResultsTableModel.COLUMN_INDEX)), '1')
+        self.assertEqual(model.headerData(QueryResultsTableModel.COLUMN_INDEX, QtCore.Qt.Orientation.Horizontal), text('zh-CN', 'col_index'))
         model.sort_by_column(QueryResultsTableModel.COLUMN_SCORE)
         self.assertEqual(model.hit_at(0).chunk_id, 'a2')
+        self.assertEqual(model.data(model.index(0, QueryResultsTableModel.COLUMN_INDEX)), '1')
         model.toggle_page_sort()
         self.assertEqual(model.hit_at(0).title, 'Page A')
         self.assertTrue(model.page_sort_active)
@@ -104,6 +107,19 @@ class QtUiTests(unittest.TestCase):
         self.assertIn('1\t^baz$', model.serialized_rules())
         model.remove_rule(1)
         self.assertNotIn('^bar$', model.serialized_rules())
+
+    def test_query_workspace_hides_copy_buttons_from_query_toolbar(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            self.assertTrue(workspace.search_copy_button.isHidden())
+            self.assertTrue(workspace.copy_context_button.isHidden())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
 
     def test_query_workspace_rebuilds_context_and_summary(self) -> None:
         app = get_app()

@@ -134,13 +134,13 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.search_copy_button.setToolTip(self._tip('search_copy'))
         self._set_button_variant(self.search_copy_button, 'primary')
         self.search_copy_button.clicked.connect(self.search_and_copy)
-        query_row.addWidget(self.search_copy_button)
+        self.search_copy_button.hide()
 
         self.copy_context_button = QtWidgets.QPushButton(self._tr('copy_context_button'), self.search_card)
         self.copy_context_button.setToolTip(self._tip('copy_context'))
         self._set_button_variant(self.copy_context_button, 'secondary')
         self.copy_context_button.clicked.connect(self.copy_current_context)
-        query_row.addWidget(self.copy_context_button)
+        self.copy_context_button.hide()
 
         meta_row = QtWidgets.QGridLayout()
         meta_row.setHorizontalSpacing(10)
@@ -850,6 +850,7 @@ class QueryWorkspace(QtWidgets.QWidget):
 
     def _refresh_results_columns(self) -> None:
         widths = [
+            max(scaled(self._theme, 72, minimum=60), 60),
             max(scaled(self._theme, 108, minimum=90), 90),
             max(scaled(self._theme, 230, minimum=180), 180),
             max(scaled(self._theme, 220, minimum=180), 180),

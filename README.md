@@ -4,7 +4,7 @@
 
 **A silent gravity field between your private notes and the universe of AI.**
 
-[![Version](https://img.shields.io/badge/version-v0.2.3-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.2.4-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md)
 
@@ -111,15 +111,14 @@ OmniClip was primarily built for personal use. Therefore, instead of indulging i
 
 ---
 
-## 🔄 V0.2.3 Key Updates
+## 🔄 V0.2.4 Key Updates
 
-`v0.2.3` is a focused usability release built on top of `v0.2.2`: the goal is to make missing-model onboarding for `BAAI/bge-m3` honest, executable, and much easier to recover from on a real Windows machine.
+`v0.2.4` is a small but practical query-workspace refinement built on top of `v0.2.3`: the goal is to make result review calmer and more legible once a search has already returned.
 
-- ⬇️ **Model bootstrap now splits cleanly into automatic and manual paths**: when `BAAI/bge-m3` is missing, the app now offers an explicit choice instead of hiding the manual path behind a weak plain-text hint.
-- 📋 **Qt now shows a copyable manual-download dialog**: the main desktop flow includes the exact target folder, Hugging Face CLI bootstrap command, official source link, mirror link, and ready-to-run Windows terminal commands.
-- 🧭 **Manual commands are generated from the real local AppData paths**: the app now creates the model folder first and emits download commands that already point at the user-specific cache directory instead of relying on guesswork.
-- 📎 **Legacy Tk keeps the same manual path semantics**: the old UI now reuses the same download-command generator and copies the full manual instructions to the clipboard before showing them.
-- 📝 **Project docs were refreshed for the next stage**: README positioning was refined and the isolated extension-format subsystem plan is now written down explicitly for future implementation.
+- 🔢 **Results now include a dedicated leftmost index column**: the results table shows an explicit per-row sequence number so you can immediately tell which item you are reading and how far down the result list you are.
+- 🧹 **The query toolbar is cleaner**: `Search and copy` plus `Copy current context` were removed from the top query row to keep the main action focused on search itself.
+- 👀 **Review flow now puts more weight on reading instead of button choice**: the visible query area is simpler, while the result list and detail panes carry the information users actually inspect after retrieval.
+- 📐 **Result table spacing was rebalanced for the new sequence column**: column widths now leave room for row numbering without squeezing the existing title, reason, anchor, and score columns too aggressively.
 
 ---
 
