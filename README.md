@@ -12,7 +12,11 @@
 
 <br/>
 
- **Introduction: Handing Over Our "Cyber-Underwear" in the AI Era!**
+ **What is it?** It is a local Markdown semantic search software and a local RAG knowledge base.
+ **How to use it?** Just open the application, input your Markdown notes path, and click "Build Knowledge Base" to set up your local RAG vault. Once built, you can use it to semantically search your notes. The retrieved content can be copied and sent to any AI for in-depth discussion, or used for your own deep reading.
+ **What are the benefits?** No need to upload any of your data, and no vendor lock-in. It requires no complex configuration or setup. Moreover, it features hot-reloading—newly written notes automatically enter the RAG vault! New notes can also be an organized collection of your historical conversations with AIs, which in turn implicitly provides a permanent memory for them.
+
+> **Introduction: Handing Over Our "Cyber-Underwear" in the AI Era!**
 > **OmniClip RAG uniquely achieves the impossible: You can have it all!**
 >
 > **We Demand**: Our Markdown notes remain completely ours.
