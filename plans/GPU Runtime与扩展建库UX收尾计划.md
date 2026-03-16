@@ -489,7 +489,7 @@
 - 用户不会因为没有活跃感而误关软件
 
 ### Phase 6：稳定性验收与发布门禁
-**状态：待开始**
+**状态：进行中**
 
 必须通过的验收：
 - GPU Runtime 行在真实成功后能稳定转绿
@@ -575,6 +575,13 @@
   - 修复：该测试改为 `try/finally` 恢复原模块对象，保证后续测试看到一致的 import graph
 - 已新增 `pytest.ini` 约束 `testpaths=tests`，避免仓库内 `local_appdata/`、`dist/` 等运行时目录被 pytest 递归扫描触发权限错误
 - 全量回归：`224/224 OK`
+
+- 构建版（onedir）初步点验已跑通：
+  - `python build.py` 构建成功（bundle 体积约 159.9 MB，不含 runtime）
+  - 构建产物：`dist/OmniClipRAG-v0.3.0/OmniClipRAG.exe`
+  - CLI 自检（构建版）：`--selfcheck-runtime suite` 返回 `ok=true`
+    - `gpu-smoke.success=true`（含 CUDA peak mem delta）
+    - `gpu-query-canary.success=true`（`vector_actual_device=cuda:0`、`reranker_actual_device=cuda:0`）
 
 ### 2026-03-16 下一步只做什么
 1. 进入 Phase 6（构建版验收门禁）：
