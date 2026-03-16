@@ -175,6 +175,74 @@ class ExtensionSkeletonTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_extension_source_progress_uses_index_summary_when_idle(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._extension_source_summaries[('pdf', str(SAMPLE_ROOT))] = {
+                'has_indexed_data': True,
+                'indexed_files': 2,
+                'indexed_chunks': 5,
+            }
+            source = ExtensionSourceDirectory(path=str(SAMPLE_ROOT), selected=True, state=ExtensionDirectoryState.ENABLED)
+            message = workspace._extension_source_progress_text('pdf', source)
+            self.assertIn('2', message)
+            self.assertIn('5', message)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_source_progress_includes_stage_file_and_close_hint(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            source_path = str(SAMPLE_ROOT)
+            workspace._handle_extension_source_progress(
+                'pdf',
+                source_path,
+                {
+                    'stage_status': 'parse_pdf',
+                    'current': 2,
+                    'total': 5,
+                    'overall_percent': 40.0,
+                    'current_path': str(Path(source_path) / 'chapter-a.pdf'),
+                    'processed_files': 1,
+                    'skipped_files': 0,
+                    'error_count': 0,
+                    'close_safe': False,
+                },
+            )
+            row = workspace._find_extension_source_row('pdf', source_path)
+            self.assertIsNotNone(row)
+            text_value = workspace.ext_pdf_source_table.item(int(row), 3).text()
+            self.assertIn(text('zh-CN', 'extensions_progress_stage_parsing_pdf'), text_value)
+            self.assertIn('chapter-a.pdf', text_value)
+            self.assertIn(text('zh-CN', 'extensions_progress_close_busy'), text_value)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_source_rebuild_can_route_to_scan_once_when_index_exists(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_choose_extension_source_build_mode', return_value='scan_once'), \
+                 patch.object(workspace, '_run_extension_source_scan_once') as scan_mock:
+                workspace._run_extension_source_rebuild('pdf', str(SAMPLE_ROOT))
+            scan_mock.assert_called_once_with('pdf', str(SAMPLE_ROOT))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_extensions_subtitle_no_longer_mentions_ui_only_phase(self) -> None:
         self.assertNotIn('本阶段只接入 UI 与配置管理', text('zh-CN', 'extensions_subtitle'))
 

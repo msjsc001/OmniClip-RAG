@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
+import shutil
 import sys
 import tempfile
+import time
 import traceback
 from dataclasses import asdict, replace
 from pathlib import Path
+
+from ..runtime_canary import run_gpu_query_canary
 
 
 def _apply_runtime_layout_if_needed() -> None:
@@ -33,8 +38,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--threshold', type=float, default=0.0)
     parser.add_argument('--output', default='')
     parser.add_argument('--query-mode', default='hybrid')
+    parser.add_argument('--selfcheck-runtime', default='')
     args, _unknown = parser.parse_known_args(argv)
     _apply_runtime_layout_if_needed()
+    if _should_run_runtime_selfcheck(args):
+        return run_selfcheck_runtime(
+            check_kind=args.selfcheck_runtime,
+            output_path=args.output,
+        )
     if _should_run_selfcheck(args):
         return run_selfcheck_query(
             vault_path=args.vault,
@@ -102,6 +113,10 @@ def _should_run_selfcheck(args: argparse.Namespace) -> bool:
     if explicit:
         return True
     return os.environ.get('OMNICLIP_ALLOW_SELFCHECK', '').strip() == '1'
+
+
+def _should_run_runtime_selfcheck(args: argparse.Namespace) -> bool:
+    return bool(str(getattr(args, 'selfcheck_runtime', '') or '').strip())
 
 
 def _json_default(value: object):
@@ -245,6 +260,113 @@ def run_selfcheck_query(
             service.close()
 
 
+def _gpu_canary_workspace(temp_root: Path) -> tuple[Path, Path]:
+    vault_dir = temp_root / 'vault'
+    data_root = temp_root / 'data'
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    data_root.mkdir(parents=True, exist_ok=True)
+    (vault_dir / '思维框架.md').write_text(
+        '\n'.join(
+            (
+                '- 我的思维框架',
+                '  - 我常用一套自己的思考框架来拆问题',
+                '  - 遇到复杂任务时会先分析再行动',
+            )
+        ),
+        encoding='utf-8',
+    )
+    (vault_dir / '任务记录.md').write_text(
+        '\n'.join(
+            (
+                '- 今日任务',
+                '  - 购买牛奶',
+                '  - 清理购物清单',
+            )
+        ),
+        encoding='utf-8',
+    )
+    (vault_dir / '分析笔记.md').write_text(
+        '\n'.join(
+            (
+                '- 问题拆解笔记',
+                '  - 先分析问题结构，再决定解决路径',
+                '  - 这套思考方法适合长期记录',
+            )
+        ),
+        encoding='utf-8',
+    )
+    return vault_dir, data_root
+
+
+def _cleanup_temp_root(temp_root: Path) -> None:
+    if not temp_root.exists():
+        return
+    for _ in range(5):
+        try:
+            shutil.rmtree(temp_root)
+            return
+        except PermissionError:
+            gc.collect()
+            time.sleep(0.2)
+    shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def run_selfcheck_runtime(*, check_kind: str, output_path: str) -> int:
+    from ..vector_index import detect_acceleration, inspect_runtime_environment, probe_runtime_gpu_execution
+
+    target = _selfcheck_output_path(output_path)
+    normalized_kind = str(check_kind or 'suite').strip().lower() or 'suite'
+    try:
+        runtime_payload = inspect_runtime_environment()
+        acceleration_payload = detect_acceleration(force_refresh=True)
+        if normalized_kind == 'gpu-smoke':
+            smoke = probe_runtime_gpu_execution(force_refresh=True)
+            payload = {
+                'ok': bool(smoke.get('success')),
+                'check_kind': normalized_kind,
+                'runtime': runtime_payload,
+                'acceleration': acceleration_payload,
+                'gpu_smoke': smoke,
+            }
+        elif normalized_kind == 'gpu-query-canary':
+            canary = run_gpu_query_canary()
+            payload = {
+                'ok': bool(canary.get('success')),
+                'check_kind': normalized_kind,
+                'runtime': runtime_payload,
+                'acceleration': acceleration_payload,
+                'gpu_query_canary': canary,
+            }
+        elif normalized_kind == 'suite':
+            smoke = probe_runtime_gpu_execution(force_refresh=True)
+            canary = run_gpu_query_canary()
+            payload = {
+                'ok': bool(smoke.get('success')) and bool(canary.get('success')),
+                'check_kind': normalized_kind,
+                'runtime': runtime_payload,
+                'acceleration': acceleration_payload,
+                'gpu_smoke': smoke,
+                'gpu_query_canary': canary,
+            }
+        else:
+            payload = {
+                'ok': False,
+                'check_kind': normalized_kind,
+                'error': f'Unsupported runtime selfcheck kind: {normalized_kind}',
+            }
+        _write_selfcheck_payload(target, payload)
+        return 0 if payload.get('ok') else 1
+    except Exception as exc:
+        payload = {
+            'ok': False,
+            'check_kind': normalized_kind,
+            'error': str(exc).strip() or exc.__class__.__name__,
+            'traceback': traceback.format_exc(),
+        }
+        _write_selfcheck_payload(target, payload)
+        return 1
+
+
 def launch_desktop(ui_mode: str = 'next') -> int:
     normalized = str(ui_mode or 'next').strip().lower() or 'next'
     if normalized != 'next':
@@ -257,3 +379,4 @@ def launch_desktop(ui_mode: str = 'next') -> int:
         print('Qt desktop startup failed. Please repair or reinstall the app.', file=sys.stderr, flush=True)
         return 1
     return qt_main()
+

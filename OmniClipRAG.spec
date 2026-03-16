@@ -74,6 +74,7 @@ _RUNTIME_STDLIB_PACKAGES = (
     'unittest',
     'urllib',
     'zipfile',
+    'zoneinfo',
 )
 _RUNTIME_STDLIB_MODULES = (
     '_compat_pickle',

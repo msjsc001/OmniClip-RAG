@@ -21,7 +21,43 @@ if ((Test-Path (Join-Path $scriptDir 'launcher.exe')) -or (Test-Path (Join-Path 
 } else {
     $appDir = (Resolve-Path (Join-Path $scriptDir '..')).ProviderPath
 }
-$target = Join-Path $appDir 'runtime'
+
+function Get-DefaultDataRoot {
+    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+        return (Join-Path $env:APPDATA 'OmniClip RAG')
+    }
+    return (Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'OmniClip RAG')
+}
+
+function Get-PreferredRuntimeRoot {
+    $override = [string]($env:OMNICLIP_RUNTIME_ROOT)
+    if (-not [string]::IsNullOrWhiteSpace($override)) {
+        $resolvedOverride = Resolve-Path -LiteralPath $override -ErrorAction SilentlyContinue
+        if ($null -ne $resolvedOverride) {
+            return $resolvedOverride.ProviderPath
+        }
+        return $override
+    }
+    if ($appDir) {
+        return (Join-Path $appDir 'runtime')
+    }
+    $defaultRoot = Get-DefaultDataRoot
+    $configPath = Join-Path $defaultRoot 'config.json'
+    $dataRoot = $defaultRoot
+    if (Test-Path $configPath) {
+        try {
+            $configPayload = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $configuredRoot = [string]($configPayload.data_root)
+            if (-not [string]::IsNullOrWhiteSpace($configuredRoot)) {
+                $dataRoot = $configuredRoot
+            }
+        } catch {
+        }
+    }
+    return (Join-Path (Join-Path $dataRoot 'shared') 'runtime')
+}
+
+$target = Get-PreferredRuntimeRoot
 $pendingRoot = Join-Path $target '.pending'
 $pendingComponentRoot = Join-Path $pendingRoot $Component
 $componentsRoot = Join-Path $target 'components'
@@ -258,7 +294,7 @@ if (-not $pythonExe) {
     throw "Python 3.13+ was not found. Install Python first, then run InstallRuntime.ps1 again."
 }
 
-$effectiveProfile = if ($normalizedRequestedComponent -eq 'semantic-core') { 'cpu' } else { $Profile }
+$effectiveProfile = $Profile
 $torchIndex = if ($effectiveProfile -eq 'cuda') { 'https://download.pytorch.org/whl/cu128' } else { 'https://download.pytorch.org/whl/cpu' }
 $pypiSource = if ($Source -eq 'mirror') { 'https://pypi.tuna.tsinghua.edu.cn/simple' } else { 'https://pypi.org/simple' }
 
@@ -503,7 +539,7 @@ import sys
 from pathlib import Path
 
 registry_path = Path(sys.argv[1]).resolve()
-component_name = sys.argv[2].strip()
+component_names = [name.strip() for name in sys.argv[2].split(',') if name.strip()]
 payload_target = str(Path(sys.argv[3]).resolve())
 profile_name = sys.argv[4].strip()
 source_name = sys.argv[5].strip()
@@ -516,15 +552,18 @@ if registry_path.exists():
             registry = payload
     except Exception:
         registry = {}
-registry[component_name] = {
-    'path': payload_target,
-    'profile': profile_name,
-    'source': source_name,
-    'created_at': created_at,
-    'validated': True,
-}
+if 'all' in registry and 'all' not in component_names:
+    registry.pop('all', None)
+for component_name in component_names:
+    registry[component_name] = {
+        'path': payload_target,
+        'profile': profile_name,
+        'source': source_name,
+        'created_at': created_at,
+        'validated': True,
+    }
 registry_path.write_text(json.dumps(registry, ensure_ascii=True, indent=2), encoding='utf-8')
-"@ | & $pythonExe @pythonPrefix -I - $componentRegistryPath $normalizedRequestedComponent $payloadTarget $effectiveProfile $Source (Get-Date).ToString('o')
+"@ | & $pythonExe @pythonPrefix -I - $componentRegistryPath $(if ($normalizedRequestedComponent -eq 'all') { 'semantic-core,vector-store' } else { $normalizedRequestedComponent }) $payloadTarget $effectiveProfile $Source (Get-Date).ToString('o')
 if ($LASTEXITCODE -ne 0) { throw "Runtime registry update failed." }
 
 Write-Host "Runtime validation succeeded."
@@ -534,3 +573,6 @@ if ($runningApp) {
 } else {
     Write-Host "Runtime component is ready to use immediately."
 }
+
+
+

@@ -1210,7 +1210,6 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
   - `hybrid_no_rerank` 能返回 30 条命中；
   - `hybrid` 能返回 30 条命中且 `reranker_applied=true`。
 - 当前剩余问题已经收缩成：中文 query `我的思维` 的 lexical-only 为 0，这属于 FTS / tokenizer / query normalization 的单独分析课题，不再和 Runtime 健康或语义链执行混为一谈。
-
 ## 2026-03-16 Markdown 主查询 RCA 最终收口
 - 继续对真实工作区和构建版 RuntimeContext 做零下载 suite 自检后，最终钉死了更深一层的结构根因：**并不是 Runtime 仍然坏，而是 `LanceDbVectorIndex` 过早拉起 vector-store 栈 + `SentenceTransformer(...)` 模型实例化发生在 runtime context 外。**
 - 第一层根因：`LanceDbVectorIndex.__init__()` 和状态探测过早导入/连接 `lancedb`，把 `pyarrow / pandas / numpy` 这条 vector-store 栈提前注入进程。Why：这会让真正的语义模型导入阶段与运行时探测阶段共享一份已经被 vector-store 污染过的解释器状态，随后非常容易触发 `cannot load module more than once per process` 一类的假性依赖错误。
@@ -1248,3 +1247,30 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - 旧 Tk UI 代码已彻底从仓库删除，未来只维护 Qt 桌面链。Why：双套桌面实现已经被证明会放大行为漂移与排错成本，继续保留没有工程价值。
 - 仓库新增最小公开 `logseq笔记样本/` 合成样本库，用于 parser / preflight / service / Qt UI 回归，不包含个人数据。Why：之前测试大量依赖本地私有样本，导致源码发布前无法在干净环境中稳定自测。
 - 这次发布前的回归采用“分组全绿”策略，而不是依赖一条超长 discover 命令。已验证通过的分组包括：扩展链、parser/preflight、service/vector、Qt UI、runtime/launcher/desktop、自检脚本与纯后端工具链。Why：当前环境下单条超长全量命令容易超时，分组结果更可审计。 
+
+## 2026-03-16 GPU Runtime 与扩展建库 UX 新阶段
+- 当前主战线已经从“CPU 主查询是否真的执行高级搜索”进入第二阶段：`GPU Runtime 真实生效 + 扩展来源目录建库 UX 收尾`。Why：CPU 语义主链已明显收口，但 GPU Runtime 仍把“组件安装、能力探测、执行验证”混成一个派生灯，扩展来源目录建库也仍偏数值化，用户无法稳定判断系统到底是否在工作。
+- 新阶段主计划固定为 [plans/GPU Runtime与扩展建库UX收尾计划.md](/D:/软件编写/OmniClip%20RAG/plans/GPU%20Runtime%E4%B8%8E%E6%89%A9%E5%B1%95%E5%BB%BA%E5%BA%93UX%E6%94%B6%E5%B0%BE%E8%AE%A1%E5%88%92.md)。后续任何窗口或新 AI 接手时，必须先读这份计划，再决定是否继续改 GPU Runtime、Runtime 刷新检测或扩展建库 UX。
+- 当前已确认三条关键事实：
+  1. `详细查询排错日志写入活动日志` 仍走 `RotatingFileHandler(maxBytes, backupCount)`，受同一套单文件大小与轮转上限限制，不会无限膨胀。
+  2. `gpu-acceleration` 当前在 UI 中是派生能力行，不是真正独立组件；安装目标映射到 `semantic-core + cuda`，但 ready 判定又额外依赖 `detect_acceleration().cuda_available`，导致“下载成功”与“UI 转绿”之间没有稳定一一对应。
+  3. 扩展来源目录当前主要展示 `overall_percent/current/total`，阶段感不足；已建成目录再次点击建库时，也缺少“扫描更新 / 重建”的明确分流。
+- 2026-03-16 补充：GPU Runtime 新阶段已正式吸收高级 AI 的 6 个硬约束：漂移指纹、决策级日志、四模式对照、`vector-only` 同主链、分层探测、零下载 canary。Why：这条线以后不再允许靠“UI 看起来绿了”或“`torch.cuda.is_available()` 为真”来宣布 GPU 真正可用。
+- 2026-03-16 当前代码已经开始按新计划执行：`gpu-acceleration` 行内部状态已拆出 `install_state / probe_state / execution_state / execution_verified`，并新增 Qt 回归锁定“未做执行验证不能转绿、只有执行验证通过后才能转绿”。Why：先把 GPU 行从单一派生灯收口为可证明的三层状态，后面才能继续做运行时探测和查询设备验证。
+- 2026-03-16 补充：查询侧现在也有针对 GPU 执行证据的回归，要求 `runtime_warnings` 和 `QUERY_STAGE` 在向量召回 / reranker 真跑到 `cuda:0` 时留下 `markdown_vector_cuda_ready`、`markdown_reranker_cuda_ready`、`vector_actual_device`、`reranker_actual_device`。Why：这让“UI 绿了但日志证明不了”不再成为灰区。
+- 2026-03-16 还确认了一条重要边界：源码态仓库根目录 `runtime/` 当前并不完整，因此源码态 `detect_acceleration()/refresh_runtime_capability_snapshot()` 的结果不能再被当成构建版 GPU 是否就绪的结论。Why：GPU 这条线以后必须坚持“构建版优先、源码态只做开发回归”的验收规则。
+
+## 2026-03-16 GPU Runtime 刷新/验证拆分与扩展建库进度收口
+- `Runtime` 页面现在正式拆成两条不同链路：
+  - `刷新检测` 走 `runtime_management_snapshot(verify_gpu=False)`，只做 live runtime 轻/中探测，并复用缓存的 GPU 执行状态。
+  - `执行验证` 只出现在 `gpu-acceleration` 行，走 `runtime_management_snapshot(verify_gpu=True)`，显式触发零下载 GPU smoke。
+  Why：不能再让“刷新 UI 状态”和“证明 GPU 真能执行”混成一个动作，否则用户会看到下载成功但仍红、点击刷新又像卡住。
+- `ConfigWorkspace._refresh_runtime_management_ui()` 现在会复用**同一份** RuntimeContext snapshot；`_runtime_component_state()` 与 `_populate_runtime_component_table()` 已支持传入 context。Why：之前一次刷新里会重复重算多次 live runtime 状态，导致重量级探测被放大并放大 UI 卡顿感。
+- `gpu-acceleration` 行目前继续保留为短期 capability row，但内部状态已经固定拆成：
+  - `install_state`
+  - `probe_state`
+  - `execution_state`
+  - `execution_verified`
+  只有执行验证通过后才允许转绿。Why：这让“已安装”“探测通过”“真正执行过”不再被一个派生布尔值混掉。
+- 扩展来源目录行现在已经具备“已建索引 -> 先选 `扫描更新 / 重建`”的明确交互；行级进度同时显示阶段、当前文件、处理/跳过/错误/删除统计和关闭风险提示。Why：用户需要判断“它现在在干什么、能不能关”，而不只是看一个百分比条。
+- 扩展来源目录在空闲态会显示已索引摘要（文件数 / chunk 数 / 向量文档数）；这样即使当前没有任务，用户也能看到这行目录已经有历史索引结果。Why：避免来源目录表在任务结束后重新退回成“像什么都没做过”的状态。

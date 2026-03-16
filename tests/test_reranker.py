@@ -5,9 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from omniclip_rag.canary_backend import CANARY_RERANKER_MODEL_ID
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.models import SearchHit
-from omniclip_rag.reranker import CrossEncoderReranker, create_reranker
+from omniclip_rag.reranker import CanaryTorchReranker, CrossEncoderReranker, create_reranker, is_local_reranker_ready
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,18 @@ class RerankerTests(unittest.TestCase):
         hits, outcome = reranker.rerank('test', [], 10)
         self.assertEqual(hits, [])
         self.assertFalse(outcome.enabled)
+
+    def test_create_reranker_returns_builtin_canary_backend(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'canary'))
+        config = AppConfig(
+            vault_path='.',
+            data_root=str(paths.global_root),
+            reranker_enabled=True,
+            reranker_model=CANARY_RERANKER_MODEL_ID,
+        )
+        reranker = create_reranker(config, paths)
+        self.assertIsInstance(reranker, CanaryTorchReranker)
+        self.assertTrue(is_local_reranker_ready(config, paths))
 
     def test_cross_encoder_reranker_falls_back_to_cpu_after_cuda_oom(self) -> None:
         paths = ensure_data_paths(str(TEST_DATA_ROOT))

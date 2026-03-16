@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from importlib import import_module
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -12,13 +13,38 @@ from ..retrieval_policy import QueryProfile, build_query_profile, rank_candidate
 from ..storage import MetadataStore
 from ..vector_index import NullVectorIndex, create_vector_index, runtime_dependency_issue
 from .models import ExtensionDirectoryState, ExtensionIndexState, TikaFormatSupportTier
-from .parsers.pdf import extract_pdf_pages, parse_pdf_file
-from .parsers.tika import detect_tika_format, enabled_tika_suffixes, parse_tika_file
 from .paths import build_extension_data_paths
 from .registry import ExtensionRegistry, ExtensionRegistryState
 from .runtimes import TikaSidecarManager, parse_file_with_tika
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _extract_pdf_pages(pdf_path: Path) -> list[dict[str, object]]:
+    # Why: Qt config pages and Markdown-only flows must stay importable even when
+    # optional PDF parser dependencies are not installed in the source runtime.
+    parser = import_module('omniclip_rag.extensions.parsers.pdf')
+    return parser.extract_pdf_pages(pdf_path)
+
+
+def _parse_pdf_file(source_root: Path, absolute_path: Path):
+    parser = import_module('omniclip_rag.extensions.parsers.pdf')
+    return parser.parse_pdf_file(source_root, absolute_path)
+
+
+def _detect_tika_format(path: Path) -> str:
+    parser = import_module('omniclip_rag.extensions.parsers.tika')
+    return parser.detect_tika_format(path)
+
+
+def _enabled_tika_suffixes(enabled_formats: set[str]) -> set[str]:
+    parser = import_module('omniclip_rag.extensions.parsers.tika')
+    return parser.enabled_tika_suffixes(enabled_formats)
+
+
+def _parse_tika_file(source_root: Path, absolute_path: Path, xhtml: str, *, format_id: str):
+    parser = import_module('omniclip_rag.extensions.parsers.tika')
+    return parser.parse_tika_file(source_root, absolute_path, xhtml, format_id=format_id)
 
 
 class ExtensionTaskKind(str, Enum):
@@ -101,6 +127,23 @@ class TikaBuildReport:
     deleted_files: int = 0
     missing_directories: tuple[str, ...] = ()
     rebuilt: bool = False
+
+
+@dataclass(slots=True)
+class ExtensionSourceIndexSummary:
+    """Index summary for one extension source directory.
+
+    Why: row-level UX needs a cheap, isolated way to answer whether one source
+    already owns index data so the UI can choose between update vs. rebuild
+    without touching the Markdown mainline state model.
+    """
+
+    source_path: str
+    indexed_files: int = 0
+    indexed_chunks: int = 0
+    vector_documents: int = 0
+    last_indexed_mtime: float = 0.0
+    has_indexed_data: bool = False
 
 
 class ExtensionTaskCoordinator:
@@ -198,7 +241,7 @@ class PdfExtensionService:
             try:
                 total_files += 1
                 total_bytes += int(pdf_path.stat().st_size)
-                total_pages += len(extract_pdf_pages(pdf_path))
+                total_pages += len(_extract_pdf_pages(pdf_path))
             except Exception as exc:
                 skipped_files += 1
                 LOGGER.warning('PDF preflight skipped unreadable file: %s (%s: %s)', pdf_path, type(exc).__name__, exc)
@@ -319,6 +362,23 @@ class PdfExtensionService:
             hits = rank_candidates(query_text, self.store.fetch_all_rendered_chunks(), vector_candidates, query_profile)
         return [self._decorate_hit(hit) for hit in hits]
 
+    def source_summaries(self, *, source_paths: list[str] | tuple[str, ...] | None = None) -> dict[str, ExtensionSourceIndexSummary]:
+        """Return per-source index summaries for the isolated PDF pipeline."""
+        self._refresh_state()
+        requested = list(source_paths or [item.path for item in self._state.pdf_config.source_directories])
+        manifest = self.store.fetch_file_manifest()
+        summaries: dict[str, ExtensionSourceIndexSummary] = {}
+        for source_path in requested:
+            normalized = _normalize_source_path_text(source_path)
+            if not normalized:
+                continue
+            summaries[normalized] = _build_source_index_summary(
+                self.store,
+                manifest,
+                normalized,
+            )
+        return summaries
+
     def _run_build(
         self,
         *,
@@ -392,6 +452,7 @@ class PdfExtensionService:
         on_progress: Callable[[dict[str, object]], None] | None,
         targeted: bool = False,
     ) -> int:
+        existing_paths: list[str] = []
         if targeted:
             existing_paths = self._indexed_paths_under_roots(source_dirs)
             if existing_paths:
@@ -403,27 +464,68 @@ class PdfExtensionService:
         files = list(self._iter_pdf_files(source_dirs))
         total = len(files)
         indexed_paths: list[str] = []
+        _emit_extension_stage(
+            on_progress,
+            stage='pdf_build',
+            stage_status='scan_sources',
+            current=0,
+            total=total,
+            processed_files=0,
+            skipped_files=0,
+            deleted_files=len(existing_paths) if targeted else 0,
+            overall_percent=0.0,
+            close_safe=False,
+        )
         for current, (source_root, pdf_path) in enumerate(files, start=1):
-            _emit_progress(
+            _emit_extension_stage(
                 on_progress,
-                {
-                    'stage': 'pdf_build',
-                    'current': current,
-                    'total': total,
-                    'current_path': str(pdf_path),
-                    'stage_status': 'parse_pdf',
-                    'overall_percent': round((current / total) * 100.0, 2) if total else 0.0,
-                },
+                stage='pdf_build',
+                stage_status='parse_pdf',
+                current=current,
+                total=total,
+                current_path=str(pdf_path),
+                processed_files=max(current - 1, 0),
+                skipped_files=skipped_files,
+                error_count=skipped_files,
+                deleted_files=len(existing_paths) if targeted else 0,
+                overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
+                close_safe=False,
             )
             if not self._replace_one_pdf(source_root, pdf_path):
                 skipped_files += 1
                 continue
             indexed_paths.append(str(pdf_path.resolve()))
+        _emit_extension_stage(
+            on_progress,
+            stage='pdf_build',
+            stage_status='write_vector',
+            current=len(indexed_paths),
+            total=total,
+            processed_files=len(indexed_paths),
+            skipped_files=skipped_files,
+            error_count=skipped_files,
+            deleted_files=len(existing_paths) if targeted else 0,
+            overall_percent=92.0 if total else 100.0,
+            close_safe=False,
+        )
         if targeted:
             if indexed_paths:
                 self._upsert_vectors_for_paths(indexed_paths)
         else:
             self._rebuild_vectors()
+        _emit_extension_stage(
+            on_progress,
+            stage='pdf_build',
+            stage_status='finalizing',
+            current=len(indexed_paths),
+            total=total,
+            processed_files=len(indexed_paths),
+            skipped_files=skipped_files,
+            error_count=skipped_files,
+            deleted_files=len(existing_paths) if targeted else 0,
+            overall_percent=100.0,
+            close_safe=False,
+        )
         return skipped_files
 
     def _scan_once(
@@ -457,29 +559,70 @@ class PdfExtensionService:
             self._delete_paths_from_index(deleted_paths)
         skipped_files = 0
         total = len(changed_paths)
+        _emit_extension_stage(
+            on_progress,
+            stage='pdf_scan_once',
+            stage_status='scan_sources',
+            current=0,
+            total=total,
+            processed_files=0,
+            skipped_files=0,
+            deleted_files=len(deleted_paths),
+            overall_percent=0.0,
+            close_safe=False,
+        )
         for current, path in enumerate(changed_paths, start=1):
             source_root, pdf_path = source_by_path[path]
-            _emit_progress(
+            _emit_extension_stage(
                 on_progress,
-                {
-                    'stage': 'pdf_scan_once',
-                    'current': current,
-                    'total': total,
-                    'current_path': str(pdf_path),
-                    'stage_status': 'parse_pdf',
-                    'overall_percent': round((current / total) * 100.0, 2) if total else 0.0,
-                },
+                stage='pdf_scan_once',
+                stage_status='parse_pdf',
+                current=current,
+                total=total,
+                current_path=str(pdf_path),
+                processed_files=max(current - 1, 0),
+                skipped_files=skipped_files,
+                error_count=skipped_files,
+                deleted_files=len(deleted_paths),
+                overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
+                close_safe=False,
             )
             self._delete_paths_from_index([path])
             if not self._replace_one_pdf(source_root, pdf_path):
                 skipped_files += 1
         if changed_paths:
+            _emit_extension_stage(
+                on_progress,
+                stage='pdf_scan_once',
+                stage_status='write_vector',
+                current=len(changed_paths) - skipped_files,
+                total=total,
+                processed_files=len(changed_paths) - skipped_files,
+                skipped_files=skipped_files,
+                error_count=skipped_files,
+                deleted_files=len(deleted_paths),
+                overall_percent=92.0 if total else 100.0,
+                close_safe=False,
+            )
             self._upsert_vectors_for_paths(changed_paths)
+        _emit_extension_stage(
+            on_progress,
+            stage='pdf_scan_once',
+            stage_status='finalizing',
+            current=len(changed_paths) - skipped_files,
+            total=total,
+            processed_files=len(changed_paths) - skipped_files,
+            skipped_files=skipped_files,
+            error_count=skipped_files,
+            deleted_files=len(deleted_paths),
+            overall_percent=100.0,
+            close_safe=False,
+        )
         return len(deleted_paths), skipped_files
 
     def _replace_one_pdf(self, source_root: Path, pdf_path: Path) -> bool:
         try:
-            parsed = parse_pdf_file(source_root, pdf_path)
+            parsed = _parse_pdf_file(source_root, pdf_path)
         except Exception as exc:
             LOGGER.warning('PDF extension skipped broken file: %s (%s: %s)', pdf_path, type(exc).__name__, exc)
             return False
@@ -763,6 +906,23 @@ class TikaExtensionService:
             hits = rank_candidates(query_text, self.store.fetch_all_rendered_chunks(), vector_candidates, query_profile)
         return [self._decorate_tika_hit(hit) for hit in hits]
 
+    def source_summaries(self, *, source_paths: list[str] | tuple[str, ...] | None = None) -> dict[str, ExtensionSourceIndexSummary]:
+        """Return per-source index summaries for the isolated Tika pipeline."""
+        self._refresh_state()
+        requested = list(source_paths or [item.path for item in self._state.tika_config.source_directories])
+        manifest = self.store.fetch_file_manifest()
+        summaries: dict[str, ExtensionSourceIndexSummary] = {}
+        for source_path in requested:
+            normalized = _normalize_source_path_text(source_path)
+            if not normalized:
+                continue
+            summaries[normalized] = _build_source_index_summary(
+                self.store,
+                manifest,
+                normalized,
+            )
+        return summaries
+
     def _run_build(
         self,
         *,
@@ -847,6 +1007,7 @@ class TikaExtensionService:
             self._persist_state()
 
     def _full_rebuild(self, source_dirs: list[Path], enabled_formats: list[str], *, on_progress: Callable[[dict[str, object]], None] | None, targeted: bool = False) -> int:
+        existing_paths: list[str] = []
         if targeted:
             existing_paths = self._indexed_paths_under_roots(source_dirs)
             if existing_paths:
@@ -858,28 +1019,69 @@ class TikaExtensionService:
         files = list(self._iter_tika_files(source_dirs, enabled_formats))
         total = len(files)
         indexed_paths: list[str] = []
+        _emit_extension_stage(
+            on_progress,
+            stage='tika_build',
+            stage_status='scan_sources',
+            current=0,
+            total=total,
+            processed_files=0,
+            skipped_files=0,
+            deleted_files=len(existing_paths) if targeted else 0,
+            overall_percent=0.0,
+            close_safe=False,
+        )
         for current, (source_root, file_path, format_id) in enumerate(files, start=1):
-            _emit_progress(
+            _emit_extension_stage(
                 on_progress,
-                {
-                    'stage': 'tika_build',
-                    'current': current,
-                    'total': total,
-                    'current_path': str(file_path),
-                    'format_id': format_id,
-                    'stage_status': 'parse_tika',
-                    'overall_percent': round((current / total) * 100.0, 2) if total else 0.0,
-                },
+                stage='tika_build',
+                stage_status='parse_tika',
+                current=current,
+                total=total,
+                current_path=str(file_path),
+                format_id=format_id,
+                processed_files=max(current - 1, 0),
+                skipped_files=skipped_files,
+                error_count=skipped_files,
+                deleted_files=len(existing_paths) if targeted else 0,
+                overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
+                close_safe=False,
             )
             if not self._replace_one_tika_file(source_root, file_path, format_id):
                 skipped_files += 1
                 continue
             indexed_paths.append(str(file_path.resolve()))
+        _emit_extension_stage(
+            on_progress,
+            stage='tika_build',
+            stage_status='write_vector',
+            current=len(indexed_paths),
+            total=total,
+            processed_files=len(indexed_paths),
+            skipped_files=skipped_files,
+            error_count=skipped_files,
+            deleted_files=len(existing_paths) if targeted else 0,
+            overall_percent=92.0 if total else 100.0,
+            close_safe=False,
+        )
         if targeted:
             if indexed_paths:
                 self._upsert_vectors_for_paths(indexed_paths)
         else:
             self._rebuild_vectors()
+        _emit_extension_stage(
+            on_progress,
+            stage='tika_build',
+            stage_status='finalizing',
+            current=len(indexed_paths),
+            total=total,
+            processed_files=len(indexed_paths),
+            skipped_files=skipped_files,
+            error_count=skipped_files,
+            deleted_files=len(existing_paths) if targeted else 0,
+            overall_percent=100.0,
+            close_safe=False,
+        )
         return skipped_files
 
     def _scan_once(self, source_dirs: list[Path], enabled_formats: list[str], *, on_progress: Callable[[dict[str, object]], None] | None) -> tuple[int, int]:
@@ -902,32 +1104,73 @@ class TikaExtensionService:
             self._delete_paths_from_index(deleted_paths)
         skipped_files = 0
         total = len(changed_paths)
+        _emit_extension_stage(
+            on_progress,
+            stage='tika_scan_once',
+            stage_status='scan_sources',
+            current=0,
+            total=total,
+            processed_files=0,
+            skipped_files=0,
+            deleted_files=len(deleted_paths),
+            overall_percent=0.0,
+            close_safe=False,
+        )
         for current, path in enumerate(changed_paths, start=1):
             source_root, file_path, format_id = source_by_path[path]
-            _emit_progress(
+            _emit_extension_stage(
                 on_progress,
-                {
-                    'stage': 'tika_scan_once',
-                    'current': current,
-                    'total': total,
-                    'current_path': str(file_path),
-                    'format_id': format_id,
-                    'stage_status': 'parse_tika',
-                    'overall_percent': round((current / total) * 100.0, 2) if total else 0.0,
-                },
+                stage='tika_scan_once',
+                stage_status='parse_tika',
+                current=current,
+                total=total,
+                current_path=str(file_path),
+                format_id=format_id,
+                processed_files=max(current - 1, 0),
+                skipped_files=skipped_files,
+                error_count=skipped_files,
+                deleted_files=len(deleted_paths),
+                overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
+                close_safe=False,
             )
             self._delete_paths_from_index([path])
             if not self._replace_one_tika_file(source_root, file_path, format_id):
                 skipped_files += 1
         if changed_paths:
+            _emit_extension_stage(
+                on_progress,
+                stage='tika_scan_once',
+                stage_status='write_vector',
+                current=len(changed_paths) - skipped_files,
+                total=total,
+                processed_files=len(changed_paths) - skipped_files,
+                skipped_files=skipped_files,
+                error_count=skipped_files,
+                deleted_files=len(deleted_paths),
+                overall_percent=92.0 if total else 100.0,
+                close_safe=False,
+            )
             self._upsert_vectors_for_paths(changed_paths)
+        _emit_extension_stage(
+            on_progress,
+            stage='tika_scan_once',
+            stage_status='finalizing',
+            current=len(changed_paths) - skipped_files,
+            total=total,
+            processed_files=len(changed_paths) - skipped_files,
+            skipped_files=skipped_files,
+            error_count=skipped_files,
+            deleted_files=len(deleted_paths),
+            overall_percent=100.0,
+            close_safe=False,
+        )
         return len(deleted_paths), skipped_files
 
     def _replace_one_tika_file(self, source_root: Path, file_path: Path, format_id: str) -> bool:
         try:
             runtime = self._state.snapshot.tika.runtime
             xhtml = parse_file_with_tika(file_path, port=runtime.port or 9998)
-            parsed = parse_tika_file(source_root, file_path, xhtml, format_id=format_id)
+            parsed = _parse_tika_file(source_root, file_path, xhtml, format_id=format_id)
         except Exception as exc:
             LOGGER.warning('Tika extension skipped poisoned file: %s (%s: %s)', file_path, type(exc).__name__, exc)
             return False
@@ -1006,7 +1249,7 @@ class TikaExtensionService:
         return [item.format_id for item in self._state.tika_config.selected_formats if item.enabled and item.tier != TikaFormatSupportTier.POOR]
 
     def _iter_tika_files(self, source_dirs: list[Path], enabled_formats: list[str]):
-        suffixes = enabled_tika_suffixes(enabled_formats)
+        suffixes = _enabled_tika_suffixes(enabled_formats)
         if not suffixes:
             return
         seen: set[str] = set()
@@ -1019,7 +1262,7 @@ class TikaExtensionService:
                 resolved = str(resolved_path)
                 if resolved in seen:
                     continue
-                format_id = detect_tika_format(resolved_path)
+                format_id = _detect_tika_format(resolved_path)
                 if format_id not in enabled_formats:
                     continue
                 seen.add(resolved)
@@ -1053,7 +1296,7 @@ class TikaExtensionService:
 
     def _decorate_tika_hit(self, hit: SearchHit) -> SearchHit:
         source_name = Path(hit.source_path).name or Path(hit.source_path).stem or 'Tika'
-        format_id = detect_tika_format(Path(hit.source_path)) or Path(hit.source_path).suffix.lstrip('.').lower() or 'tika'
+        format_id = _detect_tika_format(Path(hit.source_path)) or Path(hit.source_path).suffix.lstrip('.').lower() or 'tika'
         format_label = format_id.upper() if format_id else 'Tika'
         source_label = f'{format_label}(Tika) · {source_name}'
         hit.source_family = 'tika'
@@ -1121,6 +1364,13 @@ class ExtensionService:
         finally:
             service.close()
 
+    def run_pdf_source_summaries(self, *, source_paths: list[str] | tuple[str, ...] | None = None) -> dict[str, ExtensionSourceIndexSummary]:
+        service = self._pdf_service()
+        try:
+            return service.source_summaries(source_paths=source_paths)
+        finally:
+            service.close()
+
     def run_tika_preflight(self, *, source_paths: list[str] | tuple[str, ...] | None = None) -> TikaPreflightReport:
         service = self._tika_service()
         try:
@@ -1156,6 +1406,13 @@ class ExtensionService:
         service = self._tika_service()
         try:
             return service.delete_index(source_paths=source_paths)
+        finally:
+            service.close()
+
+    def run_tika_source_summaries(self, *, source_paths: list[str] | tuple[str, ...] | None = None) -> dict[str, ExtensionSourceIndexSummary]:
+        service = self._tika_service()
+        try:
+            return service.source_summaries(source_paths=source_paths)
         finally:
             service.close()
 
@@ -1205,6 +1462,79 @@ def _extract_page_no(anchor: str) -> int:
         if token.isdigit():
             return max(int(token), 0)
     return 0
+
+
+def _normalize_source_path_text(source_path: str) -> str:
+    text = str(source_path or '').strip()
+    if not text:
+        return ''
+    try:
+        return str(Path(text).expanduser().resolve())
+    except Exception:
+        return str(Path(text).expanduser())
+
+
+def _build_source_index_summary(
+    store: MetadataStore,
+    manifest: dict[str, tuple[float, int]],
+    source_path: str,
+) -> ExtensionSourceIndexSummary:
+    normalized = _normalize_source_path_text(source_path)
+    if not normalized:
+        return ExtensionSourceIndexSummary(source_path='')
+    relevant_paths = [
+        path
+        for path in manifest
+        if _path_belongs_to_roots(path, (normalized,))
+    ]
+    if not relevant_paths:
+        return ExtensionSourceIndexSummary(source_path=normalized)
+    last_indexed_mtime = max(float(manifest[path][0]) for path in relevant_paths)
+    return ExtensionSourceIndexSummary(
+        source_path=normalized,
+        indexed_files=len(relevant_paths),
+        indexed_chunks=store.count_render_rows(relevant_paths),
+        vector_documents=store.count_vector_documents(relevant_paths),
+        last_indexed_mtime=last_indexed_mtime,
+        has_indexed_data=True,
+    )
+
+
+def _emit_extension_stage(
+    on_progress: Callable[[dict[str, object]], None] | None,
+    *,
+    stage: str,
+    stage_status: str,
+    current: int = 0,
+    total: int = 0,
+    current_path: str = '',
+    format_id: str = '',
+    processed_files: int = 0,
+    skipped_files: int = 0,
+    error_count: int | None = None,
+    deleted_files: int = 0,
+    overall_percent: float | None = None,
+    close_safe: bool = False,
+) -> None:
+    percent = overall_percent
+    if percent is None:
+        percent = round((current / total) * 100.0, 2) if total else 0.0
+    payload: dict[str, object] = {
+        'stage': stage,
+        'stage_status': stage_status,
+        'current': max(int(current or 0), 0),
+        'total': max(int(total or 0), 0),
+        'current_path': current_path,
+        'processed_files': max(int(processed_files or 0), 0),
+        'skipped_files': max(int(skipped_files or 0), 0),
+        'error_count': max(int(error_count if error_count is not None else skipped_files or 0), 0),
+        'deleted_files': max(int(deleted_files or 0), 0),
+        'overall_percent': max(float(percent or 0.0), 0.0),
+        'close_safe': bool(close_safe),
+    }
+    if format_id:
+        payload['format_id'] = format_id
+    _emit_progress(on_progress, payload)
 
 
 def _emit_progress(on_progress: Callable[[dict[str, object]], None] | None, payload: dict[str, object]) -> None:

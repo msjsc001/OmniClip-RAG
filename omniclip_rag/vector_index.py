@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import json
+import hashlib
 import importlib
 import logging
 import os
@@ -19,10 +20,17 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .build_control import BuildPerformanceController
-from .config import AppConfig, DataPaths
+from .canary_backend import CANARY_VECTOR_MODEL_ID, encode_batch_tensors, is_canary_vector_model
+from .config import AppConfig, DataPaths, default_data_root
 from .errors import BuildCancelledError, RuntimeDependencyError
 from .process_utils import run_hidden
-from .runtime_layout import list_pending_runtime_updates, normalize_runtime_component_id, runtime_component_live_roots
+from .runtime_layout import (
+    list_pending_runtime_updates,
+    load_runtime_component_registry,
+    normalize_runtime_component_id,
+    runtime_component_live_roots,
+    runtime_component_registry_path,
+)
 
 
 class VectorCandidate(Protocol):
@@ -108,8 +116,33 @@ _RUNTIME_STDLIB_SUPPORT_MODULES = (
 _RUNTIME_STDLIB_SUPPORT_READY: set[str] = set()
 _RUNTIME_STDLIB_SUPPORT_LOCK = threading.Lock()
 _RUNTIME_STDLIB_SUPPORT_LOGGED = False
+_RUNTIME_CAPABILITY_STATE_FILENAME = '_runtime_capabilities.json'
+_RUNTIME_CAPABILITY_STATE_VERSION = 2
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _TorchCanaryEmbedder:
+    def __init__(self, *, device: str) -> None:
+        self.device = str(device or 'cpu')
+
+    def encode(
+        self,
+        texts: list[str],
+        *,
+        batch_size: int = 16,
+        show_progress_bar: bool = False,
+        normalize_embeddings: bool = True,
+    ):
+        del batch_size, show_progress_bar
+        with _runtime_import_environment(component_id='semantic-core'):
+            import torch
+        return encode_batch_tensors(
+            torch,
+            texts,
+            device=self.device,
+            normalize=normalize_embeddings,
+        )
 
 
 class NullVectorIndex:
@@ -226,6 +259,7 @@ class LanceDbVectorIndex:
         self._db = None
         self._table_name = "chunks"
         self._vector_dimension: int | None = None
+        self._last_execution_report: dict[str, object] = {}
 
     def rebuild(
         self,
@@ -764,18 +798,31 @@ class LanceDbVectorIndex:
             "model_ready": is_local_model_ready(self.config, self.paths),
             "requested_device": requested_device,
             "resolved_device": resolved_device,
+            'execution_report': dict(self._last_execution_report),
             **acceleration,
         }
 
     def status(self) -> dict[str, object]:
+        runtime_state = inspect_runtime_environment()
+        if self._vector_dimension is None and self._table_exists():
+            try:
+                schema = self._table().schema
+                self._vector_dimension = schema.field("vector").type.list_size
+            except Exception:
+                pass
         return {
             'backend': 'lancedb',
             'table_ready': self._table_exists(),
-            'runtime_ready': True,
+            'runtime_ready': bool(runtime_state.get('runtime_complete')),
             'db_dir': str(self._db_dir),
             'table_name': self._table_name,
             'vector_dimension': int(self._vector_dimension or 0),
+            'execution_report': dict(self._last_execution_report),
+            'runtime_root': str(runtime_state.get('runtime_dir') or ''),
         }
+
+    def last_execution_report(self) -> dict[str, object]:
+        return dict(self._last_execution_report)
 
     def reset(self) -> None:
         if self._db is not None and self._table_exists():
@@ -877,12 +924,53 @@ class LanceDbVectorIndex:
 
     def _encode(self, texts: list[str], *, batch_size: int | None = None):
         embedder = self._load_embedder()
-        return embedder.encode(
-            texts,
-            batch_size=batch_size or self.config.vector_batch_size,
-            show_progress_bar=False,
-            normalize_embeddings=True,
-        )
+        requested_device = (self.config.vector_device or 'auto').strip().lower() or 'auto'
+        resolved_device = resolve_vector_device(self.config.vector_device)
+        report: dict[str, object] = {
+            'requested_device': requested_device,
+            'resolved_device': resolved_device,
+            'model_device': str(getattr(embedder, 'device', '') or ''),
+            'actual_device': str(getattr(embedder, 'device', '') or resolved_device),
+            'cuda_peak_mem_before': 0,
+            'cuda_peak_mem_after': 0,
+            'cuda_peak_mem_delta': 0,
+            'elapsed_ms': 0,
+            'execution_error_class': '',
+            'execution_error_message': '',
+        }
+        started_at = time.perf_counter()
+        if resolved_device == 'cuda':
+            try:
+                with _runtime_import_environment(component_id='semantic-core'):
+                    import torch
+                    device_name = str(getattr(embedder, 'device', '') or 'cuda:0')
+                    _torch_cuda_reset_peak_memory(torch, device_name)
+                    report['cuda_peak_mem_before'] = _torch_cuda_peak_memory(torch, device_name)
+                    vectors = embedder.encode(
+                        texts,
+                        batch_size=batch_size or self.config.vector_batch_size,
+                        show_progress_bar=False,
+                        normalize_embeddings=True,
+                    )
+                    _torch_cuda_synchronize(torch, device_name)
+                    report['cuda_peak_mem_after'] = _torch_cuda_peak_memory(torch, device_name)
+                    report['cuda_peak_mem_delta'] = max(int(report['cuda_peak_mem_after']) - int(report['cuda_peak_mem_before']), 0)
+                    report['actual_device'] = str(getattr(vectors, 'device', '') or report['model_device'] or device_name)
+            except Exception as exc:
+                report['execution_error_class'] = exc.__class__.__name__
+                report['execution_error_message'] = str(exc).strip() or exc.__class__.__name__
+                self._last_execution_report = report
+                raise
+        else:
+            vectors = embedder.encode(
+                texts,
+                batch_size=batch_size or self.config.vector_batch_size,
+                show_progress_bar=False,
+                normalize_embeddings=True,
+            )
+        report['elapsed_ms'] = max(int((time.perf_counter() - started_at) * 1000), 0)
+        self._last_execution_report = report
+        return vectors
 
     def _load_embedder(self) -> Embedder:
         if self._embedder is None:
@@ -906,6 +994,10 @@ class LanceDbVectorIndex:
         cached = _EMBEDDER_CACHE.get(cache_key)
         if cached is not None:
             return cached
+        if is_canary_vector_model(self.config.vector_model):
+            embedder = _TorchCanaryEmbedder(device=resolved_device)
+            _EMBEDDER_CACHE[cache_key] = embedder
+            return embedder
 
         try:
             # Why: the semantic runtime context must stay active for the whole
@@ -977,6 +1069,8 @@ def model_download_guidance_context(config: AppConfig, paths: DataPaths) -> dict
 
 
 def is_local_model_ready(config: AppConfig, paths: DataPaths) -> bool:
+    if is_canary_vector_model(config.vector_model):
+        return True
     return _is_model_dir_ready(get_local_model_dir(config, paths), config.vector_runtime)
 
 
@@ -986,6 +1080,15 @@ def prepare_local_model_snapshot(
     *,
     allow_download: bool = True,
 ) -> dict[str, object]:
+    if is_canary_vector_model(config.vector_model):
+        return {
+            "backend": "builtin-canary",
+            "model": config.vector_model,
+            "local_model_dir": "",
+            "model_ready": True,
+            "requested_device": (config.vector_device or "auto").strip().lower() or "auto",
+            "resolved_device": resolve_vector_device(config.vector_device),
+        }
     model_root = paths.cache_dir / "models"
     local_model_dir = get_local_model_dir(config, paths)
     hf_home_dir = model_root / "_hf_home"
@@ -1198,7 +1301,7 @@ def runtime_component_status(component_id: str) -> dict[str, object]:
     component = _RUNTIME_COMPONENTS.get(component_id)
     if component is None:
         raise KeyError(f'Unknown runtime component: {component_id}')
-    layout = _inspect_runtime_layout_state()
+    layout = inspect_runtime_environment()
     runtime_dir = Path(layout['runtime_dir'])
     total_count = len(tuple(component.get('markers', ())))
     missing_items = _runtime_component_missing_items(runtime_dir, component_id) if layout['runtime_exists'] else [_RUNTIME_REQUIRED_MARKERS.get(marker, marker) for marker in component.get('markers', ())]
@@ -1254,6 +1357,108 @@ def runtime_component_usage(component_id: str, profile: str) -> dict[str, str]:
         'download_usage': str(component.get('download_usage', {}).get(normalized_profile) or component.get('download_usage', {}).get('cpu') or ''),
     }
 
+
+def _runtime_capability_state_path(runtime_dir: Path) -> Path:
+    return Path(runtime_dir) / _RUNTIME_CAPABILITY_STATE_FILENAME
+
+
+def _load_runtime_capability_state(runtime_dir: Path) -> dict[str, object]:
+    state_path = _runtime_capability_state_path(runtime_dir)
+    default_payload = {
+        'version': _RUNTIME_CAPABILITY_STATE_VERSION,
+        'gpu_probe': {},
+        'gpu_query_probe': {},
+    }
+    if not state_path.exists():
+        return dict(default_payload)
+    try:
+        payload = json.loads(state_path.read_text(encoding='utf-8'))
+    except Exception:
+        return dict(default_payload)
+    if not isinstance(payload, dict):
+        return dict(default_payload)
+    payload.setdefault('version', _RUNTIME_CAPABILITY_STATE_VERSION)
+    legacy_probe = payload.pop('gpu_execution_probe', None)
+    if not isinstance(payload.get('gpu_probe'), dict):
+        payload['gpu_probe'] = dict(legacy_probe or {}) if isinstance(legacy_probe, dict) else {}
+    elif isinstance(legacy_probe, dict) and not payload['gpu_probe']:
+        payload['gpu_probe'] = dict(legacy_probe)
+    if not isinstance(payload.get('gpu_query_probe'), dict):
+        payload['gpu_query_probe'] = {}
+    return payload
+
+
+def _write_runtime_capability_state(runtime_dir: Path, payload: dict[str, object]) -> None:
+    runtime_dir = Path(runtime_dir)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    state_payload = _load_runtime_capability_state(runtime_dir)
+    state_payload.update(payload)
+    state_payload['version'] = _RUNTIME_CAPABILITY_STATE_VERSION
+    _runtime_capability_state_path(runtime_dir).write_text(
+        json.dumps(state_payload, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding='utf-8',
+    )
+
+
+def _utc_now_iso() -> str:
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+
+def _trace_digest(payload: object, prefix: str) -> str:
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return f"{prefix}:{hashlib.sha1(serialized.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _safe_realpath(value: str | Path | None) -> str:
+    if value is None:
+        return ''
+    try:
+        return str(Path(value).resolve(strict=False))
+    except Exception:
+        return str(value)
+
+
+def runtime_trace_metadata() -> dict[str, object]:
+    runtime_state = inspect_runtime_environment()
+    runtime_dir = Path(runtime_state.get('runtime_dir') or '')
+    registry_path = runtime_component_registry_path(runtime_dir)
+    registry_payload = load_runtime_component_registry(runtime_dir) if runtime_dir.exists() else {}
+    pending_updates = list_pending_runtime_updates(runtime_dir) if runtime_dir.exists() else []
+    manifest_payload: object = {}
+    if registry_path.exists():
+        try:
+            manifest_payload = json.loads(registry_path.read_text(encoding='utf-8'))
+        except Exception:
+            manifest_payload = {'registry_path': str(registry_path), 'invalid': True}
+    elif registry_payload:
+        manifest_payload = registry_payload
+    else:
+        manifest_payload = {'layout': 'legacy-or-empty'}
+    runtime_manifest_version = _trace_digest(manifest_payload, 'runtime-manifest')
+    live_runtime_id = _trace_digest(
+        {
+            'runtime_dir': _safe_realpath(runtime_dir),
+            'registry': registry_payload,
+        },
+        'runtime-live',
+    )
+    pending_runtime_id = _trace_digest(pending_updates, 'runtime-pending') if pending_updates else ''
+    runtime_instance_id = _trace_digest(
+        {
+            'runtime_manifest_version': runtime_manifest_version,
+            'live_runtime_id': live_runtime_id,
+        },
+        'runtime-instance',
+    )
+    return {
+        'runtime_root': _safe_realpath(runtime_dir),
+        'runtime_preferred_root': _safe_realpath(runtime_state.get('preferred_runtime_dir') or ''),
+        'runtime_manifest_version': runtime_manifest_version,
+        'live_runtime_id': live_runtime_id,
+        'pending_runtime_id': pending_runtime_id,
+        'runtime_instance_id': runtime_instance_id,
+    }
+
 _RUNTIME_REQUIRED_IMPORTS = (
     ('torch', 'torch'),
     ('sentence_transformers', 'sentence-transformers'),
@@ -1277,8 +1482,60 @@ def _application_root_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _runtime_dir_path() -> Path:
-    return _application_root_dir() / 'runtime'
+def _preferred_runtime_dir_path() -> Path:
+    override = str(os.environ.get('OMNICLIP_RUNTIME_ROOT') or '').strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    if getattr(sys, 'frozen', False):
+        return _application_root_dir() / 'runtime'
+    base_root = default_data_root().resolve()
+    config_path = base_root / 'config.json'
+    try:
+        config_exists = config_path.exists()
+    except PermissionError:
+        config_exists = False
+    if config_exists:
+        try:
+            payload = json.loads(config_path.read_text(encoding='utf-8'))
+        except Exception:
+            payload = {}
+        configured_root = str(payload.get('data_root') or '').strip()
+        if configured_root:
+            try:
+                return Path(configured_root).expanduser().resolve() / 'shared' / 'runtime'
+            except Exception:
+                pass
+    return base_root / 'shared' / 'runtime'
+
+
+def _runtime_candidate_sort_key(path: Path) -> tuple[int, tuple[int, ...], float]:
+    name = path.name.strip()
+    version_match = re.search(r'v(\d+(?:\.\d+)*)', name, re.IGNORECASE)
+    modified_at = path.stat().st_mtime if path.exists() else 0.0
+    if version_match:
+        parts = tuple(int(part) for part in version_match.group(1).split('.') if part.isdigit())
+        return (3, parts, modified_at)
+    return (1 if name.lower() == 'runtime' else 0, (), modified_at)
+
+
+def _legacy_runtime_candidate_dirs() -> list[Path]:
+    app_dir = _application_root_dir()
+    candidates: list[Path] = []
+    current_local = app_dir / 'runtime'
+    if current_local.exists():
+        candidates.append(current_local)
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        ordered.append(candidate)
+    return ordered
 
 
 def _install_runtime_script_path() -> Path:
@@ -1441,7 +1698,7 @@ def _probe_runtime_semantic_core(runtime_dir: Path) -> dict[str, object] | None:
     script = (
         "import importlib, json, os, sys\n"
         "from pathlib import Path\n"
-        "result = {'torch_available': False, 'torch_version': '', 'torch_error': '', 'sentence_transformers_available': False, 'sentence_transformers_error': '', 'cuda_available': False, 'cuda_device_count': 0, 'cuda_name': ''}\n"
+        "result = {'torch_available': False, 'torch_version': '', 'torch_cuda_build': '', 'torch_error': '', 'sentence_transformers_available': False, 'sentence_transformers_error': '', 'cuda_available': False, 'cuda_device_count': 0, 'cuda_name': ''}\n"
         "existing = []\n"
         "roots = [Path(raw_root).resolve() for raw_root in sys.argv[1:]]\n"
         "for root in reversed(roots):\n"
@@ -1459,6 +1716,7 @@ def _probe_runtime_semantic_core(runtime_dir: Path) -> dict[str, object] | None:
         "    torch = importlib.import_module('torch')\n"
         "    result['torch_available'] = True\n"
         "    result['torch_version'] = str(getattr(torch, '__version__', '') or '')\n"
+        "    result['torch_cuda_build'] = str(getattr(getattr(torch, 'version', None), 'cuda', '') or '')\n"
         "    try:\n"
         "        result['cuda_available'] = bool(torch.cuda.is_available())\n"
         "    except Exception:\n"
@@ -1503,6 +1761,7 @@ def _probe_runtime_semantic_core_inprocess(runtime_dir: Path) -> dict[str, objec
     payload: dict[str, object] = {
         'torch_available': False,
         'torch_version': '',
+        'torch_cuda_build': '',
         'torch_error': '',
         'sentence_transformers_available': False,
         'sentence_transformers_error': '',
@@ -1527,6 +1786,7 @@ def _probe_runtime_semantic_core_inprocess(runtime_dir: Path) -> dict[str, objec
         else:
             payload['torch_available'] = True
             payload['torch_version'] = str(getattr(torch, '__version__', '') or '')
+            payload['torch_cuda_build'] = str(getattr(getattr(torch, 'version', None), 'cuda', '') or '')
             try:
                 payload['cuda_available'] = bool(torch.cuda.is_available())
             except Exception:
@@ -1744,9 +2004,12 @@ def _runtime_marker_exists(runtime_dir: Path, marker: str, *, include_pending: b
     return False
 
 
-def _inspect_runtime_layout_state() -> dict[str, object]:
-    runtime_dir = _runtime_dir_path()
-    runtime_dir_exists = runtime_dir.exists() and runtime_dir.is_dir()
+def _inspect_runtime_layout_state_for(runtime_dir: Path) -> dict[str, object]:
+    runtime_dir = Path(runtime_dir)
+    try:
+        runtime_dir_exists = runtime_dir.exists() and runtime_dir.is_dir()
+    except (OSError, PermissionError):
+        runtime_dir_exists = False
     runtime_dir_has_content = False
     if runtime_dir_exists:
         try:
@@ -1780,9 +2043,9 @@ def _runtime_component_missing_items(runtime_dir: Path, component_id: str) -> li
     ]
 
 
-def inspect_runtime_environment() -> dict[str, object]:
-    layout = _inspect_runtime_layout_state()
-    runtime_dir = Path(layout['runtime_dir'])
+def inspect_runtime_environment(runtime_dir: Path | None = None) -> dict[str, object]:
+    runtime_dir = Path(runtime_dir or _runtime_dir_path())
+    layout = _inspect_runtime_layout_state_for(runtime_dir)
     semantic_missing = _runtime_component_missing_items(runtime_dir, 'semantic-core') if layout['runtime_exists'] else list(_RUNTIME_COMPONENT_MODULES['semantic-core'])
     vector_missing = _runtime_component_missing_items(runtime_dir, 'vector-store') if layout['runtime_exists'] else list(_RUNTIME_COMPONENT_MODULES['vector-store'])
     missing_items = list(dict.fromkeys([*semantic_missing, *vector_missing]))
@@ -1790,7 +2053,30 @@ def inspect_runtime_environment() -> dict[str, object]:
         **layout,
         'runtime_complete': bool(layout['runtime_exists']) and bool(layout['runtime_has_content']) and not missing_items,
         'runtime_missing_items': missing_items,
+        'preferred_runtime_dir': _preferred_runtime_dir_path(),
     }
+
+
+def _discover_active_runtime_dir() -> Path:
+    preferred_runtime = _preferred_runtime_dir_path()
+    preferred_state = inspect_runtime_environment(preferred_runtime)
+    if preferred_state.get('runtime_complete'):
+        return preferred_runtime
+    for candidate in _legacy_runtime_candidate_dirs():
+        candidate_state = inspect_runtime_environment(candidate)
+        if candidate_state.get('runtime_complete'):
+            return candidate
+    if preferred_state.get('runtime_exists'):
+        return preferred_runtime
+    for candidate in _legacy_runtime_candidate_dirs():
+        candidate_state = inspect_runtime_environment(candidate)
+        if candidate_state.get('runtime_exists'):
+            return candidate
+    return preferred_runtime
+
+
+def _runtime_dir_path() -> Path:
+    return _discover_active_runtime_dir()
 
 
 def detect_acceleration(*, force_refresh: bool = False, safe_mode: bool = False) -> dict[str, object]:
@@ -1804,10 +2090,12 @@ def detect_acceleration(*, force_refresh: bool = False, safe_mode: bool = False)
 
         runtime_dir = _runtime_dir_path()
         runtime_state = inspect_runtime_environment()
+        runtime_meta = runtime_trace_metadata()
         semantic_missing = _runtime_component_missing_items(runtime_dir, 'semantic-core') if runtime_state['runtime_exists'] else list(_RUNTIME_COMPONENT_MODULES['semantic-core'])
         payload: dict[str, object] = {
             "torch_available": False,
             "torch_version": "",
+            "torch_cuda_build": "",
             "torch_error": "",
             "sentence_transformers_available": False,
             "sentence_transformers_error": "",
@@ -1825,6 +2113,26 @@ def detect_acceleration(*, force_refresh: bool = False, safe_mode: bool = False)
             'runtime_complete': runtime_state['runtime_complete'],
             'runtime_missing_items': list(runtime_state['runtime_missing_items']),
             'safe_mode': bool(safe_mode),
+            **runtime_meta,
+            'gpu_probe_state': 'not-run',
+            'gpu_probe_verified': False,
+            'gpu_probe_reason': '',
+            'gpu_probe_error_class': '',
+            'gpu_probe_error_message': '',
+            'gpu_probe_actual_device': '',
+            'gpu_probe_elapsed_ms': 0,
+            'gpu_probe_verified_at': '',
+            'gpu_probe_runtime_instance_id': '',
+            'gpu_execution_state': 'not-run',
+            'gpu_execution_verified': False,
+            'gpu_execution_reason': '',
+            'gpu_execution_error_class': '',
+            'gpu_execution_error_message': '',
+            'gpu_execution_actual_device': '',
+            'gpu_execution_reranker_actual_device': '',
+            'gpu_execution_elapsed_ms': 0,
+            'gpu_execution_verified_at': '',
+            'gpu_execution_runtime_instance_id': '',
         }
 
         gpu_names = _detect_nvidia_gpus()
@@ -1841,12 +2149,16 @@ def detect_acceleration(*, force_refresh: bool = False, safe_mode: bool = False)
             if payload['gpu_present']:
                 payload['device_options'] = ["auto", "cpu", "cuda"]
             payload['torch_error'] = 'safe startup deferred torch probe'
+            _merge_cached_gpu_probe_state(payload, runtime_dir, runtime_meta)
+            _merge_cached_gpu_execution_state(payload, runtime_dir, runtime_meta)
             return dict(payload)
 
         if semantic_missing:
             detail = ', '.join(semantic_missing[:6])
             payload['torch_error'] = f'semantic runtime files are incomplete: {detail}'
             payload['sentence_transformers_error'] = f'semantic runtime files are incomplete: {detail}'
+            _merge_cached_gpu_probe_state(payload, runtime_dir, runtime_meta)
+            _merge_cached_gpu_execution_state(payload, runtime_dir, runtime_meta)
             _ACCELERATION_CACHE = dict(payload)
             return dict(payload)
 
@@ -1861,6 +2173,7 @@ def detect_acceleration(*, force_refresh: bool = False, safe_mode: bool = False)
 
         payload['torch_available'] = bool(probe_payload.get('torch_available'))
         payload['torch_version'] = str(probe_payload.get('torch_version') or '')
+        payload['torch_cuda_build'] = str(probe_payload.get('torch_cuda_build') or '')
         payload['torch_error'] = str(probe_payload.get('torch_error') or '')
         payload['sentence_transformers_available'] = bool(probe_payload.get('sentence_transformers_available'))
         payload['sentence_transformers_error'] = str(probe_payload.get('sentence_transformers_error') or '')
@@ -1875,8 +2188,335 @@ def detect_acceleration(*, force_refresh: bool = False, safe_mode: bool = False)
         elif gpu_names:
             payload['recommended_device'] = 'cpu'
 
+        _merge_cached_gpu_probe_state(payload, runtime_dir, runtime_meta)
+        _merge_cached_gpu_execution_state(payload, runtime_dir, runtime_meta)
         _ACCELERATION_CACHE = dict(payload)
         return dict(payload)
+
+
+def _merge_cached_gpu_probe_state(payload: dict[str, object], runtime_dir: Path, runtime_meta: dict[str, object]) -> None:
+    state = _load_runtime_capability_state(runtime_dir)
+    probe = dict(state.get('gpu_probe') or {})
+    current_instance_id = str(runtime_meta.get('runtime_instance_id') or '')
+    probe_instance_id = str(probe.get('runtime_instance_id') or '')
+    if not probe:
+        payload['gpu_probe_state'] = 'not-run' if payload.get('gpu_present') else 'not-needed'
+        payload['gpu_probe_reason'] = '' if payload.get('gpu_present') else 'no_gpu_present'
+        return
+    if probe_instance_id and current_instance_id and probe_instance_id != current_instance_id:
+        payload['gpu_probe_state'] = 'stale'
+        payload['gpu_probe_reason'] = 'runtime_instance_changed'
+        payload['gpu_probe_runtime_instance_id'] = probe_instance_id
+        payload['gpu_probe_verified_at'] = str(probe.get('completed_at') or '')
+        return
+    success = bool(probe.get('success'))
+    state_value = str(probe.get('state') or '').strip().lower() or ('verified' if success else 'failed')
+    payload['gpu_probe_state'] = state_value
+    payload['gpu_probe_verified'] = success and state_value == 'verified'
+    payload['gpu_probe_reason'] = str(probe.get('reason') or '')
+    payload['gpu_probe_error_class'] = str(probe.get('execution_error_class') or '')
+    payload['gpu_probe_error_message'] = str(probe.get('execution_error_message') or '')
+    payload['gpu_probe_actual_device'] = str(probe.get('actual_device') or '')
+    payload['gpu_probe_elapsed_ms'] = int(probe.get('elapsed_ms') or 0)
+    payload['gpu_probe_verified_at'] = str(probe.get('completed_at') or '')
+    payload['gpu_probe_runtime_instance_id'] = probe_instance_id
+
+
+def _merge_cached_gpu_execution_state(payload: dict[str, object], runtime_dir: Path, runtime_meta: dict[str, object]) -> None:
+    state = _load_runtime_capability_state(runtime_dir)
+    probe = dict(state.get('gpu_query_probe') or {})
+    current_instance_id = str(runtime_meta.get('runtime_instance_id') or '')
+    probe_instance_id = str(probe.get('runtime_instance_id') or '')
+    if not probe:
+        payload['gpu_execution_state'] = 'not-run' if payload.get('gpu_present') else 'not-needed'
+        payload['gpu_execution_reason'] = '' if payload.get('gpu_present') else 'no_gpu_present'
+        return
+    if probe_instance_id and current_instance_id and probe_instance_id != current_instance_id:
+        payload['gpu_execution_state'] = 'stale'
+        payload['gpu_execution_reason'] = 'runtime_instance_changed'
+        payload['gpu_execution_runtime_instance_id'] = probe_instance_id
+        payload['gpu_execution_verified_at'] = str(probe.get('completed_at') or '')
+        return
+    success = bool(probe.get('success'))
+    state_value = str(probe.get('state') or '').strip().lower() or ('verified' if success else 'failed')
+    payload['gpu_execution_state'] = state_value
+    payload['gpu_execution_verified'] = success and state_value == 'verified'
+    payload['gpu_execution_reason'] = str(probe.get('reason') or '')
+    payload['gpu_execution_error_class'] = str(probe.get('execution_error_class') or '')
+    payload['gpu_execution_error_message'] = str(probe.get('execution_error_message') or '')
+    payload['gpu_execution_actual_device'] = str(probe.get('actual_device') or '')
+    payload['gpu_execution_reranker_actual_device'] = str(probe.get('reranker_actual_device') or '')
+    payload['gpu_execution_elapsed_ms'] = int(probe.get('elapsed_ms') or 0)
+    payload['gpu_execution_verified_at'] = str(probe.get('completed_at') or '')
+    payload['gpu_execution_runtime_instance_id'] = probe_instance_id
+
+
+def _torch_cuda_peak_memory(torch_module, device: str) -> int:
+    try:
+        cuda_module = getattr(torch_module, 'cuda', None)
+        if cuda_module is None or not hasattr(cuda_module, 'max_memory_allocated'):
+            return 0
+        return int(cuda_module.max_memory_allocated(device))
+    except Exception:
+        return 0
+
+
+def _torch_cuda_reset_peak_memory(torch_module, device: str) -> None:
+    try:
+        cuda_module = getattr(torch_module, 'cuda', None)
+        if cuda_module is not None and hasattr(cuda_module, 'reset_peak_memory_stats'):
+            cuda_module.reset_peak_memory_stats(device)
+    except Exception:
+        return
+
+
+def _torch_cuda_synchronize(torch_module, device: str) -> None:
+    try:
+        cuda_module = getattr(torch_module, 'cuda', None)
+        if cuda_module is not None and hasattr(cuda_module, 'synchronize'):
+            cuda_module.synchronize(device)
+    except TypeError:
+        cuda_module = getattr(torch_module, 'cuda', None)
+        if cuda_module is not None and hasattr(cuda_module, 'synchronize'):
+            cuda_module.synchronize()
+
+
+def _torch_make_probe_tensor(torch_module, *, device: str):
+    if hasattr(torch_module, 'ones'):
+        return torch_module.ones((4, 4), device=device)
+    if hasattr(torch_module, 'zeros'):
+        return torch_module.zeros((4, 4), device=device)
+    if hasattr(torch_module, 'tensor'):
+        return torch_module.tensor([[1.0, 1.0, 1.0, 1.0]] * 4, device=device)
+    raise RuntimeError('torch tensor factory is unavailable')
+
+
+def probe_runtime_gpu_execution(*, force_refresh: bool = False) -> dict[str, object]:
+    runtime_dir = _runtime_dir_path()
+    runtime_meta = runtime_trace_metadata()
+    if not force_refresh:
+        cached_payload = {
+            'gpu_present': bool(_detect_nvidia_gpus()),
+            'gpu_probe_state': 'not-run',
+        }
+        _merge_cached_gpu_probe_state(cached_payload, runtime_dir, runtime_meta)
+        if str(cached_payload.get('gpu_probe_state') or '').strip().lower() in {'verified', 'failed', 'stale', 'not-needed'}:
+            return {
+                'success': bool(cached_payload.get('gpu_probe_verified')),
+                'state': str(cached_payload.get('gpu_probe_state') or 'not-run'),
+                'reason': str(cached_payload.get('gpu_probe_reason') or ''),
+                'execution_error_class': str(cached_payload.get('gpu_probe_error_class') or ''),
+                'execution_error_message': str(cached_payload.get('gpu_probe_error_message') or ''),
+                'actual_device': str(cached_payload.get('gpu_probe_actual_device') or ''),
+                'elapsed_ms': int(cached_payload.get('gpu_probe_elapsed_ms') or 0),
+                'completed_at': str(cached_payload.get('gpu_probe_verified_at') or ''),
+                'runtime_instance_id': str(cached_payload.get('gpu_probe_runtime_instance_id') or ''),
+            }
+
+    started_at = time.perf_counter()
+    started_at_iso = _utc_now_iso()
+    payload: dict[str, object] = {
+        'probe_kind': 'gpu-smoke',
+        'started_at': started_at_iso,
+        'completed_at': '',
+        'runtime_instance_id': str(runtime_meta.get('runtime_instance_id') or ''),
+        'live_runtime_id': str(runtime_meta.get('live_runtime_id') or ''),
+        'success': False,
+        'state': 'not-run',
+        'reason': '',
+        'requested_device': 'cuda',
+        'resolved_device': 'cuda',
+        'actual_device': '',
+        'execution_error_class': '',
+        'execution_error_message': '',
+        'torch_import_ok': False,
+        'torch_version': '',
+        'torch_cuda_build': '',
+        'cuda_is_available': False,
+        'cuda_device_count': 0,
+        'cuda_name': '',
+        'cuda_peak_mem_before': 0,
+        'cuda_peak_mem_after': 0,
+        'cuda_peak_mem_delta': 0,
+        'elapsed_ms': 0,
+    }
+
+    gpu_names = _detect_nvidia_gpus()
+    if not gpu_names:
+        payload['state'] = 'not-needed'
+        payload['reason'] = 'no_gpu_present'
+        payload['completed_at'] = _utc_now_iso()
+        _write_runtime_capability_state(runtime_dir, {'gpu_probe': payload})
+        return payload
+
+    try:
+        with _runtime_import_environment(component_id='semantic-core'):
+            import torch
+
+            payload['torch_import_ok'] = True
+            payload['torch_version'] = str(getattr(torch, '__version__', '') or '')
+            torch_version_info = getattr(torch, 'version', None)
+            payload['torch_cuda_build'] = str(getattr(torch_version_info, 'cuda', '') or '')
+            payload['cuda_is_available'] = bool(getattr(torch, 'cuda').is_available())
+            payload['cuda_device_count'] = int(getattr(torch, 'cuda').device_count()) if payload['cuda_is_available'] else 0
+            payload['cuda_name'] = str(getattr(torch, 'cuda').get_device_name(0)) if payload['cuda_device_count'] > 0 else ''
+            if not payload['cuda_is_available'] or payload['cuda_device_count'] <= 0:
+                payload['state'] = 'failed'
+                payload['reason'] = 'cuda_unavailable'
+            else:
+                device_name = 'cuda:0'
+                payload['resolved_device'] = device_name
+                _torch_cuda_reset_peak_memory(torch, device_name)
+                payload['cuda_peak_mem_before'] = _torch_cuda_peak_memory(torch, device_name)
+                left = _torch_make_probe_tensor(torch, device=device_name)
+                right = _torch_make_probe_tensor(torch, device=device_name)
+                if hasattr(torch, 'matmul'):
+                    output = torch.matmul(left, right)
+                elif hasattr(torch, 'mm'):
+                    output = torch.mm(left, right)
+                else:
+                    output = left
+                _torch_cuda_synchronize(torch, device_name)
+                payload['cuda_peak_mem_after'] = _torch_cuda_peak_memory(torch, device_name)
+                payload['cuda_peak_mem_delta'] = max(int(payload['cuda_peak_mem_after']) - int(payload['cuda_peak_mem_before']), 0)
+                payload['actual_device'] = str(getattr(output, 'device', getattr(left, 'device', device_name)) or device_name)
+                payload['success'] = payload['actual_device'].startswith('cuda')
+                payload['state'] = 'verified' if payload['success'] else 'failed'
+                payload['reason'] = '' if payload['success'] else 'actual_device_not_cuda'
+                del output
+                del right
+                del left
+                try:
+                    if hasattr(torch, 'cuda') and hasattr(torch.cuda, 'empty_cache'):
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+    except Exception as exc:
+        payload['state'] = 'failed'
+        payload['reason'] = 'gpu_smoke_failed'
+        payload['execution_error_class'] = exc.__class__.__name__
+        payload['execution_error_message'] = str(exc).strip() or exc.__class__.__name__
+
+    payload['elapsed_ms'] = max(int((time.perf_counter() - started_at) * 1000), 0)
+    payload['completed_at'] = _utc_now_iso()
+    _write_runtime_capability_state(runtime_dir, {'gpu_probe': payload})
+    global _ACCELERATION_CACHE
+    if _ACCELERATION_CACHE is not None:
+        _ACCELERATION_CACHE = None
+    return payload
+
+
+def probe_runtime_gpu_query_execution(*, force_refresh: bool = False) -> dict[str, object]:
+    runtime_dir = _runtime_dir_path()
+    runtime_meta = runtime_trace_metadata()
+    if not force_refresh:
+        cached_payload = {
+            'gpu_present': bool(_detect_nvidia_gpus()),
+            'gpu_execution_state': 'not-run',
+        }
+        _merge_cached_gpu_execution_state(cached_payload, runtime_dir, runtime_meta)
+        if str(cached_payload.get('gpu_execution_state') or '').strip().lower() in {'verified', 'failed', 'stale', 'not-needed'}:
+            return {
+                'success': bool(cached_payload.get('gpu_execution_verified')),
+                'state': str(cached_payload.get('gpu_execution_state') or 'not-run'),
+                'reason': str(cached_payload.get('gpu_execution_reason') or ''),
+                'execution_error_class': str(cached_payload.get('gpu_execution_error_class') or ''),
+                'execution_error_message': str(cached_payload.get('gpu_execution_error_message') or ''),
+                'actual_device': str(cached_payload.get('gpu_execution_actual_device') or ''),
+                'reranker_actual_device': str(cached_payload.get('gpu_execution_reranker_actual_device') or ''),
+                'elapsed_ms': int(cached_payload.get('gpu_execution_elapsed_ms') or 0),
+                'completed_at': str(cached_payload.get('gpu_execution_verified_at') or ''),
+                'runtime_instance_id': str(cached_payload.get('gpu_execution_runtime_instance_id') or ''),
+            }
+
+    from .runtime_canary import run_gpu_query_canary
+
+    payload = dict(run_gpu_query_canary())
+    payload.setdefault('probe_kind', 'gpu-query-canary')
+    payload.setdefault('runtime_instance_id', str(runtime_meta.get('runtime_instance_id') or ''))
+    payload.setdefault('live_runtime_id', str(runtime_meta.get('live_runtime_id') or ''))
+    payload.setdefault('completed_at', _utc_now_iso())
+    _write_runtime_capability_state(runtime_dir, {'gpu_query_probe': payload})
+    global _ACCELERATION_CACHE
+    if _ACCELERATION_CACHE is not None:
+        _ACCELERATION_CACHE = None
+    return payload
+
+
+def runtime_management_snapshot(*, force_refresh: bool = False, verify_gpu: bool = False) -> dict[str, object]:
+    """Return a Runtime-page snapshot without forcing heavy probes unless asked.
+
+    Why: the Runtime page separates live-component refresh from expensive GPU
+    execution verification. A normal refresh should stay light/medium-weight and
+    reuse cached verification; explicit verification is the only path that runs
+    smoke + query canaries.
+    """
+
+    payload = detect_acceleration(force_refresh=force_refresh)
+    runtime_dir = _runtime_dir_path()
+    runtime_meta = runtime_trace_metadata()
+    _merge_cached_gpu_probe_state(payload, runtime_dir, runtime_meta)
+    _merge_cached_gpu_execution_state(payload, runtime_dir, runtime_meta)
+    if not verify_gpu:
+        return payload
+    if not bool(payload.get('gpu_present')):
+        payload['gpu_probe_state'] = 'not-needed'
+        payload['gpu_probe_verified'] = False
+        payload['gpu_probe_reason'] = 'no_gpu_present'
+        payload['gpu_execution_state'] = 'not-needed'
+        payload['gpu_execution_verified'] = False
+        payload['gpu_execution_reason'] = 'no_gpu_present'
+        return payload
+    if not bool(payload.get('torch_available')) or not bool(payload.get('sentence_transformers_available')):
+        payload['gpu_probe_state'] = 'failed'
+        payload['gpu_probe_verified'] = False
+        payload['gpu_probe_reason'] = 'semantic_runtime_unavailable'
+        payload['gpu_execution_state'] = 'blocked'
+        payload['gpu_execution_verified'] = False
+        payload['gpu_execution_reason'] = 'gpu_probe_failed'
+        return payload
+    if not bool(payload.get('cuda_available')):
+        payload['gpu_probe_state'] = 'failed'
+        payload['gpu_probe_verified'] = False
+        payload['gpu_probe_reason'] = 'cuda_unavailable'
+        payload['gpu_execution_state'] = 'blocked'
+        payload['gpu_execution_verified'] = False
+        payload['gpu_execution_reason'] = 'gpu_probe_failed'
+        return payload
+    probe = probe_runtime_gpu_execution(force_refresh=force_refresh)
+    payload['gpu_probe_state'] = str(probe.get('state') or 'not-run')
+    payload['gpu_probe_verified'] = bool(probe.get('success'))
+    payload['gpu_probe_reason'] = str(probe.get('reason') or '')
+    payload['gpu_probe_error_class'] = str(probe.get('execution_error_class') or '')
+    payload['gpu_probe_error_message'] = str(probe.get('execution_error_message') or '')
+    payload['gpu_probe_actual_device'] = str(probe.get('actual_device') or '')
+    payload['gpu_probe_elapsed_ms'] = int(probe.get('elapsed_ms') or 0)
+    payload['gpu_probe_verified_at'] = str(probe.get('completed_at') or '')
+    payload['gpu_probe_runtime_instance_id'] = str(probe.get('runtime_instance_id') or '')
+    payload['torch_cuda_build'] = str(probe.get('torch_cuda_build') or payload.get('torch_cuda_build') or '')
+    if not bool(probe.get('success')):
+        payload['gpu_execution_state'] = 'blocked'
+        payload['gpu_execution_verified'] = False
+        payload['gpu_execution_reason'] = 'gpu_probe_failed'
+        payload['gpu_execution_error_class'] = str(probe.get('execution_error_class') or '')
+        payload['gpu_execution_error_message'] = str(probe.get('execution_error_message') or '')
+        return payload
+    query_probe = probe_runtime_gpu_query_execution(force_refresh=force_refresh)
+    payload['gpu_execution_state'] = str(query_probe.get('state') or 'not-run')
+    payload['gpu_execution_verified'] = bool(query_probe.get('success'))
+    payload['gpu_execution_reason'] = str(query_probe.get('reason') or '')
+    payload['gpu_execution_error_class'] = str(query_probe.get('execution_error_class') or '')
+    payload['gpu_execution_error_message'] = str(query_probe.get('execution_error_message') or '')
+    payload['gpu_execution_actual_device'] = str(query_probe.get('actual_device') or '')
+    payload['gpu_execution_reranker_actual_device'] = str(query_probe.get('reranker_actual_device') or '')
+    payload['gpu_execution_elapsed_ms'] = int(query_probe.get('elapsed_ms') or 0)
+    payload['gpu_execution_verified_at'] = str(query_probe.get('completed_at') or '')
+    payload['gpu_execution_runtime_instance_id'] = str(query_probe.get('runtime_instance_id') or '')
+    return payload
+
+
+def refresh_runtime_capability_snapshot(*, force_refresh: bool = False) -> dict[str, object]:
+    return runtime_management_snapshot(force_refresh=force_refresh, verify_gpu=True)
 
 
 def get_device_options() -> list[str]:
@@ -1937,6 +2577,7 @@ def runtime_guidance_context(
     recommended_profile = 'cuda' if wants_gpu else 'cpu'
     app_dir = _application_root_dir()
     runtime_dir = Path(runtime_state['runtime_dir'])
+    install_target_dir = Path(runtime_state.get('preferred_runtime_dir') or runtime_dir)
     install_script = _install_runtime_script_path()
     source_urls = runtime_install_sources()
     official_command = build_runtime_install_command(recommended_profile, source='official', component='all')
@@ -2000,7 +2641,7 @@ def runtime_guidance_context(
         '',
         '怎么了',
         problem_line,
-        '- 现在要么还没检测到可直接使用的 CUDA 条件，要么当前程序目录下的 runtime 还没安装完整。',
+        '- 现在要么还没检测到可直接使用的 CUDA 条件，要么当前可用的 runtime 还没安装完整。',
         '',
         '为什么',
         f'- 这个轻量发布包没有内置 {runtime_name}、PyTorch、LanceDB、sentence-transformers、pyarrow 这类大型运行时。',
@@ -2016,7 +2657,7 @@ def runtime_guidance_context(
         f'- 官方命令（可复制）：{official_command}',
         f"- 镜像源（可复制）：{source_urls['mirror']}",
         f'- 镜像命令（可复制）：{mirror_command}',
-        f'- 会安装到：{runtime_dir}',
+        f'- 会安装到：{install_target_dir}',
         '- 安装后会发生什么：会先把 PyTorch、LanceDB、sentence-transformers、pyarrow、onnxruntime 等本地运行时下载到待应用目录；关闭一次程序后后台会自动切换到新组件，下一次打开时就能正常执行本地语义建库、向量查询和 GPU 加速。',
         f'- 预计落盘：{disk_usage}；预计下载：{download_usage}',
         '',
@@ -2349,6 +2990,16 @@ def _wait_for_controls(pause_event: threading.Event | None, cancel_event: thread
         if pause_event is None or not pause_event.is_set():
             return
         time.sleep(0.12)
+
+
+
+
+
+
+
+
+
+
 
 
 

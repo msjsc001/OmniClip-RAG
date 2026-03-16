@@ -6,10 +6,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
+from .canary_backend import CANARY_RERANKER_MODEL_ID, is_canary_reranker_model, rerank_score_tensor
 from .config import AppConfig, DataPaths
 from .errors import RuntimeDependencyError
 from .models import RerankOutcome, SearchHit
-from .vector_index import _configure_huggingface_environment, _normalize_model_dir_name, detect_acceleration, resolve_vector_device
+from .vector_index import _configure_huggingface_environment, _normalize_model_dir_name, _runtime_import_environment, _torch_cuda_peak_memory, _torch_cuda_reset_peak_memory, _torch_cuda_synchronize, detect_acceleration, resolve_vector_device
 
 
 class Reranker(Protocol):
@@ -100,7 +101,7 @@ class CrossEncoderReranker:
 
         while True:
             try:
-                scores = self._predict(pairs, used_device, batch_size)
+                scores, model_device, cuda_before, cuda_after, cuda_delta = self._predict(pairs, used_device, batch_size)
                 break
             except Exception as exc:
                 if _is_oom_error(exc) and used_device == 'cuda':
@@ -127,6 +128,7 @@ class CrossEncoderReranker:
                     degraded_to_cpu=degraded_to_cpu,
                     oom_recovered=oom_recovered,
                     skipped_reason=type(exc).__name__,
+                    fallback_reason='reranker_execution_failed',
                 )
 
         normalized_scores = _normalize_rerank_scores(scores or [])
@@ -153,19 +155,42 @@ class CrossEncoderReranker:
             model=self.config.reranker_model,
             requested_device=requested_device,
             resolved_device=used_device,
+            model_device=model_device,
+            actual_device=model_device or used_device,
             candidate_count=limit,
             reranked_count=len(rescored),
             batch_size=batch_size,
             elapsed_ms=max(int((time.perf_counter() - started_at) * 1000), 0),
             degraded_to_cpu=degraded_to_cpu,
             oom_recovered=oom_recovered,
+            fallback_reason='cuda_oom_to_cpu' if degraded_to_cpu else '',
+            cuda_peak_mem_before=cuda_before,
+            cuda_peak_mem_after=cuda_after,
+            cuda_peak_mem_delta=cuda_delta,
         )
         return rescored + suffix, outcome
 
-    def _predict(self, pairs: list[tuple[str, str]], device: str, batch_size: int) -> list[float]:
+    def _predict(self, pairs: list[tuple[str, str]], device: str, batch_size: int) -> tuple[list[float], str, int, int, int]:
         model = self._load_model(device)
-        raw_scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
-        return [float(value) for value in raw_scores]
+        model_device = _resolve_model_device(model, device)
+        cuda_before = 0
+        cuda_after = 0
+        cuda_delta = 0
+        if str(model_device or device).startswith('cuda'):
+            try:
+                with _runtime_import_environment(component_id='semantic-core'):
+                    import torch
+                _torch_cuda_reset_peak_memory(torch, str(model_device or device))
+                cuda_before = _torch_cuda_peak_memory(torch, str(model_device or device))
+                raw_scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
+                _torch_cuda_synchronize(torch, str(model_device or device))
+                cuda_after = _torch_cuda_peak_memory(torch, str(model_device or device))
+                cuda_delta = max(int(cuda_after) - int(cuda_before), 0)
+            except Exception:
+                raw_scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
+        else:
+            raw_scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
+        return [float(value) for value in raw_scores], str(model_device or device), cuda_before, cuda_after, cuda_delta
 
     def _load_model(self, device: str):
         cached = self._models.get(device)
@@ -201,9 +226,118 @@ class CrossEncoderReranker:
         return max(int(self.config.reranker_batch_size_cpu or 4), 1)
 
 
+class CanaryTorchReranker:
+    def __init__(self, config: AppConfig, paths: DataPaths) -> None:
+        self.config = config
+        self.paths = paths
+
+    def warmup(self, *, allow_download: bool = False) -> dict[str, object]:
+        del allow_download
+        requested_device = (self.config.vector_device or 'auto').strip().lower() or 'auto'
+        resolved_device = resolve_vector_device(requested_device)
+        return {
+            'backend': 'canary-cross-encoder',
+            'model': self.config.reranker_model,
+            'model_ready': True,
+            'requested_device': requested_device,
+            'resolved_device': resolved_device,
+            **detect_acceleration(),
+        }
+
+    def rerank(self, query_text: str, hits: list[SearchHit], candidate_limit: int) -> tuple[list[SearchHit], RerankOutcome]:
+        limit = max(min(int(candidate_limit or 0), len(hits)), 0)
+        requested_device = (self.config.vector_device or 'auto').strip().lower() or 'auto'
+        resolved_device = resolve_vector_device(requested_device)
+        if limit <= 1:
+            return hits, RerankOutcome(
+                enabled=True,
+                applied=False,
+                model=self.config.reranker_model,
+                requested_device=requested_device,
+                resolved_device=resolved_device,
+                candidate_count=limit,
+                reranked_count=limit,
+                skipped_reason='insufficient_candidates',
+            )
+        try:
+            with _runtime_import_environment(component_id='semantic-core'):
+                import torch
+            device_name = 'cuda:0' if resolved_device == 'cuda' else 'cpu'
+            cuda_before = 0
+            if device_name.startswith('cuda'):
+                _torch_cuda_reset_peak_memory(torch, device_name)
+                cuda_before = _torch_cuda_peak_memory(torch, device_name)
+            scores = [
+                float(rerank_score_tensor(torch, query_text, _compact_hit_text(hit, self.config.reranker_max_chars), device=device_name).item())
+                for hit in hits[:limit]
+            ]
+            if device_name.startswith('cuda'):
+                _torch_cuda_synchronize(torch, device_name)
+                cuda_after = _torch_cuda_peak_memory(torch, device_name)
+                cuda_delta = max(int(cuda_after) - int(cuda_before), 0)
+            else:
+                cuda_after = 0
+                cuda_delta = 0
+        except Exception as exc:
+            return hits, RerankOutcome(
+                enabled=True,
+                applied=False,
+                model=self.config.reranker_model,
+                requested_device=requested_device,
+                resolved_device=resolved_device,
+                candidate_count=limit,
+                reranked_count=0,
+                skipped_reason=exc.__class__.__name__,
+                fallback_reason='reranker_execution_failed',
+            )
+        normalized_scores = _normalize_rerank_scores(scores)
+        rescored: list[SearchHit] = []
+        for hit, rerank_score in zip(hits[:limit], normalized_scores, strict=True):
+            combined = hit.score * 0.35 + rerank_score * 0.65
+            rescored.append(
+                SearchHit(
+                    score=max(0.0, min(combined, 100.0)),
+                    title=hit.title,
+                    anchor=hit.anchor,
+                    source_path=hit.source_path,
+                    rendered_text=hit.rendered_text,
+                    chunk_id=hit.chunk_id,
+                    display_text=hit.display_text,
+                    preview_text=hit.preview_text,
+                    reason=hit.reason,
+                    source_family=hit.source_family,
+                    source_kind=hit.source_kind,
+                    source_label=hit.source_label,
+                    page_no=hit.page_no,
+                )
+            )
+        rescored.sort(key=lambda item: item.score, reverse=True)
+        return rescored + list(hits[limit:]), RerankOutcome(
+            enabled=True,
+            applied=True,
+            model=self.config.reranker_model,
+            requested_device=requested_device,
+            resolved_device=resolved_device,
+            model_device=device_name,
+            actual_device=device_name,
+            candidate_count=limit,
+            reranked_count=len(rescored),
+            batch_size=max(int(self.config.reranker_batch_size_cuda if device_name.startswith('cuda') else self.config.reranker_batch_size_cpu), 1),
+            elapsed_ms=0,
+            degraded_to_cpu=False,
+            oom_recovered=False,
+            fallback_reason='',
+            cuda_peak_mem_before=cuda_before,
+            cuda_peak_mem_after=cuda_after,
+            cuda_peak_mem_delta=cuda_delta,
+        )
+
+
 def create_reranker(config: AppConfig, paths: DataPaths, *, loader: Callable[[Path, str], object] | None = None) -> Reranker:
     if not getattr(config, 'reranker_enabled', False):
         return NullReranker(config, paths)
+    if is_canary_reranker_model(config.reranker_model):
+        return CanaryTorchReranker(config, paths)
     return CrossEncoderReranker(config, paths, loader=loader)
 
 
@@ -212,6 +346,8 @@ def get_local_reranker_dir(config: AppConfig, paths: DataPaths) -> Path:
 
 
 def is_local_reranker_ready(config: AppConfig, paths: DataPaths) -> bool:
+    if is_canary_reranker_model(config.reranker_model):
+        return True
     path = get_local_reranker_dir(config, paths)
     if not path.exists() or not (path / 'config.json').exists():
         return False
@@ -244,6 +380,20 @@ def _normalize_rerank_scores(scores: list[float]) -> list[float]:
 def _is_oom_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return 'out of memory' in message or 'cuda out of memory' in message
+
+
+def _resolve_model_device(model: object, fallback_device: str) -> str:
+    direct = getattr(model, 'device', None)
+    if direct:
+        return str(direct)
+    nested_model = getattr(model, 'model', None)
+    nested_device = getattr(nested_model, 'device', None)
+    if nested_device:
+        return str(nested_device)
+    target_device = getattr(model, '_target_device', None)
+    if target_device:
+        return str(target_device)
+    return str(fallback_device or 'cpu')
 
 
 def _clear_cuda_cache() -> None:

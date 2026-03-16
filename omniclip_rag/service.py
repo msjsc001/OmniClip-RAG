@@ -35,7 +35,7 @@ from .preflight import estimate_storage_for_vault
 from .runtime_recovery import record_runtime_incident
 from .storage import MetadataStore, _build_fts_query
 from .timing import BuildEtaTracker, append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
-from .vector_index import create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, prepare_local_model_snapshot, release_process_vector_resources, resolve_vector_device, runtime_dependency_issue
+from .vector_index import create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, prepare_local_model_snapshot, release_process_vector_resources, resolve_vector_device, runtime_dependency_issue, runtime_trace_metadata
 from .runtime_layout import list_pending_runtime_updates, load_runtime_component_registry, runtime_component_registry_path
 
 try:
@@ -878,6 +878,27 @@ class OmniClipService:
         return aliases.get(normalized, 'hybrid')
 
     @staticmethod
+    def _normalize_device_policy(device_policy: str | None, configured_device: str | None) -> str:
+        normalized = str(device_policy or '').strip().lower().replace('_', '-')
+        aliases = {
+            '': '',
+            'auto': 'prefer-cuda',
+            'prefer-cuda': 'prefer-cuda',
+            'prefer-gpu': 'prefer-cuda',
+            'cuda': 'prefer-cuda',
+            'gpu': 'prefer-cuda',
+            'prefer-cpu': 'prefer-cpu',
+            'cpu': 'prefer-cpu',
+            'require-cuda': 'require-cuda',
+            'require-gpu': 'require-cuda',
+        }
+        policy = aliases.get(normalized, '')
+        if policy:
+            return policy
+        configured = str(configured_device or 'auto').strip().lower()
+        return 'prefer-cuda' if configured in {'auto', 'cuda', 'gpu'} else 'prefer-cpu'
+
+    @staticmethod
     def _trace_json_line(label: str, payload: dict[str, object]) -> str:
         return f"{label} " + json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
@@ -902,47 +923,7 @@ class OmniClipService:
         return Path(__file__).resolve().parent.parent
 
     def _runtime_trace_metadata(self) -> dict[str, object]:
-        runtime_state = inspect_runtime_environment()
-        runtime_dir = Path(runtime_state.get('runtime_dir') or '')
-        registry_path = runtime_component_registry_path(runtime_dir)
-        registry_payload = load_runtime_component_registry(runtime_dir) if runtime_dir.exists() else {}
-        pending_updates = list_pending_runtime_updates(runtime_dir) if runtime_dir.exists() else []
-        manifest_payload: object = {}
-        if registry_path.exists():
-            try:
-                manifest_payload = json.loads(registry_path.read_text(encoding='utf-8'))
-            except Exception:
-                manifest_payload = {'registry_path': str(registry_path), 'invalid': True}
-        elif registry_payload:
-            manifest_payload = registry_payload
-        else:
-            manifest_payload = {'layout': 'legacy-or-empty'}
-        runtime_manifest_version = self._trace_digest(manifest_payload, 'runtime-manifest')
-        live_runtime_id = self._trace_digest(
-            {
-                'runtime_dir': self._safe_realpath(runtime_dir),
-                'registry': registry_payload,
-            },
-            'runtime-live',
-        )
-        pending_runtime_id = ''
-        if pending_updates:
-            pending_runtime_id = self._trace_digest(pending_updates, 'runtime-pending')
-        runtime_instance_id = self._trace_digest(
-            {
-                'runtime_manifest_version': runtime_manifest_version,
-                'live_runtime_id': live_runtime_id,
-                'exe_version': __version__,
-            },
-            'runtime-instance',
-        )
-        return {
-            'runtime_root': self._safe_realpath(runtime_dir),
-            'runtime_manifest_version': runtime_manifest_version,
-            'live_runtime_id': live_runtime_id,
-            'pending_runtime_id': pending_runtime_id,
-            'runtime_instance_id': runtime_instance_id,
-        }
+        return dict(runtime_trace_metadata())
 
     def _index_trace_metadata(self) -> dict[str, object]:
         index_state = self._read_index_state() or {}
@@ -989,6 +970,7 @@ class OmniClipService:
         query_id: str,
         query_text: str,
         query_mode: str,
+        device_policy: str,
         requested_families: set[str],
         profile: QueryProfile,
         threshold: float,
@@ -1007,6 +989,8 @@ class OmniClipService:
             'query_id': query_id,
             'query_text': query_text,
             'query_mode': query_mode,
+            'device_policy': device_policy,
+            'planned_device': 'cuda' if device_policy == 'require-cuda' else (str(self.config.vector_device or 'auto').strip().lower() or 'auto'),
             'allowed_families': sorted(requested_families),
             'lexical_enabled': bool('markdown' in requested_families and query_mode != 'vector-only'),
             'vector_enabled': bool('markdown' in requested_families and profile.use_vector and query_mode != 'lexical-only'),
@@ -1025,6 +1009,7 @@ class OmniClipService:
         vector_status: dict[str, object],
         fts_rows_in_scope: int,
         vector_rows_in_scope: int,
+        acceleration_payload: dict[str, object],
     ) -> dict[str, object]:
         runtime_meta = self._runtime_trace_metadata()
         index_meta = self._index_trace_metadata()
@@ -1057,6 +1042,11 @@ class OmniClipService:
             'vector_rows_in_scope': int(vector_rows_in_scope),
             'embedding_model_id': self.config.vector_model,
             'reranker_model_id': getattr(self.config, 'reranker_model', ''),
+            'resolved_device': resolve_vector_device(self.config.vector_device),
+            'torch_cuda_build': str(acceleration_payload.get('torch_cuda_build') or ''),
+            'cuda_is_available': bool(acceleration_payload.get('cuda_available')),
+            'gpu_execution_state': str(acceleration_payload.get('gpu_execution_state') or ''),
+            'gpu_execution_runtime_instance_id': str(acceleration_payload.get('gpu_execution_runtime_instance_id') or ''),
             'build_id': self._trace_digest(build_payload, 'build'),
             'exe_version': __version__,
         }
@@ -1080,6 +1070,7 @@ class OmniClipService:
         postfilter_drop_count: int,
         fallback_reason: str,
         stage_ms: dict[str, int],
+        vector_execution: dict[str, object],
     ) -> dict[str, object]:
         fts_query = _build_fts_query(query_text)
         reranker_applied = bool(getattr(reranker_outcome, 'applied', False)) if reranker_outcome is not None else False
@@ -1098,9 +1089,26 @@ class OmniClipService:
             'vector_candidates_raw': int(vector_candidates),
             'vector_exception_class': vector_exception_class,
             'vector_exception_message': vector_exception_message,
+            'vector_requested_device': str(vector_execution.get('requested_device') or (self.config.vector_device or 'auto')),
+            'vector_resolved_device': str(vector_execution.get('resolved_device') or resolve_vector_device(self.config.vector_device)),
+            'vector_model_device': str(vector_execution.get('model_device') or ''),
+            'vector_actual_device': str(vector_execution.get('actual_device') or ''),
+            'vector_cuda_peak_mem_before': int(vector_execution.get('cuda_peak_mem_before') or 0),
+            'vector_cuda_peak_mem_after': int(vector_execution.get('cuda_peak_mem_after') or 0),
+            'vector_cuda_peak_mem_delta': int(vector_execution.get('cuda_peak_mem_delta') or 0),
+            'vector_execution_error_class': str(vector_execution.get('execution_error_class') or ''),
+            'vector_execution_error_message': str(vector_execution.get('execution_error_message') or ''),
             'fusion_candidates_raw': int(fused_count),
             'reranker_applied': reranker_applied,
             'reranker_skip_reason': reranker_skip_reason,
+            'reranker_requested_device': str(getattr(reranker_outcome, 'requested_device', '') or ''),
+            'reranker_resolved_device': str(getattr(reranker_outcome, 'resolved_device', '') or ''),
+            'reranker_model_device': str(getattr(reranker_outcome, 'model_device', '') or ''),
+            'reranker_actual_device': str(getattr(reranker_outcome, 'actual_device', '') or ''),
+            'reranker_fallback_reason': str(getattr(reranker_outcome, 'fallback_reason', '') or ''),
+            'reranker_cuda_peak_mem_before': int(getattr(reranker_outcome, 'cuda_peak_mem_before', 0) or 0),
+            'reranker_cuda_peak_mem_after': int(getattr(reranker_outcome, 'cuda_peak_mem_after', 0) or 0),
+            'reranker_cuda_peak_mem_delta': int(getattr(reranker_outcome, 'cuda_peak_mem_delta', 0) or 0),
             'final_candidates_raw': int(final_candidates_raw),
             'final_after_filters': int(final_after_filters),
             'postfilter_drop_count': int(postfilter_drop_count),
@@ -1117,11 +1125,13 @@ class OmniClipService:
         allowed_families: list[str] | tuple[str, ...] | set[str] | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
         query_mode: str | None = None,
+        device_policy: str | None = None,
     ) -> QueryResult:
         requested_families = self._normalize_query_families(allowed_families)
         if not requested_families:
             raise RuntimeError('query_family_none_selected')
         normalized_query_mode = self._normalize_query_mode(query_mode)
+        normalized_device_policy = self._normalize_device_policy(device_policy, self.config.vector_device)
         started_at = time.perf_counter()
         limit = max(int(limit or self.config.query_limit or 0), 1)
         profile = build_query_profile(query_text, limit)
@@ -1139,6 +1149,7 @@ class OmniClipService:
                 'query_text': query_text,
                 'workspace_id': self.paths.workspace_id,
                 'mode': normalized_query_mode,
+                'device_policy': normalized_device_policy,
                 'limit': limit,
                 'at': time.time_ns(),
             },
@@ -1156,6 +1167,7 @@ class OmniClipService:
         trace_vector_error_class = ''
         trace_vector_table_ready: object = None
         trace_vector_query_executed = False
+        vector_execution: dict[str, object] = {}
         fallback_reason = ''
         stage_ms = {
             'lexical': 0,
@@ -1208,9 +1220,14 @@ class OmniClipService:
                             try:
                                 trace_vector_query_executed = True
                                 vector_candidates = {item.chunk_id: item.score for item in self.vector_index.search(query_text, vector_limit)}
+                                last_execution_fn = getattr(self.vector_index, 'last_execution_report', None)
+                                if callable(last_execution_fn):
+                                    vector_execution = dict(last_execution_fn() or {})
                                 trace_vector_candidates = len(vector_candidates)
                                 _emit_query_progress(on_progress, 'vector', percent=35, candidates=len(vector_candidates), limit=vector_limit)
-                                if resolve_vector_device(self.config.vector_device) == 'cpu':
+                                if str(vector_execution.get('actual_device') or '').startswith('cuda'):
+                                    runtime_warnings.append('markdown_vector_cuda_ready')
+                                elif resolve_vector_device(self.config.vector_device) == 'cpu':
                                     runtime_warnings.append('markdown_vector_cpu_ready')
                             except Exception as exc:
                                 trace_vector_error_class = exc.__class__.__name__
@@ -1277,6 +1294,17 @@ class OmniClipService:
         else:
             reranked_hits = fused_hits
             rerank_outcome = RerankOutcome(enabled=bool(getattr(self.config, 'reranker_enabled', False)), applied=False, skipped_reason='disabled' if normalized_query_mode != 'hybrid' else 'disabled')
+        if bool(getattr(rerank_outcome, 'applied', False)) and str(getattr(rerank_outcome, 'actual_device', '') or '').startswith('cuda'):
+            runtime_warnings.append('markdown_reranker_cuda_ready')
+        if normalized_device_policy == 'require-cuda':
+            vector_actual_device = str(vector_execution.get('actual_device') or '')
+            reranker_actual_device = str(getattr(rerank_outcome, 'actual_device', '') or '')
+            vector_cuda_ok = (not vector_query_planned) or vector_actual_device.startswith('cuda')
+            reranker_cuda_ok = (not reranker_enabled) or (not bool(getattr(rerank_outcome, 'applied', False))) or reranker_actual_device.startswith('cuda')
+            if not vector_cuda_ok or not reranker_cuda_ok:
+                runtime_warnings.append('markdown_cuda_execution_unverified')
+                if not fallback_reason:
+                    fallback_reason = 'require_cuda_unmet'
         stage_ms['rerank'] = max(int((time.perf_counter() - rerank_started_at) * 1000), 0)
         filtered_hits = [hit for hit in reranked_hits if hit.score >= threshold_floor]
         postfilter_drop_count = max(len(reranked_hits) - len(filtered_hits), 0)
@@ -1301,6 +1329,7 @@ class OmniClipService:
             query_id=query_id,
             query_text=query_text,
             query_mode=normalized_query_mode,
+            device_policy=normalized_device_policy,
             requested_families=requested_families,
             profile=profile,
             threshold=threshold_floor,
@@ -1308,10 +1337,12 @@ class OmniClipService:
             reranker_enabled=reranker_enabled,
             expected_steps=expected_steps,
         )
+        acceleration_payload = detect_acceleration(force_refresh=False)
         insights.query_fingerprint = self._build_query_fingerprint_payload(
             vector_status=vector_status,
             fts_rows_in_scope=fts_rows_in_scope,
             vector_rows_in_scope=vector_rows_in_scope,
+            acceleration_payload=acceleration_payload,
         )
         insights.query_stage = self._build_query_stage_payload(
             query_text=query_text,
@@ -1330,6 +1361,7 @@ class OmniClipService:
             postfilter_drop_count=postfilter_drop_count,
             fallback_reason=fallback_reason,
             stage_ms=stage_ms,
+            vector_execution=vector_execution,
         )
         insights.trace_lines = (
             self._trace_json_line('QUERY_PLAN', insights.query_plan),

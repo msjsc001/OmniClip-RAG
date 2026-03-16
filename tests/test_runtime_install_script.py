@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,15 @@ from omniclip_rag.vector_index import detect_acceleration, inspect_runtime_envir
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install_runtime.ps1"
 TEST_ROOT = ROOT / '.tmp' / 'test_runtime_install_script'
+
+
+def _runtime_root_patches(app_root: Path):
+    runtime_dir = app_root / 'runtime'
+    return patch.multiple(
+        'omniclip_rag.vector_index',
+        _application_root_dir=lambda: app_root,
+        _preferred_runtime_dir_path=lambda: runtime_dir,
+    )
 
 
 class RuntimeInstallScriptTests(unittest.TestCase):
@@ -33,6 +43,12 @@ class RuntimeInstallScriptTests(unittest.TestCase):
         self.assertIn("$utf8NoBom = New-Object System.Text.UTF8Encoding($false)", text)
         self.assertIn("[System.IO.File]::WriteAllText($requiredModulesPath, (($requiredModules | Where-Object { $_ }) -join [Environment]::NewLine), $utf8NoBom)", text)
         self.assertNotIn("System.Text.Json.JsonSerializer", text)
+
+
+    def test_runtime_install_script_keeps_semantic_core_profile_requested_by_caller(self) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("$effectiveProfile = $Profile", text)
+        self.assertNotIn("$effectiveProfile = if ($normalizedRequestedComponent -eq 'semantic-core') { 'cpu' } else { $Profile }", text)
 
     def test_runtime_probe_ignores_installer_stdlib_entries_from_bootstrap_metadata(self) -> None:
         app_root = TEST_ROOT / 'bootstrap_ignore_stdlib' / 'app'
@@ -64,7 +80,7 @@ class RuntimeInstallScriptTests(unittest.TestCase):
         write_pkg(runtime_dir, 'scipy', '')
         for module_name in ['torch', 'sentence_transformers', 'transformers', 'huggingface_hub', 'safetensors', 'numpy', 'scipy']:
             sys.modules.pop(module_name, None)
-        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
+        with _runtime_root_patches(app_root), \
              patch('omniclip_rag.vector_index._ACCELERATION_CACHE', None), \
              patch('omniclip_rag.vector_index._detect_nvidia_gpus', return_value=[]), \
              patch('omniclip_rag.vector_index._detect_nvcc_version', return_value=''):
@@ -114,7 +130,7 @@ class RuntimeInstallScriptTests(unittest.TestCase):
 
         for module_name in ['torch', 'sentence_transformers', 'transformers', 'huggingface_hub', 'safetensors', 'numpy', 'scipy']:
             sys.modules.pop(module_name, None)
-        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
+        with _runtime_root_patches(app_root), \
              patch('omniclip_rag.vector_index._ACCELERATION_CACHE', None), \
              patch('omniclip_rag.vector_index._detect_nvidia_gpus', return_value=[]), \
              patch('omniclip_rag.vector_index._detect_nvcc_version', return_value=''):
@@ -180,6 +196,7 @@ class RuntimeInstallScriptTests(unittest.TestCase):
                 '-ApplyPendingOnly',
             ],
             cwd=str(app_root),
+            env={**os.environ, 'OMNICLIP_RUNTIME_ROOT': str(runtime_dir)},
             capture_output=True,
             text=True,
             timeout=30,
@@ -194,7 +211,7 @@ class RuntimeInstallScriptTests(unittest.TestCase):
 
         for module_name in ['torch', 'sentence_transformers', 'transformers', 'huggingface_hub', 'safetensors', 'lancedb', 'onnxruntime', 'pyarrow', 'pandas', 'numpy', 'scipy']:
             sys.modules.pop(module_name, None)
-        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
+        with _runtime_root_patches(app_root), \
              patch('omniclip_rag.vector_index._ACCELERATION_CACHE', None), \
              patch('omniclip_rag.vector_index._detect_nvidia_gpus', return_value=[]), \
              patch('omniclip_rag.vector_index._detect_nvcc_version', return_value=''):
@@ -247,3 +264,4 @@ class RuntimeInstallScriptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

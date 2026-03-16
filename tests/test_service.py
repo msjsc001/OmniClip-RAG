@@ -10,7 +10,7 @@ from omniclip_rag import parser as parser_module
 from omniclip_rag.app_logging import shutdown_logging
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import BuildCancelledError, RuntimeDependencyError
-from omniclip_rag.models import SearchHit
+from omniclip_rag.models import RerankOutcome, SearchHit
 from omniclip_rag.retrieval_policy import build_query_profile
 from omniclip_rag.service import OmniClipService
 from omniclip_rag.timing import load_build_history
@@ -38,6 +38,19 @@ class _InjectVectorIndex(_StubVectorIndex):
         self.injected: list[SimpleNamespace] = []
     def search(self, query_text, limit):
         return list(self.injected[:limit])
+class _GpuVectorIndex(_InjectVectorIndex):
+    def last_execution_report(self):
+        return {
+            'requested_device': 'cuda',
+            'resolved_device': 'cuda',
+            'model_device': 'cuda:0',
+            'actual_device': 'cuda:0',
+            'cuda_peak_mem_before': 1024,
+            'cuda_peak_mem_after': 4096,
+            'cuda_peak_mem_delta': 3072,
+            'execution_error_class': '',
+            'execution_error_message': '',
+        }
 class _FailingVectorIndex(_StubVectorIndex):
     def __init__(self) -> None:
         super().__init__()
@@ -132,6 +145,22 @@ class _SlowVectorIndex(_StubVectorIndex):
                 'staged_write_rows': 0,
             })
         return None
+class _CudaReranker:
+    def rerank(self, query_text, hits, limit):
+        limited = list(hits[:limit])
+        return limited, RerankOutcome(
+            enabled=True,
+            applied=True,
+            requested_device='cuda',
+            resolved_device='cuda',
+            model_device='cuda:0',
+            actual_device='cuda:0',
+            candidate_count=len(hits),
+            reranked_count=len(limited),
+            cuda_peak_mem_before=2048,
+            cuda_peak_mem_after=8192,
+            cuda_peak_mem_delta=6144,
+        )
 class _LoweringReranker:
     def __init__(self) -> None:
         self.last_candidate_limit: int | None = None
@@ -267,6 +296,37 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn('markdown_vector_runtime_unavailable', result.insights.runtime_warnings)
         finally:
             service.close()
+
+    def test_markdown_query_reports_cuda_execution_when_vector_and_reranker_run_on_gpu(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_runtime_cuda_ready'))
+        config = AppConfig(
+            vault_path=str(SAMPLE_ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+            vector_device='cuda',
+            reranker_enabled=True,
+        )
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _GpuVectorIndex()
+        service.reranker = _CudaReranker()
+        try:
+            with patch.object(service, '_ensure_vector_runtime_ready', return_value=None), \
+                 patch('omniclip_rag.service.resolve_vector_device', return_value='cuda'):
+                service.rebuild_index()
+                chunk_row = service.store.connection.execute(
+                    "SELECT chunk_id FROM chunks ORDER BY chunk_id LIMIT 1"
+                ).fetchone()
+                self.assertIsNotNone(chunk_row)
+                service.vector_index.injected = [SimpleNamespace(chunk_id=chunk_row['chunk_id'], score=0.95)]
+                result = service.query('块嵌入', limit=5, score_threshold=0, allowed_families={'markdown'})
+            self.assertTrue(result.hits)
+            self.assertIn('markdown_vector_cuda_ready', result.insights.runtime_warnings)
+            self.assertIn('markdown_reranker_cuda_ready', result.insights.runtime_warnings)
+            self.assertEqual(result.insights.query_stage['vector_actual_device'], 'cuda:0')
+            self.assertEqual(result.insights.query_stage['reranker_actual_device'], 'cuda:0')
+        finally:
+            service.close()
+
     def test_single_character_query_skips_vector_noise(self) -> None:
         vault_copy = ROOT / ".tmp" / "single_char_vault_test"
         data_root = ROOT / ".tmp" / "single_char_data_test"

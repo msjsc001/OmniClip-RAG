@@ -18,6 +18,12 @@ class QueryTracePlanningTests(unittest.TestCase):
         self.assertEqual(OmniClipService._normalize_query_mode('lexical'), 'lexical-only')
         self.assertEqual(OmniClipService._normalize_query_mode('hybrid-no-rerank'), 'hybrid_no_rerank')
 
+    def test_normalize_device_policy_aliases(self) -> None:
+        self.assertEqual(OmniClipService._normalize_device_policy(None, 'auto'), 'prefer-cuda')
+        self.assertEqual(OmniClipService._normalize_device_policy('require_cuda', 'cpu'), 'require-cuda')
+        self.assertEqual(OmniClipService._normalize_device_policy('cpu', 'cuda'), 'prefer-cpu')
+        self.assertEqual(OmniClipService._normalize_device_policy('gpu', 'cpu'), 'prefer-cuda')
+
     def test_expected_steps_reflect_four_modes(self) -> None:
         profile = build_query_profile('我的思维', 30)
         lexical_steps = OmniClipService._query_expected_steps(

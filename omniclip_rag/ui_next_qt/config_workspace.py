@@ -34,7 +34,7 @@ from ..preflight import estimate_model_cache_bytes
 from ..service import WATCHDOG_AVAILABLE, OmniClipService
 from ..ui_i18n import text, tooltip
 from ..ui_shared import merge_page_filter_defaults
-from ..vector_index import build_runtime_install_command, detect_acceleration, get_local_model_dir, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, resolve_vector_device, runtime_component_catalog, runtime_component_status, runtime_component_usage, runtime_dependency_issue, runtime_guidance_context, runtime_install_sources
+from ..vector_index import build_runtime_install_command, detect_acceleration, get_local_model_dir, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, refresh_runtime_capability_snapshot, resolve_vector_device, runtime_component_catalog, runtime_component_status, runtime_component_usage, runtime_dependency_issue, runtime_guidance_context, runtime_install_sources, runtime_management_snapshot
 from ..reranker import get_local_reranker_dir, is_local_reranker_ready
 from ..extensions.models import (
     ExtensionDirectoryState,
@@ -87,6 +87,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._extension_task_key: str | None = None
         self._extension_active_source_key: tuple[str, str] | None = None
         self._extension_source_progress: dict[tuple[str, str], str] = {}
+        self._extension_source_summaries: dict[tuple[str, str], dict[str, object]] = {}
         self._extension_source_buttons: dict[tuple[str, str], list[QtWidgets.QAbstractButton]] = {}
         self._current_report = None
         self._latest_preflight_snapshot: dict[str, object] | None = None
@@ -106,6 +107,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._acceleration_payload: dict[str, object] | None = None
         self._device_probe_worker: FunctionWorker | None = None
         self._runtime_refresh_worker: FunctionWorker | None = None
+        self._runtime_verify_worker: FunctionWorker | None = None
         self._device_probe_scheduled = False
         self._device_runtime_prompt_suppressed = False
         self._live_runtime_sync_suppressed = False
@@ -1256,19 +1258,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
             },
         ]
 
-    def _runtime_component_install_target(self, component_id: str, *, context: dict[str, object] | None = None) -> tuple[str, str]:
-        if component_id == 'gpu-acceleration':
-            return 'semantic-core', 'cuda'
-        if component_id == 'semantic-core':
-            # Why: CPU semantic retrieval is the baseline capability. Presence of
-            # an NVIDIA GPU should not force users to download the much heavier
-            # CUDA build before advanced search can recover.
-            return 'semantic-core', 'cpu'
-        return component_id, 'cpu'
-
-    def _runtime_component_state(self, component_id: str, *, force_refresh: bool = False) -> dict[str, object]:
-        context = self._current_runtime_repair_context(force_refresh=force_refresh)
-        if component_id == 'gpu-acceleration':
+    def _runtime_component_state(self, component_id: str, *, force_refresh: bool = False, context: dict[str, object] | None = None) -> dict[str, object]:
+        context = dict(context or self._current_runtime_repair_context(force_refresh=force_refresh))
+        normalized_component = (component_id or '').strip().lower()
+        if normalized_component == 'gpu-acceleration':
             gpu_present = bool(context.get('gpu_present'))
             if not gpu_present:
                 return {
@@ -1281,31 +1274,64 @@ class ConfigWorkspace(QtWidgets.QWidget):
                     'cleanup_patterns': tuple(),
                     'disk_usage': self._tr('runtime_usage_not_needed'),
                     'download_usage': self._tr('runtime_usage_not_needed'),
+                    'install_state': 'not-needed',
+                    'probe_state': 'not-needed',
+                    'execution_state': 'not-needed',
+                    'execution_verified': False,
+                    'profile': '',
                 }
-            state = dict(runtime_component_status('semantic-core'))
-            pending_status = str(state.get('status') or '').strip().lower() == 'pending'
-            extra_failures: list[str] = []
-            if not pending_status:
-                if 'cuda_available' in context and not bool(context.get('cuda_available')):
-                    extra_failures.append(self._tr('runtime_missing_cuda_environment'))
-                if 'torch_available' in context and not bool(context.get('torch_available')):
-                    detail = str(context.get('torch_error') or self._tr('runtime_missing_unknown')).strip()
-                    extra_failures.append(f"torch（{detail}）")
-            missing_items = [str(item).strip() for item in list(state.get('missing_items') or []) if str(item).strip()]
-            for item in extra_failures:
-                if item not in missing_items:
-                    missing_items.append(item)
+            base_state = dict(runtime_component_status('semantic-core'))
+            semantic_profile = str(base_state.get('profile') or '').strip().lower()
+            torch_cuda_build = str(context.get('torch_cuda_build') or '').strip()
+            install_state = str(base_state.get('status') or 'missing').strip().lower() or 'missing'
+            install_ok = bool(base_state.get('ready')) and (semantic_profile == 'cuda' or (not semantic_profile and bool(torch_cuda_build)))
+            missing_items = [str(item).strip() for item in list(base_state.get('missing_items') or []) if str(item).strip()]
+            if bool(base_state.get('ready')) and not install_ok:
+                missing_items.append(self._tr('runtime_missing_gpu_semantic_profile_cpu'))
+            probe_state_raw = str(context.get('gpu_probe_state') or 'not-run').strip().lower() or 'not-run'
+            probe_verified = bool(context.get('gpu_probe_verified'))
+            probe_state = 'ready' if probe_verified else probe_state_raw
+            probe_reason = str(context.get('gpu_probe_reason') or '').strip()
+            probe_error = str(context.get('gpu_probe_error_message') or '').strip()
+            if install_ok and not probe_verified:
+                if probe_state_raw in {'not-run', 'stale'}:
+                    missing_items.append(self._tr('runtime_missing_gpu_probe_unverified'))
+                elif probe_state_raw in {'failed', 'blocked'}:
+                    detail = probe_error or probe_reason or self._tr('runtime_missing_unknown')
+                    missing_items.append(self._tr('runtime_missing_gpu_probe_failed', detail=detail))
+            execution_state_raw = str(context.get('gpu_execution_state') or 'not-run').strip().lower() or 'not-run'
+            execution_verified = bool(context.get('gpu_execution_verified'))
+            # Keep the raw execution_state (e.g. 'verified') for diagnostics/tests.
+            # Overall readiness is derived from execution_verified + install/probe gates.
+            execution_state = execution_state_raw
+            execution_reason = str(context.get('gpu_execution_reason') or '').strip()
+            execution_error = str(context.get('gpu_execution_error_message') or '').strip()
+            if install_ok and probe_verified and not execution_verified:
+                if execution_state_raw in {'not-run', 'stale'}:
+                    missing_items.append(self._tr('runtime_missing_gpu_execution_unverified'))
+                elif execution_state_raw in {'failed', 'blocked'}:
+                    reason = execution_error or execution_reason or self._tr('runtime_missing_unknown')
+                    missing_items.append(self._tr('runtime_missing_gpu_execution_failed', detail=reason))
+            state = dict(base_state)
             state['component_id'] = component_id
-            state['missing_items'] = missing_items
-            cuda_ready = bool(context.get('cuda_available')) if 'cuda_available' in context else True
-            state['ready'] = bool(state.get('ready')) and not extra_failures and cuda_ready
-            if pending_status:
-                state['ready'] = False
+            state['missing_items'] = list(dict.fromkeys(item for item in missing_items if item))
+            state['install_state'] = install_state
+            state['probe_state'] = probe_state
+            state['probe_verified'] = probe_verified
+            state['probe_reason'] = probe_reason
+            state['probe_error'] = probe_error
+            state['execution_state'] = execution_state
+            state['execution_verified'] = execution_verified
+            state['execution_reason'] = execution_reason
+            state['execution_error'] = execution_error
+            state['profile'] = semantic_profile
+            state['ready'] = install_ok and probe_verified and execution_verified
+            if install_state == 'pending':
                 state['status'] = 'pending'
             elif state['ready']:
                 state['status'] = 'ready'
-            elif missing_items:
-                state['status'] = 'missing' if int(state.get('installed_count', 0) or 0) <= 0 else 'incomplete'
+            else:
+                state['status'] = 'missing' if int(base_state.get('installed_count', 0) or 0) <= 0 else 'incomplete'
             usage = runtime_component_usage('semantic-core', 'cuda')
             state['disk_usage'] = usage.get('disk_usage', '')
             state['download_usage'] = usage.get('download_usage', '')
@@ -1314,7 +1340,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         state = dict(runtime_component_status(component_id))
         pending_status = str(state.get('status') or '').strip().lower() == 'pending'
         extra_failures: list[str] = []
-        if component_id == 'semantic-core' and not pending_status:
+        if normalized_component == 'semantic-core' and not pending_status:
             if 'torch_available' in context and not bool(context.get('torch_available')):
                 detail = str(context.get('torch_error') or self._tr('runtime_missing_unknown')).strip()
                 extra_failures.append(f"torch（{detail}）")
@@ -1339,6 +1365,20 @@ class ConfigWorkspace(QtWidgets.QWidget):
         state['download_usage'] = usage.get('download_usage', '')
         return state
 
+    def _runtime_component_install_target(self, component_id: str, *, context: dict[str, object] | None = None) -> tuple[str, str]:
+        context = dict(context or self._current_runtime_repair_context(force_refresh=False))
+        normalized = (component_id or 'all').strip().lower() or 'all'
+        recommended = str(context.get('recommended_profile') or 'cpu').strip().lower() or 'cpu'
+        if normalized == 'gpu-acceleration':
+            return 'semantic-core', 'cuda'
+        if normalized == 'semantic-core':
+            return 'semantic-core', 'cpu'
+        if normalized == 'vector-store':
+            return 'vector-store', 'cpu'
+        if normalized == 'all':
+            return 'all', recommended
+        return 'semantic-core', 'cpu'
+
     def _runtime_status_text(self, status: str) -> str:
         normalized = ((status or 'missing').strip().lower() or 'missing').replace('-', '_')
         return self._tr(f'runtime_status_{normalized}')
@@ -1362,28 +1402,40 @@ class ConfigWorkspace(QtWidgets.QWidget):
         action_layout.setHorizontalSpacing(8)
         action_layout.setVerticalSpacing(8)
         component_id = descriptor['component_id']
+        busy = self._runtime_refresh_worker is not None or self._runtime_verify_worker is not None
 
         repair_button = QtWidgets.QPushButton(self._tr('runtime_row_repair'), container)
         self._set_button_variant(repair_button, 'secondary')
         repair_button.setMinimumHeight(scaled(self._theme, 30, minimum=28))
         repair_button.clicked.connect(lambda _checked=False, c=component_id: self._open_runtime_component_repair(c))
+        repair_button.setEnabled(not busy)
         action_layout.addWidget(repair_button, 0, 0)
 
         clear_button = QtWidgets.QPushButton(self._tr('runtime_row_clear'), container)
         self._set_button_variant(clear_button, 'danger')
         clear_button.setMinimumHeight(scaled(self._theme, 30, minimum=28))
         clear_button.clicked.connect(lambda _checked=False, c=component_id: self._clear_runtime_component(c))
+        clear_button.setEnabled(not busy)
         action_layout.addWidget(clear_button, 0, 1)
 
         if component_id == 'gpu-acceleration' and str(state.get('status') or '').strip().lower() == 'not-needed':
             clear_button.setEnabled(False)
             repair_button.setEnabled(False)
 
-        refresh_button = QtWidgets.QPushButton(self._tr('runtime_row_refresh'), container)
-        self._set_button_variant(refresh_button, 'secondary')
-        refresh_button.setMinimumHeight(scaled(self._theme, 30, minimum=28))
-        refresh_button.clicked.connect(self._request_runtime_management_refresh)
-        action_layout.addWidget(refresh_button, 1, 0, 1, 2)
+        if component_id == 'gpu-acceleration' and str(state.get('status') or '').strip().lower() != 'not-needed':
+            verify_button = QtWidgets.QPushButton(self._tr('runtime_row_verify'), container)
+            self._set_button_variant(verify_button, 'secondary')
+            verify_button.setMinimumHeight(scaled(self._theme, 30, minimum=28))
+            verify_button.clicked.connect(self._request_runtime_gpu_verification)
+            verify_button.setEnabled(not busy)
+            action_layout.addWidget(verify_button, 1, 0, 1, 2)
+        else:
+            refresh_button = QtWidgets.QPushButton(self._tr('runtime_row_refresh'), container)
+            self._set_button_variant(refresh_button, 'secondary')
+            refresh_button.setMinimumHeight(scaled(self._theme, 30, minimum=28))
+            refresh_button.clicked.connect(self._request_runtime_management_refresh)
+            refresh_button.setEnabled(not busy)
+            action_layout.addWidget(refresh_button, 1, 0, 1, 2)
         return container
 
     def _fit_table_to_contents(self, table: QtWidgets.QTableWidget, *, minimum_height: int = 180, extra_padding: int = 8) -> None:
@@ -1396,7 +1448,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
 
 
     def _request_runtime_management_refresh(self, _checked: bool = False) -> None:
-        if self._runtime_refresh_worker is not None:
+        if self._runtime_refresh_worker is not None or self._runtime_verify_worker is not None:
             return
         runtime_state = inspect_runtime_environment()
         pending_components = list(runtime_state.get('runtime_pending_components') or [])
@@ -1409,7 +1461,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if hasattr(self, 'runtime_status_summary_label'):
             self.runtime_status_summary_label.setText(self._tr('runtime_refresh_running'))
         self.statusMessageChanged.emit(self._tr('runtime_refresh_running'))
-        worker = FunctionWorker(fn=lambda: detect_acceleration(force_refresh=True))
+        worker = FunctionWorker(fn=lambda: runtime_management_snapshot(force_refresh=True, verify_gpu=False))
         self._runtime_refresh_worker = worker
         worker.succeeded.connect(self._handle_runtime_management_refresh_success)
         worker.failed.connect(self._handle_runtime_management_refresh_failure)
@@ -1419,7 +1471,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _handle_runtime_management_refresh_success(self, payload: object) -> None:
         payload_dict = dict(payload or {}) if isinstance(payload, dict) else {}
         self._acceleration_payload = payload_dict or None
-        self._refresh_runtime_management_ui(force_refresh=False)
+        context = self._current_runtime_repair_context(force_refresh=False)
+        self._refresh_runtime_management_ui(force_refresh=False, context=context)
         if payload_dict:
             self._refresh_device_options(payload_dict)
         self.statusMessageChanged.emit(self._tr('runtime_refresh_done'))
@@ -1433,14 +1486,60 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._runtime_refresh_worker = None
         if hasattr(self, 'runtime_refresh_button'):
             self.runtime_refresh_button.setEnabled(True)
+        self._refresh_runtime_management_ui(force_refresh=False)
 
-    def _populate_runtime_component_table(self, *, force_refresh: bool = False) -> None:
+    def _request_runtime_gpu_verification(self, _checked: bool = False) -> None:
+        if self._runtime_refresh_worker is not None or self._runtime_verify_worker is not None:
+            return
+        runtime_state = inspect_runtime_environment()
+        pending_components = list(runtime_state.get('runtime_pending_components') or [])
+        if pending_components:
+            self._refresh_runtime_management_ui(force_refresh=False)
+            self.statusMessageChanged.emit(self._tr('runtime_refresh_pending', components=', '.join(pending_components)))
+            return
+        if hasattr(self, 'runtime_refresh_button'):
+            self.runtime_refresh_button.setEnabled(False)
+        if hasattr(self, 'runtime_status_summary_label'):
+            self.runtime_status_summary_label.setText(self._tr('runtime_verify_running'))
+        self.statusMessageChanged.emit(self._tr('runtime_verify_running'))
+        worker = FunctionWorker(fn=lambda: runtime_management_snapshot(force_refresh=True, verify_gpu=True))
+        self._runtime_verify_worker = worker
+        worker.succeeded.connect(self._handle_runtime_gpu_verification_success)
+        worker.failed.connect(self._handle_runtime_gpu_verification_failure)
+        worker.finished.connect(self._on_runtime_gpu_verification_finished)
+        worker.start()
+
+    def _handle_runtime_gpu_verification_success(self, payload: object) -> None:
+        payload_dict = dict(payload or {}) if isinstance(payload, dict) else {}
+        self._acceleration_payload = payload_dict or None
+        context = self._current_runtime_repair_context(force_refresh=False)
+        self._refresh_runtime_management_ui(force_refresh=False, context=context)
+        if payload_dict:
+            self._refresh_device_options(payload_dict)
+        if bool(payload_dict.get('gpu_execution_verified')):
+            self.statusMessageChanged.emit(self._tr('runtime_verify_done'))
+        else:
+            detail = str(payload_dict.get('gpu_execution_error_message') or payload_dict.get('gpu_execution_reason') or self._tr('runtime_missing_unknown')).strip()
+            self.statusMessageChanged.emit(self._tr('runtime_verify_failed', error=detail))
+
+    def _handle_runtime_gpu_verification_failure(self, message: str, _traceback_text: str) -> None:
+        text_value = str(message or '').strip() or self._tr('runtime_missing_unknown')
+        self.statusMessageChanged.emit(self._tr('runtime_verify_failed', error=text_value))
+        self._append_log(self._tr('runtime_verify_failed', error=text_value))
+
+    def _on_runtime_gpu_verification_finished(self) -> None:
+        self._runtime_verify_worker = None
+        if hasattr(self, 'runtime_refresh_button'):
+            self.runtime_refresh_button.setEnabled(True)
+        self._refresh_runtime_management_ui(force_refresh=False)
+
+    def _populate_runtime_component_table(self, *, force_refresh: bool = False, context: dict[str, object] | None = None) -> None:
         if not hasattr(self, 'runtime_components_table'):
             return
         table = self.runtime_components_table
         table.setRowCount(0)
         for row, descriptor in enumerate(self._runtime_component_descriptors()):
-            state = self._runtime_component_state(descriptor['component_id'], force_refresh=force_refresh)
+            state = self._runtime_component_state(descriptor['component_id'], force_refresh=force_refresh, context=context)
             table.insertRow(row)
             name_item = QtWidgets.QTableWidgetItem(descriptor['name'])
             name_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
@@ -1461,11 +1560,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._fit_table_to_contents(table, minimum_height=minimum_height, extra_padding=extra_padding)
         QtCore.QTimer.singleShot(0, lambda table=table, minimum_height=minimum_height, extra_padding=extra_padding: self._fit_table_to_contents(table, minimum_height=minimum_height, extra_padding=extra_padding))
 
-    def _refresh_runtime_management_ui(self, *, force_refresh: bool = False) -> None:
-        context = self._current_runtime_repair_context(force_refresh=force_refresh)
-        semantic_state = self._runtime_component_state('semantic-core', force_refresh=force_refresh)
-        vector_state = self._runtime_component_state('vector-store', force_refresh=force_refresh)
-        gpu_state = self._runtime_component_state('gpu-acceleration', force_refresh=force_refresh)
+    def _refresh_runtime_management_ui(self, *, force_refresh: bool = False, context: dict[str, object] | None = None) -> None:
+        context = dict(context or self._current_runtime_repair_context(force_refresh=force_refresh))
+        semantic_state = self._runtime_component_state('semantic-core', force_refresh=force_refresh, context=context)
+        vector_state = self._runtime_component_state('vector-store', force_refresh=force_refresh, context=context)
+        gpu_state = self._runtime_component_state('gpu-acceleration', force_refresh=force_refresh, context=context)
         overall_ready = bool(semantic_state.get('ready')) and bool(vector_state.get('ready'))
         gpu_present = bool(context.get('gpu_present'))
         full_ready = overall_ready and gpu_present and bool(gpu_state.get('ready'))
@@ -1496,7 +1595,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             elif full_ready:
                 summary = self._tr('runtime_page_summary_ready')
             elif overall_ready:
-                summary = self._tr('runtime_page_summary_ready_cpu')
+                summary = f"{self._tr('runtime_page_summary_ready_cpu')}\n{self._tr('runtime_page_summary_gpu_pending', detail=self._runtime_missing_text(gpu_state))}"
             elif context.get('runtime_exists'):
                 summary = self._tr('runtime_page_summary_incomplete', items=missing_summary or self._tr('runtime_missing_unknown'))
             else:
@@ -1511,7 +1610,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.runtime_status_summary_label.setText(summary)
         if hasattr(self, 'runtime_root_label'):
             self.runtime_root_label.setText(self._tr('runtime_root_label', path=runtime_dir or self._tr('none_value')))
-        self._populate_runtime_component_table(force_refresh=force_refresh)
+        self._populate_runtime_component_table(force_refresh=force_refresh, context=context)
 
     def focus_runtime_management(self) -> None:
         if hasattr(self, 'sub_tabs') and hasattr(self, 'runtime_page'):
@@ -1845,7 +1944,93 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return self._tr('extensions_progress_missing')
         if source.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
             return self._tr('extensions_progress_pending_cleanup')
+        summary = self._extension_source_summaries.get((pipeline, normalize_vault_path(source.path)))
+        if summary and bool(summary.get('has_indexed_data')):
+            return self._tr(
+                'extensions_progress_indexed_summary',
+                files=int(summary.get('indexed_files', 0) or 0),
+                chunks=int(summary.get('indexed_chunks', 0) or 0),
+            )
         return self._tr('extensions_progress_idle')
+
+    def _refresh_extension_source_summaries(self, config: AppConfig | None = None, paths=None) -> None:
+        config_value = config or self._config
+        paths_value = paths or self._paths
+        summaries: dict[tuple[str, str], dict[str, object]] = {}
+        try:
+            service = ExtensionService(config_value, paths_value, runtime_manager=self._tika_runtime_manager)
+            pdf_paths = [
+                normalize_vault_path(source.path)
+                for source in self._extension_state.pdf_config.source_directories
+                if normalize_vault_path(source.path)
+            ]
+            tika_paths = [
+                normalize_vault_path(source.path)
+                for source in self._extension_state.tika_config.source_directories
+                if normalize_vault_path(source.path)
+            ]
+            for path, summary in service.run_pdf_source_summaries(source_paths=pdf_paths).items():
+                summaries[('pdf', normalize_vault_path(path))] = {
+                    'source_path': str(getattr(summary, 'source_path', '') or path),
+                    'indexed_files': int(getattr(summary, 'indexed_files', 0) or 0),
+                    'indexed_chunks': int(getattr(summary, 'indexed_chunks', 0) or 0),
+                    'vector_documents': int(getattr(summary, 'vector_documents', 0) or 0),
+                    'last_indexed_mtime': float(getattr(summary, 'last_indexed_mtime', 0.0) or 0.0),
+                    'has_indexed_data': bool(getattr(summary, 'has_indexed_data', False)),
+                }
+            for path, summary in service.run_tika_source_summaries(source_paths=tika_paths).items():
+                summaries[('tika', normalize_vault_path(path))] = {
+                    'source_path': str(getattr(summary, 'source_path', '') or path),
+                    'indexed_files': int(getattr(summary, 'indexed_files', 0) or 0),
+                    'indexed_chunks': int(getattr(summary, 'indexed_chunks', 0) or 0),
+                    'vector_documents': int(getattr(summary, 'vector_documents', 0) or 0),
+                    'last_indexed_mtime': float(getattr(summary, 'last_indexed_mtime', 0.0) or 0.0),
+                    'has_indexed_data': bool(getattr(summary, 'has_indexed_data', False)),
+                }
+        except Exception as exc:
+            LOGGER.warning('Failed to refresh extension source summaries: %s', exc)
+        self._extension_source_summaries = summaries
+
+    def _extension_source_stage_text(self, pipeline: str, stage_status: str) -> str:
+        normalized = str(stage_status or '').strip().lower()
+        if normalized == 'scan_sources':
+            return self._tr('extensions_progress_stage_scanning')
+        if normalized == 'parse_tika':
+            return self._tr('extensions_progress_stage_parsing_tika')
+        if normalized == 'parse_pdf':
+            return self._tr('extensions_progress_stage_parsing_pdf')
+        if normalized == 'write_vector':
+            return self._tr('extensions_progress_stage_writing_vector')
+        if normalized == 'finalizing':
+            return self._tr('extensions_progress_stage_finalizing')
+        if normalized == 'cleanup_existing':
+            return self._tr('extensions_progress_stage_cleanup')
+        return self._extension_pipeline_label(pipeline)
+
+    def _choose_extension_source_build_mode(self, pipeline: str, source_path: str) -> str | None:
+        summary = self._extension_source_summaries.get((pipeline, normalize_vault_path(source_path)))
+        if not summary or not bool(summary.get('has_indexed_data')):
+            return 'rebuild'
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(self._tr('extensions_source_existing_index_title'))
+        box.setText(
+            self._tr(
+                'extensions_source_existing_index_body',
+                files=int(summary.get('indexed_files', 0) or 0),
+                chunks=int(summary.get('indexed_chunks', 0) or 0),
+            )
+        )
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        update_button = box.addButton(self._tr('extensions_source_existing_index_update'), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        rebuild_button = box.addButton(self._tr('extensions_source_existing_index_rebuild'), QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(self._tr('cancel'), QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is update_button:
+            return 'scan_once'
+        if clicked is rebuild_button:
+            return 'rebuild'
+        return None
 
     def _extension_source_table_for_pipeline(self, pipeline: str) -> QtWidgets.QTableWidget:
         return self.ext_tika_source_table if pipeline == 'tika' else self.ext_pdf_source_table
@@ -2044,13 +2229,39 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _handle_extension_source_progress(self, pipeline: str, source_path: str, payload: object) -> None:
         if not isinstance(payload, dict):
             return
+        stage_label = self._extension_source_stage_text(pipeline, str(payload.get('stage_status') or ''))
         percent = float(payload.get('overall_percent') or 0.0)
         current = int(payload.get('current') or 0)
         total = int(payload.get('total') or 0)
+        processed_files = int(payload.get('processed_files') or 0)
+        skipped_files = int(payload.get('skipped_files') or 0)
+        error_count = int(payload.get('error_count') or 0)
+        deleted_files = int(payload.get('deleted_files') or 0)
+        current_path = str(payload.get('current_path') or '').strip()
+        current_name = Path(current_path).name if current_path else ''
         if total > 0:
-            message = self._tr('extensions_progress_running_counts', percent=percent, current=current, total=total)
+            message = self._tr(
+                'extensions_progress_stage_counts',
+                stage=stage_label,
+                percent=percent,
+                current=current,
+                total=total,
+                processed=processed_files,
+                skipped=skipped_files,
+                errors=error_count,
+            )
         else:
-            message = self._tr('extensions_progress_running_percent', percent=percent)
+            message = self._tr('extensions_progress_stage_percent', stage=stage_label, percent=percent)
+        detail_lines: list[str] = []
+        if current_name:
+            detail_lines.append(self._tr('extensions_progress_current_file', name=current_name))
+        if deleted_files:
+            detail_lines.append(self._tr('extensions_progress_deleted_count', count=deleted_files))
+        detail_lines.append(
+            self._tr('extensions_progress_close_safe' if bool(payload.get('close_safe')) else 'extensions_progress_close_busy')
+        )
+        if detail_lines:
+            message = '\n'.join([message, *detail_lines])
         self._set_extension_source_progress(pipeline, source_path, message)
 
     def _run_extension_source_preflight(self, pipeline: str, source_path: str) -> None:
@@ -2086,6 +2297,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_row_scan_once'), pipeline=self._extension_pipeline_label(pipeline)))
 
     def _run_extension_source_rebuild(self, pipeline: str, source_path: str) -> None:
+        build_mode = self._choose_extension_source_build_mode(pipeline, source_path)
+        if build_mode == 'scan_once':
+            self._run_extension_source_scan_once(pipeline, source_path)
+            return
+        if build_mode is None:
+            return
         try:
             config, paths = self._collect_config(False)
         except Exception as exc:
@@ -2153,6 +2370,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             LOGGER.warning('Failed to load extension registry: %s', exc)
             self._extension_state_loaded = False
             self._extension_state = ExtensionRegistryState()
+        self._refresh_extension_source_summaries(self._config, paths)
         if hasattr(self, 'ext_pdf_enabled_check'):
             self._apply_extension_state_to_controls()
             self._schedule_tika_runtime_refresh()
@@ -2629,6 +2847,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         except OSError as exc:
             QtWidgets.QMessageBox.critical(self, self._tr('save_failed_title'), str(exc))
             return
+        self._refresh_extension_source_summaries(self._config, self._paths)
         self._apply_extension_state_to_controls()
         if announce_key:
             self.statusMessageChanged.emit(self._tr(announce_key))
@@ -4122,3 +4341,4 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_status_summary(payload)
         self.statusMessageChanged.emit(self._tr('status_clear_done'))
         self._append_log(self._tr('log_clear_done'))
+

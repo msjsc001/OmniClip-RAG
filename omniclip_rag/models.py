@@ -71,6 +71,8 @@ class RerankOutcome:
     model: str = ''
     requested_device: str = 'cpu'
     resolved_device: str = 'cpu'
+    model_device: str = ''
+    actual_device: str = ''
     candidate_count: int = 0
     reranked_count: int = 0
     batch_size: int = 0
@@ -78,6 +80,10 @@ class RerankOutcome:
     degraded_to_cpu: bool = False
     oom_recovered: bool = False
     skipped_reason: str = ''
+    fallback_reason: str = ''
+    cuda_peak_mem_before: int = 0
+    cuda_peak_mem_after: int = 0
+    cuda_peak_mem_delta: int = 0
 
 
 @dataclass(slots=True)

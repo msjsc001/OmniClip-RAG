@@ -795,12 +795,221 @@ class QtUiTests(unittest.TestCase):
                 'installed_count': 1,
                 'total_count': 1,
                 'cleanup_patterns': tuple(),
+                'profile': 'cuda',
             }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_usage', return_value={'disk_usage': '0 GB', 'download_usage': '0 GB'}):
                 workspace._refresh_runtime_management_ui(force_refresh=True)
             self.assertEqual(workspace.runtime_chip.text(), text('zh-CN', 'runtime_chip_cpu_ready'))
             self.assertIn('GPU 加速这一项不需要安装', workspace.runtime_status_summary_label.text())
             self.assertEqual(workspace.runtime_components_table.rowCount(), 3)
             self.assertEqual(workspace.runtime_components_table.item(2, 2).text(), text('zh-CN', 'runtime_status_not_needed'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_gpu_runtime_row_requires_execution_verification(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_current_runtime_repair_context', return_value={
+                'gpu_present': True,
+                'torch_available': True,
+                'sentence_transformers_available': True,
+                'cuda_available': True,
+                'gpu_probe_state': 'verified',
+                'gpu_probe_verified': True,
+                'gpu_probe_reason': '',
+                'gpu_probe_error_message': '',
+                'gpu_execution_state': 'not-run',
+                'gpu_execution_verified': False,
+                'gpu_execution_reason': '',
+                'gpu_execution_error_message': '',
+            }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_status', return_value={
+                'component_id': 'semantic-core',
+                'status': 'ready',
+                'ready': True,
+                'missing_items': [],
+                'installed_count': 1,
+                'total_count': 1,
+                'cleanup_patterns': tuple(),
+                'profile': 'cuda',
+            }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_usage', return_value={'disk_usage': '0 GB', 'download_usage': '0 GB'}):
+                state = workspace._runtime_component_state('gpu-acceleration')
+            self.assertFalse(state['ready'])
+            self.assertEqual(state['install_state'], 'ready')
+            self.assertEqual(state['probe_state'], 'ready')
+            self.assertEqual(state['execution_state'], 'not-run')
+            self.assertIn(text('zh-CN', 'runtime_missing_gpu_execution_unverified'), state['missing_items'])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_gpu_runtime_row_turns_ready_only_after_execution_verification(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_current_runtime_repair_context', return_value={
+                'gpu_present': True,
+                'torch_available': True,
+                'sentence_transformers_available': True,
+                'cuda_available': True,
+                'gpu_probe_state': 'verified',
+                'gpu_probe_verified': True,
+                'gpu_probe_reason': '',
+                'gpu_probe_error_message': '',
+                'gpu_execution_state': 'verified',
+                'gpu_execution_verified': True,
+                'gpu_execution_reason': '',
+                'gpu_execution_error_message': '',
+                'gpu_execution_actual_device': 'cuda:0',
+            }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_status', return_value={
+                'component_id': 'semantic-core',
+                'status': 'ready',
+                'ready': True,
+                'missing_items': [],
+                'installed_count': 1,
+                'total_count': 1,
+                'cleanup_patterns': tuple(),
+                'profile': 'cuda',
+            }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_usage', return_value={'disk_usage': '0 GB', 'download_usage': '0 GB'}):
+                state = workspace._runtime_component_state('gpu-acceleration')
+            self.assertTrue(state['ready'])
+            self.assertEqual(state['status'], 'ready')
+            self.assertEqual(state['install_state'], 'ready')
+            self.assertEqual(state['probe_state'], 'ready')
+            self.assertEqual(state['execution_state'], 'verified')
+            self.assertEqual(state['missing_items'], [])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_gpu_runtime_row_rejects_cpu_profile_semantic_core(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_current_runtime_repair_context', return_value={
+                'gpu_present': True,
+                'torch_available': True,
+                'sentence_transformers_available': True,
+                'cuda_available': True,
+                'gpu_probe_state': 'verified',
+                'gpu_probe_verified': True,
+                'gpu_probe_reason': '',
+                'gpu_probe_error_message': '',
+                'gpu_execution_state': 'verified',
+                'gpu_execution_verified': True,
+                'gpu_execution_reason': '',
+                'gpu_execution_error_message': '',
+                'gpu_execution_actual_device': 'cuda:0',
+                'torch_cuda_build': '',
+            }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_status', return_value={
+                'component_id': 'semantic-core',
+                'status': 'ready',
+                'ready': True,
+                'missing_items': [],
+                'installed_count': 1,
+                'total_count': 1,
+                'cleanup_patterns': tuple(),
+                'profile': 'cpu',
+            }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_usage', return_value={'disk_usage': '0 GB', 'download_usage': '0 GB'}):
+                state = workspace._runtime_component_state('gpu-acceleration')
+            self.assertFalse(state['ready'])
+            self.assertIn(text('zh-CN', 'runtime_missing_gpu_semantic_profile_cpu'), state['missing_items'])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_runtime_refresh_reuses_one_context_snapshot(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        context_payload = {
+            'runtime_dir': str(paths.shared_root / 'runtime'),
+            'runtime_exists': True,
+            'runtime_complete': False,
+            'runtime_pending_components': [],
+            'gpu_present': True,
+            'torch_available': True,
+            'sentence_transformers_available': True,
+            'cuda_available': True,
+                'gpu_probe_state': 'verified',
+                'gpu_probe_verified': True,
+                'gpu_probe_reason': '',
+                'gpu_probe_error_message': '',
+                'gpu_execution_state': 'not-run',
+            'gpu_execution_verified': False,
+            'gpu_execution_reason': '',
+            'gpu_execution_error_message': '',
+        }
+        semantic_state = {
+            'component_id': 'semantic-core',
+            'status': 'ready',
+            'ready': True,
+            'missing_items': [],
+            'installed_count': 1,
+            'total_count': 1,
+            'cleanup_patterns': tuple(),
+            'profile': 'cuda',
+        }
+        vector_state = {
+            'component_id': 'vector-store',
+            'status': 'ready',
+            'ready': True,
+            'missing_items': [],
+            'installed_count': 1,
+            'total_count': 1,
+            'cleanup_patterns': tuple(),
+            'profile': 'cuda',
+        }
+        try:
+            with patch.object(workspace, '_current_runtime_repair_context', return_value=context_payload) as context_mock, patch(
+                'omniclip_rag.ui_next_qt.config_workspace.runtime_component_status',
+                side_effect=lambda component_id: semantic_state if component_id == 'semantic-core' else vector_state,
+            ), patch(
+                'omniclip_rag.ui_next_qt.config_workspace.runtime_component_usage',
+                return_value={'disk_usage': '0 GB', 'download_usage': '0 GB'},
+            ):
+                workspace._refresh_runtime_management_ui(force_refresh=True)
+            self.assertEqual(context_mock.call_count, 1)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_gpu_runtime_actions_show_verify_button(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            state = {
+                'component_id': 'gpu-acceleration',
+                'status': 'incomplete',
+                'ready': False,
+                'missing_items': [text('zh-CN', 'runtime_missing_gpu_execution_unverified')],
+            }
+            widget = workspace._build_runtime_component_actions_widget(
+                {
+                    'component_id': 'gpu-acceleration',
+                    'name': text('zh-CN', 'runtime_component_gpu_acceleration'),
+                    'description': text('zh-CN', 'runtime_component_gpu_acceleration_desc'),
+                },
+                state,
+                workspace,
+            )
+            labels = {button.text() for button in widget.findChildren(QtWidgets.QPushButton)}
+            self.assertIn(text('zh-CN', 'runtime_row_verify'), labels)
+            self.assertNotIn(text('zh-CN', 'runtime_row_refresh'), labels)
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -1137,6 +1346,10 @@ class QtUiTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+
+
 
 
 

@@ -1,4 +1,5 @@
 import builtins
+import gc
 import json
 from contextlib import nullcontext
 import math
@@ -13,7 +14,8 @@ from unittest.mock import patch
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import RuntimeDependencyError
-from omniclip_rag.vector_index import LanceDbVectorIndex, _probe_runtime_semantic_core_inprocess, _runtime_component_dependency_ids, _runtime_import_environment, _runtime_search_roots, build_runtime_install_command, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, runtime_dependency_issue, runtime_guidance_context
+from omniclip_rag.canary_backend import CANARY_VECTOR_MODEL_ID
+from omniclip_rag.vector_index import LanceDbVectorIndex, _discover_active_runtime_dir, _preferred_runtime_dir_path, _probe_runtime_semantic_core_inprocess, _runtime_component_dependency_ids, _runtime_import_environment, _runtime_search_roots, build_runtime_install_command, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, probe_runtime_gpu_execution, refresh_runtime_capability_snapshot, runtime_dependency_issue, runtime_guidance_context, runtime_management_snapshot, probe_runtime_gpu_query_execution
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,26 +149,105 @@ def _fake_lancedb_modules(table_cls=_FakeTable) -> dict[str, object]:
 
 
 def _write_minimal_vector_store_runtime(runtime_root: Path) -> None:
-    (runtime_root / 'pyarrow').mkdir(parents=True, exist_ok=True)
-    (runtime_root / 'pandas').mkdir(parents=True, exist_ok=True)
-    (runtime_root / 'lancedb').mkdir(parents=True, exist_ok=True)
-    (runtime_root / 'onnxruntime').mkdir(parents=True, exist_ok=True)
-    (runtime_root / 'pyarrow' / '__init__.py').write_text('', encoding='utf-8')
-    (runtime_root / 'pandas' / '__init__.py').write_text('', encoding='utf-8')
-    (runtime_root / 'lancedb' / '__init__.py').write_text('', encoding='utf-8')
-    (runtime_root / 'onnxruntime' / '__init__.py').write_text('', encoding='utf-8')
+    runtime_root = Path(runtime_root)
+    live_roots = [
+        runtime_root,
+        runtime_root / 'components' / 'vector-store',
+    ]
+    for live_root in live_roots:
+        for package_name in ('pyarrow', 'pandas', 'lancedb', 'onnxruntime'):
+            package_dir = live_root / package_name
+            package_dir.mkdir(parents=True, exist_ok=True)
+            (package_dir / '__init__.py').write_text('', encoding='utf-8')
+
+
+def _runtime_root_patches(app_root: Path):
+    runtime_dir = app_root / 'runtime'
+    return patch.multiple(
+        'omniclip_rag.vector_index',
+        _application_root_dir=lambda: app_root,
+        _preferred_runtime_dir_path=lambda: runtime_dir,
+    )
+
+
+def _reset_runtime_test_modules() -> None:
+    for module_name in (
+        'torch',
+        'sentence_transformers',
+        'transformers',
+        'huggingface_hub',
+        'safetensors',
+        'numpy',
+        'scipy',
+        'pyarrow',
+        'pandas',
+        'lancedb',
+        'onnxruntime',
+    ):
+        sys.modules.pop(module_name, None)
+
+
+def _rmtree_retry(path: Path, *, attempts: int = 5) -> None:
+    if not path.exists():
+        return
+
+    def _onerror(func, target, _exc_info):
+        target_path = Path(target)
+        try:
+            target_path.chmod(0o700)
+        except Exception:
+            pass
+        try:
+            func(target)
+        except Exception:
+            return
+
+    last_error: Exception | None = None
+    for _ in range(max(int(attempts or 1), 1)):
+        try:
+            shutil.rmtree(path, onerror=_onerror)
+            return
+        except Exception as exc:
+            last_error = exc
+            _reset_runtime_test_modules()
+            gc.collect()
+            time.sleep(0.1)
+    if path.exists() and last_error is not None:
+        raise last_error
 
 
 class VectorIndexTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._previous_dont_write_bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        _reset_runtime_test_modules()
+        _rmtree_retry(TEST_DATA_ROOT)
+
     def tearDown(self) -> None:
-        if TEST_DATA_ROOT.exists():
-            shutil.rmtree(TEST_DATA_ROOT)
+        _reset_runtime_test_modules()
+        gc.collect()
+        sys.dont_write_bytecode = self._previous_dont_write_bytecode
+        _rmtree_retry(TEST_DATA_ROOT)
 
     def test_factory_returns_null_when_disabled(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "factory"))
         config = AppConfig(vault_path=str(ROOT), data_root=str(data_paths.global_root))
         index = create_vector_index(config, data_paths)
         self.assertEqual(index.search("anything", 5), [])
+
+    def test_builtin_canary_model_is_ready_without_download(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "canary_model"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+            vector_model=CANARY_VECTOR_MODEL_ID,
+            vector_device='cpu',
+        )
+        self.assertTrue(is_local_model_ready(config, data_paths))
+        index = LanceDbVectorIndex(config, data_paths)
+        embedder = index._default_embedder_factory()
+        self.assertEqual(getattr(embedder, 'device', ''), 'cpu')
 
     def test_factory_returns_runtime_placeholder_when_lancedb_runtime_is_missing(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "missing_runtime"))
@@ -188,7 +269,7 @@ class VectorIndexTests(unittest.TestCase):
         app_root = TEST_DATA_ROOT / 'app_root'
         runtime_dir = app_root / 'runtime'
         app_root.mkdir(parents=True, exist_ok=True)
-        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
+        with _runtime_root_patches(app_root), \
              patch('omniclip_rag.vector_index._ACCELERATION_CACHE', None):
             context = runtime_guidance_context('torch', 'cuda', force_refresh=True)
             self.assertFalse(context['runtime_exists'])
@@ -277,7 +358,7 @@ class VectorIndexTests(unittest.TestCase):
         _write_minimal_vector_store_runtime(runtime_dir)
         for module_name in ['torch', 'sentence_transformers', 'transformers', 'huggingface_hub', 'safetensors', 'numpy', 'scipy', 'pyarrow', 'pandas', 'lancedb', 'onnxruntime']:
             sys.modules.pop(module_name, None)
-        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
+        with _runtime_root_patches(app_root), \
              patch('omniclip_rag.vector_index._ACCELERATION_CACHE', None), \
              patch('omniclip_rag.vector_index._detect_nvidia_gpus', return_value=[]), \
              patch('omniclip_rag.vector_index._detect_nvcc_version', return_value=''):
@@ -336,7 +417,7 @@ class VectorIndexTests(unittest.TestCase):
         manifest_path.write_text(json.dumps({'component': 'semantic-core', 'payload_dir': str(pending_dir)}), encoding='utf-8')
         for module_name in ['torch', 'sentence_transformers', 'transformers', 'huggingface_hub', 'safetensors', 'numpy', 'scipy', 'pyarrow', 'pandas', 'lancedb', 'onnxruntime']:
             sys.modules.pop(module_name, None)
-        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
+        with _runtime_root_patches(app_root), \
              patch('omniclip_rag.vector_index._ACCELERATION_CACHE', None), \
              patch('omniclip_rag.vector_index._detect_nvidia_gpus', return_value=[]), \
              patch('omniclip_rag.vector_index._detect_nvcc_version', return_value=''):
@@ -348,6 +429,208 @@ class VectorIndexTests(unittest.TestCase):
         self.assertIn('semantic-core', runtime_state['runtime_pending_components'])
         self.assertEqual(runtime_state['runtime_missing_items'], [])
         self.assertNotIn('huggingface-hub', payload['sentence_transformers_error'])
+
+    def test_probe_runtime_gpu_execution_runs_zero_download_cuda_smoke(self) -> None:
+        runtime_dir = TEST_DATA_ROOT / 'gpu_probe_runtime'
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+
+        class _FakeTensor:
+            def __init__(self, device: str):
+                self.device = device
+
+        class _FakeCuda:
+            def __init__(self) -> None:
+                self._peak = 0
+
+            def is_available(self) -> bool:
+                return True
+
+            def device_count(self) -> int:
+                return 1
+
+            def get_device_name(self, _index: int) -> str:
+                return 'Fake CUDA'
+
+            def max_memory_allocated(self, _device: str) -> int:
+                return self._peak
+
+            def reset_peak_memory_stats(self, _device: str) -> None:
+                self._peak = 0
+
+            def synchronize(self, _device: str | None = None) -> None:
+                return None
+
+            def empty_cache(self) -> None:
+                return None
+
+        fake_torch = types.ModuleType('torch')
+        fake_torch.__version__ = '2.10.0+cu128'
+        fake_torch.version = types.SimpleNamespace(cuda='12.8')
+        fake_torch.cuda = _FakeCuda()
+
+        def _ones(_shape, *, device=None):
+            return _FakeTensor(str(device or 'cpu'))
+
+        def _matmul(left, _right):
+            fake_torch.cuda._peak = 4096
+            return _FakeTensor(str(getattr(left, 'device', 'cuda:0') or 'cuda:0'))
+
+        fake_torch.ones = _ones
+        fake_torch.matmul = _matmul
+
+        with patch.dict(sys.modules, {'torch': fake_torch}, clear=False), \
+             patch('omniclip_rag.vector_index._runtime_dir_path', return_value=runtime_dir), \
+             patch('omniclip_rag.vector_index.runtime_trace_metadata', return_value={'runtime_instance_id': 'runtime-1', 'live_runtime_id': 'live-1'}), \
+             patch('omniclip_rag.vector_index._detect_nvidia_gpus', return_value=['Fake CUDA']), \
+             patch('omniclip_rag.vector_index._runtime_import_environment', side_effect=lambda **_: nullcontext()):
+            payload = probe_runtime_gpu_execution(force_refresh=True)
+
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['state'], 'verified')
+        self.assertEqual(payload['actual_device'], 'cuda:0')
+        self.assertEqual(payload['runtime_instance_id'], 'runtime-1')
+        self.assertGreater(int(payload['cuda_peak_mem_delta']), 0)
+
+    def test_refresh_runtime_capability_snapshot_merges_gpu_probe_fields(self) -> None:
+        probe_payload = {
+            'success': True,
+            'state': 'verified',
+            'reason': '',
+            'execution_error_class': '',
+            'execution_error_message': '',
+            'actual_device': 'cuda:0',
+            'elapsed_ms': 42,
+            'completed_at': '2026-03-16T12:00:00Z',
+            'runtime_instance_id': 'runtime-2',
+            'torch_cuda_build': '12.8',
+        }
+        query_payload = {
+            'success': True,
+            'state': 'verified',
+            'reason': '',
+            'execution_error_class': '',
+            'execution_error_message': '',
+            'actual_device': 'cuda:0',
+            'reranker_actual_device': 'cuda:0',
+            'elapsed_ms': 57,
+            'completed_at': '2026-03-16T12:00:01Z',
+            'runtime_instance_id': 'runtime-2',
+        }
+        with patch('omniclip_rag.vector_index.detect_acceleration', return_value={
+            'gpu_present': True,
+            'torch_available': True,
+            'sentence_transformers_available': True,
+            'cuda_available': True,
+            'torch_cuda_build': '12.8',
+        }), patch('omniclip_rag.vector_index.probe_runtime_gpu_execution', return_value=probe_payload) as probe_mock, patch(
+            'omniclip_rag.vector_index.probe_runtime_gpu_query_execution', return_value=query_payload
+        ) as query_mock:
+            payload = refresh_runtime_capability_snapshot(force_refresh=True)
+
+        probe_mock.assert_called_once_with(force_refresh=True)
+        query_mock.assert_called_once_with(force_refresh=True)
+        self.assertEqual(payload['gpu_probe_state'], 'verified')
+        self.assertTrue(payload['gpu_probe_verified'])
+        self.assertEqual(payload['gpu_execution_state'], 'verified')
+        self.assertTrue(payload['gpu_execution_verified'])
+        self.assertEqual(payload['gpu_execution_actual_device'], 'cuda:0')
+        self.assertEqual(payload['gpu_execution_reranker_actual_device'], 'cuda:0')
+        self.assertEqual(payload['gpu_execution_runtime_instance_id'], 'runtime-2')
+        self.assertEqual(payload['torch_cuda_build'], '12.8')
+
+    def test_runtime_management_snapshot_reuses_cached_gpu_probe_until_verification_is_requested(self) -> None:
+        with patch('omniclip_rag.vector_index.detect_acceleration', return_value={
+            'gpu_present': True,
+            'torch_available': True,
+            'sentence_transformers_available': True,
+            'cuda_available': True,
+            'torch_cuda_build': '12.8',
+        }), patch('omniclip_rag.vector_index._runtime_dir_path', return_value=TEST_DATA_ROOT / 'runtime_mgmt_snapshot'), patch(
+            'omniclip_rag.vector_index.runtime_trace_metadata',
+            return_value={'runtime_instance_id': 'runtime-3', 'live_runtime_id': 'live-3'},
+        ), patch(
+            'omniclip_rag.vector_index._merge_cached_gpu_execution_state',
+            side_effect=lambda payload, _runtime_dir, _meta: payload.update({
+                'gpu_execution_state': 'verified',
+                'gpu_execution_verified': True,
+                'gpu_execution_reason': '',
+                'gpu_execution_actual_device': 'cuda:0',
+                'gpu_execution_runtime_instance_id': 'runtime-3',
+            }),
+        ), patch('omniclip_rag.vector_index.probe_runtime_gpu_execution') as probe_mock:
+            payload = runtime_management_snapshot(force_refresh=True, verify_gpu=False)
+
+        probe_mock.assert_not_called()
+        self.assertEqual(payload['gpu_execution_state'], 'verified')
+        self.assertTrue(payload['gpu_execution_verified'])
+
+    def test_probe_runtime_gpu_query_execution_reuses_query_canary(self) -> None:
+        runtime_dir = TEST_DATA_ROOT / 'gpu_query_probe_runtime'
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        with patch('omniclip_rag.vector_index._runtime_dir_path', return_value=runtime_dir), \
+             patch('omniclip_rag.vector_index.runtime_trace_metadata', return_value={'runtime_instance_id': 'runtime-q1', 'live_runtime_id': 'live-q1'}), \
+             patch('omniclip_rag.vector_index._detect_nvidia_gpus', return_value=['Fake CUDA']), \
+             patch('omniclip_rag.runtime_canary.run_gpu_query_canary', return_value={
+                 'success': True,
+                 'state': 'verified',
+                 'reason': '',
+                 'actual_device': 'cuda:0',
+                 'reranker_actual_device': 'cuda:0',
+                 'elapsed_ms': 27,
+             }):
+            payload = probe_runtime_gpu_query_execution(force_refresh=True)
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['state'], 'verified')
+        self.assertEqual(payload['actual_device'], 'cuda:0')
+        self.assertEqual(payload['runtime_instance_id'], 'runtime-q1')
+
+    def test_runtime_management_snapshot_verification_runs_smoke_then_query_probe(self) -> None:
+        with patch('omniclip_rag.vector_index.detect_acceleration', return_value={
+            'gpu_present': True,
+            'torch_available': True,
+            'sentence_transformers_available': True,
+            'cuda_available': True,
+            'torch_cuda_build': '12.8',
+        }), patch('omniclip_rag.vector_index._runtime_dir_path', return_value=TEST_DATA_ROOT / 'runtime_mgmt_snapshot_verify'), patch(
+            'omniclip_rag.vector_index.runtime_trace_metadata',
+            return_value={'runtime_instance_id': 'runtime-verify', 'live_runtime_id': 'live-verify'},
+        ), patch('omniclip_rag.vector_index._merge_cached_gpu_probe_state'), patch('omniclip_rag.vector_index._merge_cached_gpu_execution_state'), patch(
+            'omniclip_rag.vector_index.probe_runtime_gpu_execution',
+            return_value={'success': True, 'state': 'verified', 'reason': '', 'actual_device': 'cuda:0', 'elapsed_ms': 11, 'completed_at': '2026-03-16T00:00:00Z', 'runtime_instance_id': 'runtime-verify'},
+        ) as smoke_mock, patch(
+            'omniclip_rag.vector_index.probe_runtime_gpu_query_execution',
+            return_value={'success': True, 'state': 'verified', 'reason': '', 'actual_device': 'cuda:0', 'reranker_actual_device': 'cuda:0', 'elapsed_ms': 25, 'completed_at': '2026-03-16T00:00:01Z', 'runtime_instance_id': 'runtime-verify'},
+        ) as query_mock:
+            payload = runtime_management_snapshot(force_refresh=True, verify_gpu=True)
+        smoke_mock.assert_called_once_with(force_refresh=True)
+        query_mock.assert_called_once_with(force_refresh=True)
+        self.assertEqual(payload['gpu_probe_state'], 'verified')
+        self.assertTrue(payload['gpu_probe_verified'])
+        self.assertEqual(payload['gpu_execution_state'], 'verified')
+        self.assertTrue(payload['gpu_execution_verified'])
+        self.assertEqual(payload['gpu_execution_reranker_actual_device'], 'cuda:0')
+
+    def test_runtime_capability_state_migrates_legacy_gpu_execution_probe_to_gpu_probe(self) -> None:
+        runtime_dir = TEST_DATA_ROOT / 'runtime_capability_migrate'
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        (runtime_dir / '_runtime_capabilities.json').write_text(json.dumps({
+            'version': 1,
+            'gpu_execution_probe': {
+                'success': True,
+                'state': 'verified',
+                'runtime_instance_id': 'runtime-legacy',
+            },
+        }), encoding='utf-8')
+        with patch('omniclip_rag.vector_index._runtime_dir_path', return_value=runtime_dir), \
+             patch('omniclip_rag.vector_index.runtime_trace_metadata', return_value={'runtime_instance_id': 'runtime-legacy', 'live_runtime_id': 'live-legacy'}), \
+             patch('omniclip_rag.vector_index._detect_nvidia_gpus', return_value=['Fake CUDA']), \
+             patch('omniclip_rag.vector_index._detect_nvcc_version', return_value=''), \
+             patch('omniclip_rag.vector_index._probe_runtime_semantic_core_inprocess', return_value={'torch_available': False, 'sentence_transformers_available': False, 'torch_error': '', 'sentence_transformers_error': '', 'cuda_available': False, 'cuda_device_count': 0, 'cuda_name': ''}), \
+             patch('omniclip_rag.vector_index._probe_runtime_semantic_core', return_value={'probe_error': 'skip'}):
+            payload = detect_acceleration(force_refresh=True)
+        self.assertEqual(payload['gpu_probe_state'], 'verified')
+        self.assertTrue(payload['gpu_probe_verified'])
+        self.assertEqual(payload['gpu_execution_state'], 'not-run')
 
     def test_inprocess_semantic_probe_does_not_poison_later_runtime_imports(self) -> None:
         app_root = TEST_DATA_ROOT / 'runtime_probe_no_poison'
@@ -387,7 +670,7 @@ class VectorIndexTests(unittest.TestCase):
         if hasattr(builtins, '_omniclip_sentence_transformers_import_count'):
             delattr(builtins, '_omniclip_sentence_transformers_import_count')
         try:
-            with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root):
+            with _runtime_root_patches(app_root):
                 first = _probe_runtime_semantic_core_inprocess(runtime_dir)
                 second = _probe_runtime_semantic_core_inprocess(runtime_dir)
                 with _runtime_import_environment(component_id='semantic-core'):
@@ -408,19 +691,20 @@ class VectorIndexTests(unittest.TestCase):
 
 
 
-    def test_runtime_search_roots_include_legacy_vector_store_fallback_for_semantic_core(self) -> None:
+    def test_runtime_search_roots_include_componentized_vector_store_for_semantic_core(self) -> None:
         from omniclip_rag.vector_index import _runtime_search_roots
 
         app_root = TEST_DATA_ROOT / 'runtime_search_roots_dependencies'
         runtime_dir = app_root / 'runtime'
         semantic_root = runtime_dir / 'components' / 'semantic-core'
+        vector_store_root = runtime_dir / 'components' / 'vector-store'
         semantic_root.mkdir(parents=True, exist_ok=True)
         _write_minimal_vector_store_runtime(runtime_dir)
 
         roots = _runtime_search_roots(runtime_dir, include_pending=False, component_id='semantic-core')
         resolved = [Path(item).resolve() for item in roots]
         self.assertIn(semantic_root.resolve(), resolved)
-        self.assertIn(runtime_dir.resolve(), resolved)
+        self.assertIn(vector_store_root.resolve(), resolved)
 
     def test_lancedb_backend_rebuild_search_and_delete(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "main"))
@@ -1005,12 +1289,39 @@ class VectorIndexTests(unittest.TestCase):
         (semantic_root / 'torch').mkdir(parents=True, exist_ok=True)
         (runtime_dir / 'lancedb').mkdir(parents=True, exist_ok=True)
 
-        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root):
+        with _runtime_root_patches(app_root):
             roots = _runtime_search_roots(runtime_dir, include_pending=False, component_id='vector-store')
 
         self.assertGreaterEqual(len(roots), 2)
         self.assertEqual(roots[0].resolve(), semantic_root.resolve())
         self.assertEqual(roots[1].resolve(), runtime_dir.resolve())
+
+    def test_frozen_runtime_discovery_never_drifts_into_sibling_dist_runtime(self) -> None:
+        dist_root = TEST_DATA_ROOT / 'frozen_runtime_drift' / 'dist'
+        current_app = dist_root / 'OmniClipRAG-v0.3.0'
+        sibling_app = dist_root / 'OmniClipRAG-v0.2.4'
+        current_runtime = current_app / 'runtime'
+        sibling_runtime = sibling_app / 'runtime'
+        current_runtime.mkdir(parents=True, exist_ok=True)
+        _write_minimal_vector_store_runtime(sibling_runtime)
+        preferred_runtime = TEST_DATA_ROOT / 'frozen_runtime_drift' / 'shared' / 'runtime'
+
+        with patch.multiple(
+            'omniclip_rag.vector_index',
+            _application_root_dir=lambda: current_app,
+            _preferred_runtime_dir_path=lambda: preferred_runtime,
+        ), patch.object(sys, 'frozen', True, create=True):
+            active_runtime = _discover_active_runtime_dir()
+
+        self.assertEqual(active_runtime.resolve(), current_runtime.resolve())
+
+    def test_frozen_preferred_runtime_root_is_current_app_runtime(self) -> None:
+        app_root = TEST_DATA_ROOT / 'preferred_frozen_runtime' / 'OmniClipRAG-v0.3.0'
+        app_root.mkdir(parents=True, exist_ok=True)
+        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
+             patch.object(sys, 'frozen', True, create=True):
+            runtime_root = _preferred_runtime_dir_path()
+        self.assertEqual(runtime_root.resolve(), (app_root / 'runtime').resolve())
 
 
     def test_runtime_dependency_issue_uses_cached_acceleration_by_default(self) -> None:
@@ -1039,3 +1350,6 @@ class VectorIndexTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
