@@ -123,6 +123,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(loaded.ui_theme, 'dark')
         self.assertEqual(loaded.ui_scale_percent, 200)
 
+
+    def test_ensure_directory_accepts_existing_directory_after_permission_race(self) -> None:
+        target = CUSTOM_ROOT / 'shared'
+        target.mkdir(parents=True, exist_ok=True)
+        with patch.object(Path, 'mkdir', side_effect=PermissionError('denied')), \
+             patch.object(config_module, '_win_directory_exists', return_value=True):
+            config_module._ensure_directory(target)
+
     def test_log_file_size_is_normalized_when_saved(self) -> None:
         vault = ROOT / 'vault_logs'
         paths = config_module.ensure_data_paths(str(CUSTOM_ROOT), str(vault))
@@ -130,6 +138,7 @@ class ConfigTests(unittest.TestCase):
             vault_path=str(vault),
             data_root=str(paths.global_root),
             log_file_size_mb=999,
+            query_trace_logging_enabled=True,
         )
 
         config_module.save_config(config, paths)
@@ -138,6 +147,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.log_file_size_mb, config_module.LOG_FILE_SIZE_MB_MAX)
+        self.assertTrue(loaded.query_trace_logging_enabled)
 
 
 if __name__ == '__main__':

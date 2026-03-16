@@ -4,7 +4,7 @@ import logging
 import threading
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from PySide6 import QtCore
 
@@ -14,13 +14,22 @@ from ..service import WATCHDOG_AVAILABLE, OmniClipService
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _safe_emit(signal, *args) -> None:
+    try:
+        signal.emit(*args)
+    except RuntimeError:
+        LOGGER.debug('Worker signal was dropped because the QObject was already deleted.', exc_info=True)
+
+
 @dataclass(slots=True)
 class QueryTaskResult:
     query_text: str
     copied: bool
-    score_threshold: float
     result: object
-    status_snapshot: dict[str, object]
+    score_threshold: float = 0.0
+    allowed_families: tuple[str, ...] = field(default_factory=tuple)
+    status_snapshot: dict[str, object] = field(default_factory=dict)
 
 
 # Why: QThread+moveToThread 模式下，同步阻塞式 run() 会完全占满 QThread，
@@ -36,13 +45,14 @@ class QueryWorker(QtCore.QObject):
     failed = QtCore.Signal(str, str)
     finished = QtCore.Signal()
 
-    def __init__(self, *, config, paths, query_text: str, copy_result: bool, score_threshold: float) -> None:
+    def __init__(self, *, config, paths, query_text: str, copy_result: bool, score_threshold: float, allowed_families: tuple[str, ...]) -> None:
         super().__init__()
         self._config = config
         self._paths = paths
         self._query_text = query_text
         self._copy_result = copy_result
         self._score_threshold = score_threshold
+        self._allowed_families = tuple(allowed_families)
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -56,27 +66,30 @@ class QueryWorker(QtCore.QObject):
                 self._query_text,
                 copy_result=self._copy_result,
                 score_threshold=self._score_threshold,
-                on_progress=lambda payload: self.progress.emit(dict(payload)),
+                allowed_families=self._allowed_families,
+                on_progress=lambda payload: _safe_emit(self.progress, dict(payload)),
             )
             snapshot = service.status_snapshot()
-            self.succeeded.emit(
+            _safe_emit(
+                self.succeeded,
                 QueryTaskResult(
                     query_text=self._query_text,
                     copied=self._copy_result,
                     score_threshold=self._score_threshold,
+                    allowed_families=self._allowed_families,
                     result=result,
                     status_snapshot=snapshot,
                 )
             )
         except RuntimeDependencyError as exc:
             LOGGER.exception('Query worker failed because the vector runtime is not ready.')
-            self.failed.emit(str(exc).strip(), traceback.format_exc())
+            _safe_emit(self.failed, str(exc).strip(), traceback.format_exc())
         except Exception as exc:
             LOGGER.exception('Query worker crashed unexpectedly.')
-            self.failed.emit(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
+            _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
             service.close()
-            self.finished.emit()
+            _safe_emit(self.finished)
 
 
 class FunctionWorker(QtCore.QObject):
@@ -95,12 +108,38 @@ class FunctionWorker(QtCore.QObject):
 
     def _run(self) -> None:
         try:
-            self.succeeded.emit(self._fn())
+            _safe_emit(self.succeeded, self._fn())
         except Exception as exc:
             LOGGER.exception('Background function worker crashed unexpectedly.')
-            self.failed.emit(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
+            _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
-            self.finished.emit()
+            _safe_emit(self.finished)
+
+
+class ProgressFunctionWorker(QtCore.QObject):
+    progress = QtCore.Signal(object)
+    succeeded = QtCore.Signal(object)
+    failed = QtCore.Signal(str, str)
+    finished = QtCore.Signal()
+
+    def __init__(self, *, fn: Callable[[Callable[[dict[str, object]], None]], object]) -> None:
+        super().__init__()
+        self._fn = fn
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            result = self._fn(lambda payload: _safe_emit(self.progress, dict(payload)))
+            _safe_emit(self.succeeded, result)
+        except Exception as exc:
+            LOGGER.exception('Background progress function worker crashed unexpectedly.')
+            _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
+        finally:
+            _safe_emit(self.finished)
 
 
 class ServiceTaskWorker(QtCore.QObject):
@@ -136,21 +175,21 @@ class ServiceTaskWorker(QtCore.QObject):
         service = OmniClipService(self._config, self._paths)
         try:
             payload = self._runner(service, self._emit_progress, self._pause_event, self._cancel_event)
-            self.succeeded.emit(payload)
+            _safe_emit(self.succeeded, payload)
         except BuildCancelledError:
-            self.cancelled.emit(service.status_snapshot())
+            _safe_emit(self.cancelled, service.status_snapshot())
         except RuntimeDependencyError as exc:
             LOGGER.exception('Service task worker failed because the vector runtime is not ready.')
-            self.runtimeError.emit(str(exc).strip() or exc.__class__.__name__)
+            _safe_emit(self.runtimeError, str(exc).strip() or exc.__class__.__name__)
         except Exception as exc:
             LOGGER.exception('Service task worker crashed unexpectedly.')
-            self.failed.emit(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
+            _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
             service.close()
-            self.finished.emit()
+            _safe_emit(self.finished)
 
     def _emit_progress(self, payload: dict[str, object]) -> None:
-        self.progress.emit(dict(payload))
+        _safe_emit(self.progress, dict(payload))
 
 
 class WatchWorker(QtCore.QObject):
@@ -183,13 +222,13 @@ class WatchWorker(QtCore.QObject):
                 self._stop_event,
                 interval=self._interval,
                 force_polling=self._force_polling,
-                on_update=lambda payload: self.updated.emit(dict(payload)),
+                on_update=lambda payload: _safe_emit(self.updated, dict(payload)),
             )
         except Exception as exc:
             LOGGER.exception('Watch worker crashed unexpectedly.')
-            self.failed.emit(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
+            _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
             service.close()
-            self.stopped.emit(raw_mode)
-            self.finished.emit()
+            _safe_emit(self.stopped, raw_mode)
+            _safe_emit(self.finished)
 

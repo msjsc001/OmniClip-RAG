@@ -1,3 +1,6 @@
+import builtins
+import json
+from contextlib import nullcontext
 import math
 import sys
 import threading
@@ -10,7 +13,7 @@ from unittest.mock import patch
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import RuntimeDependencyError
-from omniclip_rag.vector_index import LanceDbVectorIndex, create_vector_index, is_local_model_ready, model_download_guidance_context, runtime_dependency_issue, runtime_guidance_context
+from omniclip_rag.vector_index import LanceDbVectorIndex, _probe_runtime_semantic_core_inprocess, _runtime_component_dependency_ids, _runtime_import_environment, _runtime_search_roots, build_runtime_install_command, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, runtime_dependency_issue, runtime_guidance_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,18 +123,38 @@ class _MemoryPressureTable(_FakeTable):
         self.rows.extend(batch_rows)
 
 
+class _StrictQueryTypeTable(_FakeTable):
+    def search(self, vector):
+        if not isinstance(vector, list):
+            raise TypeError(f'Unsupported query type: {type(vector)}')
+        return super().search(vector)
+
+
 def _fake_lancedb_modules(table_cls=_FakeTable) -> dict[str, object]:
     fake_db = _FakeDb(table_cls=table_cls)
     fake_lancedb = types.ModuleType("lancedb")
+    fake_lancedb.__file__ = str(ROOT / 'runtime' / 'lancedb' / '__init__.py')
     fake_lancedb.connect = lambda _path: fake_db
 
     fake_pyarrow = types.ModuleType("pyarrow")
+    fake_pyarrow.__file__ = str(ROOT / 'runtime' / 'pyarrow' / '__init__.py')
     fake_pyarrow.string = lambda: "string"
     fake_pyarrow.float32 = lambda: "float32"
     fake_pyarrow.list_ = lambda _inner, dimension: ("list", dimension)
     fake_pyarrow.field = lambda name, spec: (name, spec)
     fake_pyarrow.schema = lambda fields: _FakeSchema(fields[-1][1][1])
     return {"lancedb": fake_lancedb, "pyarrow": fake_pyarrow}
+
+
+def _write_minimal_vector_store_runtime(runtime_root: Path) -> None:
+    (runtime_root / 'pyarrow').mkdir(parents=True, exist_ok=True)
+    (runtime_root / 'pandas').mkdir(parents=True, exist_ok=True)
+    (runtime_root / 'lancedb').mkdir(parents=True, exist_ok=True)
+    (runtime_root / 'onnxruntime').mkdir(parents=True, exist_ok=True)
+    (runtime_root / 'pyarrow' / '__init__.py').write_text('', encoding='utf-8')
+    (runtime_root / 'pandas' / '__init__.py').write_text('', encoding='utf-8')
+    (runtime_root / 'lancedb' / '__init__.py').write_text('', encoding='utf-8')
+    (runtime_root / 'onnxruntime' / '__init__.py').write_text('', encoding='utf-8')
 
 
 class VectorIndexTests(unittest.TestCase):
@@ -181,6 +204,18 @@ class VectorIndexTests(unittest.TestCase):
         self.assertFalse(incomplete['runtime_complete'])
         self.assertTrue(incomplete['runtime_missing_items'])
 
+
+    def test_build_runtime_install_command_uses_single_quoted_literals_once(self) -> None:
+        expected_root = Path(r'D:/软件编写/OmniClip RAG/dist/OmniClipRAG-v0.2.4')
+        with patch('omniclip_rag.vector_index._application_root_dir', return_value=expected_root), \
+             patch('omniclip_rag.vector_index._install_runtime_script_relative', return_value=r'.\InstallRuntime.ps1'):
+            command = build_runtime_install_command('cuda', source='mirror', component='semantic-core')
+        self.assertIn(f"-LiteralPath '{expected_root}'", command)
+        self.assertNotIn("-LiteralPath ''", command)
+        self.assertIn(r"& '.\InstallRuntime.ps1'", command)
+        self.assertIn('-WaitForProcessName OmniClipRAG', command)
+        self.assertIn('-Component semantic-core', command)
+
     def test_runtime_dependency_issue_returns_guidance_when_imports_are_missing(self) -> None:
         config = AppConfig(
             vault_path=str(ROOT),
@@ -200,6 +235,192 @@ class VectorIndexTests(unittest.TestCase):
 
         self.assertEqual(issue, 'guidance')
         guidance_mock.assert_called_once()
+
+    def test_detect_acceleration_bootstraps_runtime_import_paths_before_probing(self) -> None:
+        app_root = TEST_DATA_ROOT / 'runtime_bootstrap_probe_app'
+        runtime_dir = app_root / 'runtime'
+        semantic_root = runtime_dir / 'components' / 'semantic-core'
+        semantic_root.mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'torch').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'sentence_transformers').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'transformers' / 'utils').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'huggingface_hub').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'safetensors').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'numpy' / '_core').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'scipy' / 'linalg').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'torch' / '__init__.py').write_text(
+            'class cuda:\n'
+            '    @staticmethod\n'
+            '    def is_available():\n'
+            '        return False\n'
+            '\n'
+            '__version__ = "2.10.0"\n',
+            encoding='utf-8',
+        )
+        (semantic_root / 'sentence_transformers' / '__init__.py').write_text(
+            'from transformers.configuration_utils import PretrainedConfig\n',
+            encoding='utf-8',
+        )
+        (semantic_root / 'transformers' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / 'transformers' / 'configuration_utils.py').write_text(
+            'class PretrainedConfig:\n'
+            '    pass\n',
+            encoding='utf-8',
+        )
+        (semantic_root / 'transformers' / 'utils' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / 'huggingface_hub' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / 'huggingface_hub' / 'hf_api.py').write_text('', encoding='utf-8')
+        (semantic_root / 'safetensors' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / 'numpy' / '__init__.py').write_text('__version__ = "2.0.0"\n', encoding='utf-8')
+        (semantic_root / 'scipy' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / '_runtime_bootstrap.json').write_text('{}', encoding='utf-8')
+        _write_minimal_vector_store_runtime(runtime_dir)
+        for module_name in ['torch', 'sentence_transformers', 'transformers', 'huggingface_hub', 'safetensors', 'numpy', 'scipy', 'pyarrow', 'pandas', 'lancedb', 'onnxruntime']:
+            sys.modules.pop(module_name, None)
+        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
+             patch('omniclip_rag.vector_index._ACCELERATION_CACHE', None), \
+             patch('omniclip_rag.vector_index._detect_nvidia_gpus', return_value=[]), \
+             patch('omniclip_rag.vector_index._detect_nvcc_version', return_value=''):
+            payload = detect_acceleration(force_refresh=True)
+        self.assertTrue(payload['torch_available'])
+        self.assertTrue(payload['sentence_transformers_available'])
+        self.assertEqual(payload['sentence_transformers_error'], '')
+
+
+    def test_detect_acceleration_ignores_pending_runtime_payloads_until_restart(self) -> None:
+        app_root = TEST_DATA_ROOT / 'runtime_pending_probe_app'
+        runtime_dir = app_root / 'runtime'
+        semantic_root = runtime_dir / 'components' / 'semantic-core'
+        pending_dir = runtime_dir / '.pending' / 'semantic-core' / 'payload'
+        semantic_root.mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'torch').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'sentence_transformers').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'transformers' / 'utils').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'huggingface_hub').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'safetensors').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'numpy' / '_core').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'scipy' / 'linalg').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'torch' / '__init__.py').write_text(
+            'class cuda:\n'
+            '    @staticmethod\n'
+            '    def is_available():\n'
+            '        return False\n'
+            '\n'
+            '__version__ = "2.10.0"\n',
+            encoding='utf-8',
+        )
+        (semantic_root / 'sentence_transformers' / '__init__.py').write_text(
+            'from transformers.configuration_utils import PretrainedConfig\n',
+            encoding='utf-8',
+        )
+        (semantic_root / 'transformers' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / 'transformers' / 'configuration_utils.py').write_text(
+            'class PretrainedConfig:\n'
+            '    pass\n',
+            encoding='utf-8',
+        )
+        (semantic_root / 'transformers' / 'utils' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / 'huggingface_hub' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / 'huggingface_hub' / 'hf_api.py').write_text('', encoding='utf-8')
+        (semantic_root / 'safetensors' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / 'numpy' / '__init__.py').write_text('__version__ = "2.0.0"\n', encoding='utf-8')
+        (semantic_root / 'scipy' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / '_runtime_bootstrap.json').write_text('{}', encoding='utf-8')
+        _write_minimal_vector_store_runtime(runtime_dir)
+        (pending_dir / 'huggingface_hub').mkdir(parents=True, exist_ok=True)
+        (pending_dir / 'huggingface_hub' / '__init__.py').write_text(
+            'raise RuntimeError("pending should not be imported")\n',
+            encoding='utf-8',
+        )
+        manifest_path = runtime_dir / '.pending' / 'semantic-core' / 'manifest.json'
+        manifest_path.write_text(json.dumps({'component': 'semantic-core', 'payload_dir': str(pending_dir)}), encoding='utf-8')
+        for module_name in ['torch', 'sentence_transformers', 'transformers', 'huggingface_hub', 'safetensors', 'numpy', 'scipy', 'pyarrow', 'pandas', 'lancedb', 'onnxruntime']:
+            sys.modules.pop(module_name, None)
+        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
+             patch('omniclip_rag.vector_index._ACCELERATION_CACHE', None), \
+             patch('omniclip_rag.vector_index._detect_nvidia_gpus', return_value=[]), \
+             patch('omniclip_rag.vector_index._detect_nvcc_version', return_value=''):
+            payload = detect_acceleration(force_refresh=True)
+            runtime_state = inspect_runtime_environment()
+        self.assertTrue(payload['sentence_transformers_available'])
+        self.assertEqual(payload['sentence_transformers_error'], '')
+        self.assertTrue(runtime_state['runtime_pending'])
+        self.assertIn('semantic-core', runtime_state['runtime_pending_components'])
+        self.assertEqual(runtime_state['runtime_missing_items'], [])
+        self.assertNotIn('huggingface-hub', payload['sentence_transformers_error'])
+
+    def test_inprocess_semantic_probe_does_not_poison_later_runtime_imports(self) -> None:
+        app_root = TEST_DATA_ROOT / 'runtime_probe_no_poison'
+        runtime_dir = app_root / 'runtime'
+        semantic_root = runtime_dir / 'components' / 'semantic-core'
+        semantic_root.mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'torch').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'sentence_transformers').mkdir(parents=True, exist_ok=True)
+        (semantic_root / '_runtime_bootstrap.json').write_text('{}', encoding='utf-8')
+        (semantic_root / 'torch' / '__init__.py').write_text(
+            'class cuda:\n'
+            '    @staticmethod\n'
+            '    def is_available():\n'
+            '        return False\n'
+            '\n'
+            '__version__ = "2.10.0"\n',
+            encoding='utf-8',
+        )
+        (semantic_root / 'sentence_transformers' / '__init__.py').write_text(
+            'import builtins\n'
+            'count = getattr(builtins, "_omniclip_sentence_transformers_import_count", 0) + 1\n'
+            'builtins._omniclip_sentence_transformers_import_count = count\n'
+            'if count > 1:\n'
+            '    raise ImportError("cannot load module more than once per process")\n'
+            '\n'
+            'class SentenceTransformer:\n'
+            '    def __init__(self, *args, **kwargs):\n'
+            '        self.args = args\n'
+            '        self.kwargs = kwargs\n',
+            encoding='utf-8',
+        )
+        _write_minimal_vector_store_runtime(runtime_dir)
+
+        module_names = ['torch', 'sentence_transformers']
+        for module_name in module_names:
+            sys.modules.pop(module_name, None)
+        if hasattr(builtins, '_omniclip_sentence_transformers_import_count'):
+            delattr(builtins, '_omniclip_sentence_transformers_import_count')
+        try:
+            with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root):
+                first = _probe_runtime_semantic_core_inprocess(runtime_dir)
+                second = _probe_runtime_semantic_core_inprocess(runtime_dir)
+                with _runtime_import_environment(component_id='semantic-core'):
+                    from sentence_transformers import SentenceTransformer
+
+                    embedder = SentenceTransformer('local-model')
+            self.assertTrue(first['torch_available'])
+            self.assertTrue(first['sentence_transformers_available'])
+            self.assertTrue(second['torch_available'])
+            self.assertTrue(second['sentence_transformers_available'])
+            self.assertEqual(embedder.args, ('local-model',))
+            self.assertEqual(getattr(builtins, '_omniclip_sentence_transformers_import_count', 0), 1)
+        finally:
+            for module_name in module_names:
+                sys.modules.pop(module_name, None)
+            if hasattr(builtins, '_omniclip_sentence_transformers_import_count'):
+                delattr(builtins, '_omniclip_sentence_transformers_import_count')
+
+
+
+    def test_runtime_search_roots_include_legacy_vector_store_fallback_for_semantic_core(self) -> None:
+        from omniclip_rag.vector_index import _runtime_search_roots
+
+        app_root = TEST_DATA_ROOT / 'runtime_search_roots_dependencies'
+        runtime_dir = app_root / 'runtime'
+        semantic_root = runtime_dir / 'components' / 'semantic-core'
+        semantic_root.mkdir(parents=True, exist_ok=True)
+        _write_minimal_vector_store_runtime(runtime_dir)
+
+        roots = _runtime_search_roots(runtime_dir, include_pending=False, component_id='semantic-core')
+        resolved = [Path(item).resolve() for item in roots]
+        self.assertIn(semantic_root.resolve(), resolved)
+        self.assertIn(runtime_dir.resolve(), resolved)
 
     def test_lancedb_backend_rebuild_search_and_delete(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "main"))
@@ -252,6 +473,76 @@ class VectorIndexTests(unittest.TestCase):
 
             index.reset()
             self.assertEqual(index.search("块嵌入", 2), [])
+
+
+    def test_lancedb_index_keeps_vector_store_runtime_lazy_until_table_access(self) -> None:
+        runtime_dir = TEST_DATA_ROOT / 'lazy_runtime_root' / 'runtime'
+        semantic_root = runtime_dir / 'components' / 'semantic-core'
+        semantic_root.mkdir(parents=True, exist_ok=True)
+        _write_minimal_vector_store_runtime(runtime_dir)
+        for package in ('torch', 'sentence_transformers', 'transformers', 'huggingface_hub', 'safetensors', 'numpy', 'scipy'):
+            target = semantic_root / package
+            target.mkdir(parents=True, exist_ok=True)
+            (target / '__init__.py').write_text('', encoding='utf-8')
+
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'lazy_runtime_paths'))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+            vector_runtime='torch',
+            vector_device='cpu',
+        )
+
+        with patch.dict(sys.modules, _fake_lancedb_modules(), clear=False),              patch('omniclip_rag.vector_index._application_root_dir', return_value=runtime_dir.parent):
+            index = LanceDbVectorIndex(config, data_paths, embedder_factory=FakeEmbedder)
+            self.assertIsNone(index._db)
+            self.assertFalse(index._table_exists())
+            self.assertIsNone(index._db)
+            index.rebuild([
+                {
+                    'chunk_id': 'lazy-a',
+                    'source_path': 'demo.md',
+                    'title': 'Demo',
+                    'anchor': 'A',
+                    'rendered_text': '我的思维',
+                }
+            ])
+            self.assertIsNotNone(index._db)
+            hits = index.search('我的思维', 5)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].chunk_id, 'lazy-a')
+
+    def test_lancedb_search_coerces_numpy_like_query_vectors_before_querying(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_vector_coercion'))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+        )
+
+        class NumpyLikeEmbedder:
+            def encode(self, texts, *, batch_size=16, show_progress_bar=False, normalize_embeddings=True):
+                vectors = []
+                for text in texts:
+                    values = [float(len(text)), 1.0, 0.0]
+                    vectors.append(types.SimpleNamespace(tolist=lambda vals=values: list(vals)))
+                return vectors
+
+        with patch.dict(sys.modules, _fake_lancedb_modules(_StrictQueryTypeTable)):
+            index = LanceDbVectorIndex(config, data_paths, embedder_factory=NumpyLikeEmbedder)
+            index.rebuild([
+                {
+                    'chunk_id': 'a',
+                    'source_path': 'pages/a.md',
+                    'title': 'A',
+                    'anchor': 'A',
+                    'rendered_text': '我的思维框架',
+                }
+            ])
+            hits = index.search('我的思维', 5)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].chunk_id, 'a')
 
     def test_lancedb_rebuild_accepts_iterable_stream(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "iterable_rebuild"))
@@ -584,7 +875,7 @@ class VectorIndexTests(unittest.TestCase):
                 "huggingface_hub": fake_hub,
                 "sentence_transformers": fake_sentence_transformers,
             },
-        ):
+        ), patch('omniclip_rag.vector_index._runtime_import_environment', side_effect=lambda **_: nullcontext()):
             index = LanceDbVectorIndex(config, data_paths)
             embedder = index._default_embedder_factory()
 
@@ -634,7 +925,7 @@ class VectorIndexTests(unittest.TestCase):
                 "huggingface_hub": fake_hub,
                 "sentence_transformers": None,
             },
-        ):
+        ), patch('omniclip_rag.vector_index._runtime_import_environment', side_effect=lambda **_: nullcontext()):
             index = LanceDbVectorIndex(config, data_paths)
             with self.assertRaises(RuntimeDependencyError) as ctx:
                 index._default_embedder_factory()
@@ -694,13 +985,56 @@ class VectorIndexTests(unittest.TestCase):
                 "huggingface_hub": fake_hub,
                 "sentence_transformers": fake_sentence_transformers,
             },
-        ):
+        ), patch('omniclip_rag.vector_index._runtime_import_environment', side_effect=lambda **_: nullcontext()):
             index = LanceDbVectorIndex(config, data_paths)
             embedder = index._default_embedder_factory()
 
         self.assertIsInstance(embedder, FakeSentenceTransformer)
         self.assertEqual(calls["snapshot"], 0)
         self.assertEqual(calls["sentence"], 1)
+
+
+    def test_vector_store_runtime_dependency_order_keeps_semantic_core_first(self) -> None:
+        self.assertEqual(_runtime_component_dependency_ids('vector-store'), ('semantic-core', 'vector-store'))
+
+    def test_runtime_search_roots_for_vector_store_prefer_semantic_component_before_legacy_root(self) -> None:
+        app_root = TEST_DATA_ROOT / 'runtime_search_roots' / 'app'
+        runtime_dir = app_root / 'runtime'
+        semantic_root = runtime_dir / 'components' / 'semantic-core'
+        semantic_root.mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'torch').mkdir(parents=True, exist_ok=True)
+        (runtime_dir / 'lancedb').mkdir(parents=True, exist_ok=True)
+
+        with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root):
+            roots = _runtime_search_roots(runtime_dir, include_pending=False, component_id='vector-store')
+
+        self.assertGreaterEqual(len(roots), 2)
+        self.assertEqual(roots[0].resolve(), semantic_root.resolve())
+        self.assertEqual(roots[1].resolve(), runtime_dir.resolve())
+
+
+    def test_runtime_dependency_issue_uses_cached_acceleration_by_default(self) -> None:
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(TEST_DATA_ROOT),
+            vector_backend='lancedb',
+            vector_runtime='torch',
+            vector_device='auto',
+        )
+        with patch('omniclip_rag.vector_index.inspect_runtime_environment', return_value={
+            'runtime_exists': True,
+            'runtime_complete': True,
+            'runtime_missing_items': [],
+            'runtime_pending': False,
+            'runtime_pending_components': [],
+            'runtime_dir': TEST_DATA_ROOT / 'runtime',
+            'runtime_has_content': True,
+        }), \
+             patch('omniclip_rag.vector_index.runtime_component_status', side_effect=[{'missing_items': [], 'ready': True}, {'missing_items': [], 'ready': True}]), \
+             patch('omniclip_rag.vector_index.detect_acceleration', return_value={'torch_available': True, 'sentence_transformers_available': True}) as acceleration_mock:
+            issue = runtime_dependency_issue(config)
+        self.assertIsNone(issue)
+        acceleration_mock.assert_called_once_with(force_refresh=False)
 
 
 if __name__ == "__main__":

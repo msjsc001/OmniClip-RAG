@@ -1,7 +1,10 @@
 from __future__ import annotations
+import json
 import sys
 import time
 import logging
+import shutil
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -31,13 +34,26 @@ from ..preflight import estimate_model_cache_bytes
 from ..service import WATCHDOG_AVAILABLE, OmniClipService
 from ..ui_i18n import text, tooltip
 from ..ui_shared import merge_page_filter_defaults
-from ..vector_index import detect_acceleration, get_local_model_dir, is_local_model_ready, model_download_guidance_context, resolve_vector_device, runtime_dependency_issue, runtime_guidance_context
+from ..vector_index import build_runtime_install_command, detect_acceleration, get_local_model_dir, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, resolve_vector_device, runtime_component_catalog, runtime_component_status, runtime_component_usage, runtime_dependency_issue, runtime_guidance_context, runtime_install_sources
 from ..reranker import get_local_reranker_dir, is_local_reranker_ready
+from ..extensions.models import (
+    ExtensionDirectoryState,
+    ExtensionIndexState,
+    ExtensionSourceDirectory,
+    TikaFormatSupportTier,
+    TikaRuntimeStatus,
+    default_tika_format_selections,
+)
+from ..extensions.registry import ExtensionRegistry, ExtensionRegistryState
+from ..extensions.service import ExtensionService
+from ..extensions.runtimes import TikaSidecarManager, build_manual_install_context, detect_tika_runtime, install_tika_runtime, runtime_layout
 from .filter_dialogs import PageBlocklistDialog, SensitiveFilterDialog
 from .theme import ThemeState, scaled
 from .runtime_guidance_dialog import RuntimeGuidanceDialog
+from .runtime_install_dialog import RuntimeInstallDialog
 from .model_download_dialog import ModelDownloadDialog
-from .workers import FunctionWorker, ServiceTaskWorker, WatchWorker
+from .tika_format_dialog import TikaFormatDialog
+from .workers import FunctionWorker, ProgressFunctionWorker, ServiceTaskWorker, WatchWorker
 REPO_URL = 'https://github.com/msjsc001/OmniClip-RAG'
 LOGGER = logging.getLogger(__name__)
 class ConfigWorkspace(QtWidgets.QWidget):
@@ -61,6 +77,17 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._watch_stopping = False
         self._watch_mode = 'watchdog'
         self._status_snapshot: dict[str, object] | None = None
+        self._extension_registry = ExtensionRegistry()
+        self._extension_state = ExtensionRegistryState()
+        self._extension_state_loaded = False
+        self._extension_ui_sync = False
+        self._tika_runtime_manager = TikaSidecarManager()
+        self._tika_runtime_worker: FunctionWorker | None = None
+        self._extension_task_worker: QtCore.QObject | None = None
+        self._extension_task_key: str | None = None
+        self._extension_active_source_key: tuple[str, str] | None = None
+        self._extension_source_progress: dict[tuple[str, str], str] = {}
+        self._extension_source_buttons: dict[tuple[str, str], list[QtWidgets.QAbstractButton]] = {}
         self._current_report = None
         self._latest_preflight_snapshot: dict[str, object] | None = None
         self._task_worker: ServiceTaskWorker | None = None
@@ -78,11 +105,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._watch_worker: WatchWorker | None = None
         self._acceleration_payload: dict[str, object] | None = None
         self._device_probe_worker: FunctionWorker | None = None
+        self._runtime_refresh_worker: FunctionWorker | None = None
         self._device_probe_scheduled = False
         self._device_runtime_prompt_suppressed = False
         self._live_runtime_sync_suppressed = False
         self._initial_status_worker: ServiceTaskWorker | None = None
         self._initial_status_scheduled = False
+        self._startup_status_after_probe = False
+        self._startup_status_delay_ms = 0
         self._resume_prompt_workspace_id: str | None = None
         self._rebuild_pause_event = __import__('threading').Event()
         self._rebuild_cancel_event = __import__('threading').Event()
@@ -121,16 +151,22 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.ui_page, self.ui_body = self._make_scroll_tab()
         self.retrieval_page, self.retrieval_body = self._make_scroll_tab()
         self.data_page, self.data_body = self._make_scroll_tab()
+        self.extensions_page, self.extensions_body = self._make_scroll_tab()
+        self.runtime_page, self.runtime_body = self._make_scroll_tab()
         self.sub_tabs.addTab(self.start_page, self._tr('left_tab_start'))
         self.sub_tabs.addTab(self.settings_page, self._tr('left_tab_settings'))
         self.sub_tabs.addTab(self.ui_page, self._tr('left_tab_ui'))
         self.sub_tabs.addTab(self.retrieval_page, self._tr('left_tab_retrieval'))
         self.sub_tabs.addTab(self.data_page, self._tr('left_tab_data'))
+        self.sub_tabs.addTab(self.extensions_page, self._tr('left_tab_extensions'))
+        self.sub_tabs.addTab(self.runtime_page, self._tr('left_tab_runtime'))
         self._build_start_page(self.start_body)
         self._build_settings_page(self.settings_body)
         self._build_ui_page(self.ui_body)
         self._build_retrieval_page(self.retrieval_body)
         self._build_data_page(self.data_body)
+        self._build_extensions_page(self.extensions_body)
+        self._build_runtime_page(self.runtime_body)
         self.device_combo.currentTextChanged.connect(self._on_device_selection_changed)
         self.backend_combo.currentTextChanged.connect(self._on_runtime_sensitive_setting_changed)
         self.runtime_combo.currentTextChanged.connect(self._on_runtime_sensitive_setting_changed)
@@ -146,6 +182,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         return text(self._language_code, key, **kwargs)
     def _tip(self, key: str, **kwargs) -> str:
         return tooltip(self._language_code, key, **kwargs)
+
+    def current_runtime_snapshot(self) -> tuple[AppConfig, Any]:
+        """Return the latest live workspace/runtime snapshot from the current controls."""
+        return self._collect_config(False)
     def _set_button_variant(self, button: QtWidgets.QPushButton, variant: str) -> None:
         button.setProperty('variant', variant)
         style = button.style()
@@ -222,7 +262,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.vault_chip = QtWidgets.QLabel(quick_card)
         self.model_chip = QtWidgets.QLabel(quick_card)
         self.index_chip = QtWidgets.QLabel(quick_card)
-        for chip in (self.vault_chip, self.model_chip, self.index_chip):
+        self.runtime_chip = QtWidgets.QLabel(quick_card)
+        for chip in (self.vault_chip, self.model_chip, self.index_chip, self.runtime_chip):
             chip.setMargin(8)
             chips.addWidget(chip)
         chips.addStretch(1)
@@ -591,6 +632,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._set_button_variant(save_log_button, 'secondary')
         save_log_button.clicked.connect(self._save_log_preferences)
         log_form.addWidget(save_log_button, 0, 2)
+        self.query_trace_logging_check = QtWidgets.QCheckBox(self._tr('query_trace_logging_label'), card)
+        self.query_trace_logging_check.setToolTip(self._tr('query_trace_logging_hint'))
+        log_form.addWidget(self.query_trace_logging_check, 1, 0, 1, 3)
         self.log_storage_summary_label = QtWidgets.QLabel(card)
         self.log_storage_summary_label.setProperty('role', 'guide')
         self.log_storage_summary_label.setWordWrap(True)
@@ -706,15 +750,51 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.device_combo.setCurrentIndex(0)
     def _current_index_state(self, snapshot: dict[str, object] | None = None) -> str:
         source = snapshot if isinstance(snapshot, dict) else (self._status_snapshot if isinstance(self._status_snapshot, dict) else {})
+        has_markdown_status = bool(source) and any(key in source for key in ('index_state', 'index_ready', 'pending_rebuild'))
+        if not has_markdown_status:
+            return self._fallback_markdown_index_state()
         raw = str(source.get('index_state') or '').strip().lower()
         if raw in {'ready', 'missing', 'pending'}:
             return raw
+        if raw == 'checking':
+            return self._fallback_markdown_index_state()
         if isinstance(source.get('pending_rebuild'), dict):
             return 'pending'
         if bool(source.get('index_ready')):
             return 'ready'
         stats = source.get('stats') or {}
-        return 'ready' if int(stats.get('chunks', 0) or 0) > 0 else 'missing'
+        return 'ready' if int(stats.get('chunks', 0) or 0) > 0 else self._fallback_markdown_index_state()
+
+    def _fallback_markdown_index_state(self) -> str:
+        vault_text = self.vault_edit.text().strip() if hasattr(self, 'vault_edit') else ''
+        if not vault_text:
+            return 'missing'
+        try:
+            normalized_vault = normalize_vault_path(vault_text)
+            vault_path = Path(normalized_vault)
+        except OSError:
+            return 'missing'
+        try:
+            paths = ensure_data_paths(self.data_dir_edit.text().strip() or str(default_data_root()), normalized_vault)
+        except OSError:
+            return 'missing'
+        rebuild_state_file = paths.state_dir / 'rebuild_state.json'
+        if rebuild_state_file.exists():
+            try:
+                rebuild_state = json.loads(rebuild_state_file.read_text(encoding='utf-8'))
+                if normalize_vault_path(str(rebuild_state.get('vault_path') or '')) == normalized_vault:
+                    return 'pending'
+            except Exception:
+                pass
+        index_state_file = paths.state_dir / 'index_state.json'
+        if index_state_file.exists():
+            try:
+                index_state = json.loads(index_state_file.read_text(encoding='utf-8'))
+                if int(index_state.get('version', 0) or 0) == 1 and normalize_vault_path(str(index_state.get('vault_path') or '')) == normalized_vault:
+                    return 'ready'
+            except Exception:
+                pass
+        return 'missing'
     def _index_ready(self, snapshot: dict[str, object] | None = None) -> bool:
         return self._current_index_state(snapshot) == 'ready'
     def _watch_allowed(self, snapshot: dict[str, object] | None = None) -> bool:
@@ -825,6 +905,24 @@ class ConfigWorkspace(QtWidgets.QWidget):
         elif self._saved_vaults:
             self.saved_vault_combo.setCurrentIndex(0)
         self.saved_vault_combo.blockSignals(False)
+        if self._extension_state_loaded:
+            self._refresh_extension_saved_vault_sources()
+
+    def _refresh_extension_saved_vault_sources(self) -> None:
+        if not hasattr(self, 'ext_pdf_enabled_check') or not self._extension_state_loaded:
+            return
+        try:
+            self._extension_state = self._normalize_extension_registry_state(
+                self._extension_state,
+                self._paths,
+                self.vault_edit.text().strip(),
+            )
+            self._extension_registry.save(self._paths, self._extension_state)
+        except OSError as exc:
+            LOGGER.warning('Failed to refresh extension source directories after vault changes: %s', exc)
+            return
+        self._apply_extension_state_to_controls()
+
     def _refresh_workspace_summary(self) -> None:
         vault = normalize_vault_path(self.vault_edit.text().strip())
         data_root = self.data_dir_edit.text().strip() or str(default_data_root())
@@ -880,6 +978,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
         index_state = self._current_index_state()
         self.index_chip.setText(self._tr(f'index_{index_state}'))
         self._set_chip_style(self.index_chip, ok=index_state == 'ready', warn=index_state == 'pending')
+        if index_state == 'checking':
+            self._set_chip_style(self.index_chip)
+        self._refresh_runtime_management_ui()
     def _refresh_device_options(self, payload: dict[str, object] | None = None) -> None:
         if isinstance(payload, dict):
             self._acceleration_payload = dict(payload)
@@ -898,6 +999,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.device_combo.blockSignals(False)
         self.device_summary_label.setText(self._device_summary())
         self.device_runtime_status_label.setText(self._device_runtime_status_text())
+        self._refresh_runtime_management_ui()
     def _vector_backend_enabled(self) -> bool:
         backend = self.backend_combo.currentText().strip() if hasattr(self, 'backend_combo') else getattr(self._config, 'vector_backend', 'disabled')
         return (backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
@@ -915,6 +1017,1624 @@ class ConfigWorkspace(QtWidgets.QWidget):
         return runtime_dependency_issue(config) is not None
     def _runtime_guidance_auto_popup_allowed(self) -> bool:
         return not self._device_runtime_prompt_suppressed and not self._busy and not self._watch_active
+    def _build_extensions_page(self, parent: QtWidgets.QWidget) -> None:
+        card, layout = self._make_card('left_tab_extensions')
+        self._insert_card(parent, 0, card)
+        subtitle = QtWidgets.QLabel(self._tr('extensions_subtitle'), card)
+        subtitle.setProperty('role', 'subtitle')
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        summary_title = QtWidgets.QLabel(self._tr('extensions_status_summary_title'), card)
+        summary_title.setProperty('role', 'cardTitle')
+        layout.addWidget(summary_title)
+        chips = QtWidgets.QHBoxLayout()
+        chips.setSpacing(8)
+        layout.addLayout(chips)
+        self.ext_pdf_chip = QtWidgets.QLabel(card)
+        self.ext_tika_chip = QtWidgets.QLabel(card)
+        self.ext_tika_formats_chip = QtWidgets.QLabel(card)
+        for chip in (self.ext_pdf_chip, self.ext_tika_chip, self.ext_tika_formats_chip):
+            chip.setMargin(8)
+            chips.addWidget(chip)
+        chips.addStretch(1)
+
+        actions_title = QtWidgets.QLabel(self._tr('extensions_global_actions_title'), card)
+        actions_title.setProperty('role', 'cardTitle')
+        layout.addWidget(actions_title)
+        actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(8)
+        layout.addLayout(actions)
+        self.ext_preflight_button = QtWidgets.QPushButton(self._tr('extensions_global_preflight'), card)
+        self._set_button_variant(self.ext_preflight_button, 'secondary')
+        self.ext_preflight_button.clicked.connect(self._run_extension_preflight)
+        actions.addWidget(self.ext_preflight_button)
+        self.ext_rebuild_button = QtWidgets.QPushButton(self._tr('extensions_global_rebuild'), card)
+        self._set_button_variant(self.ext_rebuild_button, 'primary')
+        self.ext_rebuild_button.clicked.connect(self._run_extension_rebuild)
+        actions.addWidget(self.ext_rebuild_button)
+        self.ext_stop_button = QtWidgets.QPushButton(self._tr('extensions_global_stop'), card)
+        self._set_button_variant(self.ext_stop_button, 'danger')
+        self.ext_stop_button.clicked.connect(self._handle_extension_stop_action)
+        actions.addWidget(self.ext_stop_button)
+        actions.addStretch(1)
+
+        self.ext_tabs = QtWidgets.QTabWidget(card)
+        layout.addWidget(self.ext_tabs)
+        self.ext_pdf_page = QtWidgets.QWidget(self.ext_tabs)
+        self.ext_tika_page = QtWidgets.QWidget(self.ext_tabs)
+        self.ext_tabs.addTab(self.ext_pdf_page, self._tr('extensions_pdf_tab'))
+        self.ext_tabs.addTab(self.ext_tika_page, self._tr('extensions_tika_tab'))
+        self._build_pdf_extension_tab(self.ext_pdf_page)
+        self._build_tika_extension_tab(self.ext_tika_page)
+        self._refresh_extension_overview()
+
+    def _build_pdf_extension_tab(self, parent: QtWidgets.QWidget) -> None:
+        layout = QtWidgets.QVBoxLayout(parent)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(10)
+        config_card, config_layout = self._make_card()
+        layout.addWidget(config_card)
+        self.ext_pdf_enabled_check = QtWidgets.QCheckBox(self._tr('extensions_enable_pdf'), config_card)
+        self.ext_pdf_enabled_check.toggled.connect(self._on_pdf_enabled_toggled)
+        config_layout.addWidget(self.ext_pdf_enabled_check)
+        hint = QtWidgets.QLabel(self._tr('extensions_pdf_sources_hint'), config_card)
+        hint.setProperty('role', 'muted')
+        hint.setWordWrap(True)
+        config_layout.addWidget(hint)
+
+        source_card, source_layout = self._make_card('extensions_source_dirs_title')
+        layout.addWidget(source_card)
+        self.ext_pdf_source_table = self._create_extension_source_table(source_card, 'pdf')
+        source_layout.addWidget(self.ext_pdf_source_table)
+        source_actions = QtWidgets.QHBoxLayout()
+        source_layout.addLayout(source_actions)
+        self.ext_pdf_add_dir_button = QtWidgets.QPushButton(self._tr('extensions_add_dir'), source_card)
+        self._set_button_variant(self.ext_pdf_add_dir_button, 'secondary')
+        self.ext_pdf_add_dir_button.clicked.connect(lambda: self._add_extension_source_directory('pdf'))
+        source_actions.addWidget(self.ext_pdf_add_dir_button)
+        source_actions.addStretch(1)
+        layout.addStretch(1)
+
+    def _build_tika_extension_tab(self, parent: QtWidgets.QWidget) -> None:
+        layout = QtWidgets.QVBoxLayout(parent)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(10)
+        config_card, config_layout = self._make_card()
+        layout.addWidget(config_card)
+        self.ext_tika_enabled_check = QtWidgets.QCheckBox(self._tr('extensions_enable_tika'), config_card)
+        self.ext_tika_enabled_check.toggled.connect(self._on_tika_enabled_toggled)
+        config_layout.addWidget(self.ext_tika_enabled_check)
+        hint = QtWidgets.QLabel(self._tr('extensions_tika_sources_hint'), config_card)
+        hint.setProperty('role', 'muted')
+        hint.setWordWrap(True)
+        config_layout.addWidget(hint)
+
+        runtime_card, runtime_layout = self._make_card('extensions_runtime_title')
+        layout.addWidget(runtime_card)
+        self.ext_tika_runtime_status_label = QtWidgets.QLabel(runtime_card)
+        self.ext_tika_runtime_status_label.setProperty('role', 'guide')
+        runtime_layout.addWidget(self.ext_tika_runtime_status_label)
+        self.ext_tika_runtime_version_label = QtWidgets.QLabel(runtime_card)
+        self.ext_tika_runtime_version_label.setProperty('role', 'muted')
+        runtime_layout.addWidget(self.ext_tika_runtime_version_label)
+        self.ext_tika_runtime_root_label = QtWidgets.QLabel(runtime_card)
+        self.ext_tika_runtime_root_label.setProperty('role', 'muted')
+        self.ext_tika_runtime_root_label.setWordWrap(True)
+        runtime_layout.addWidget(self.ext_tika_runtime_root_label)
+        runtime_actions = QtWidgets.QHBoxLayout()
+        runtime_layout.addLayout(runtime_actions)
+        self.ext_tika_auto_button = QtWidgets.QPushButton(self._tr('extensions_tika_auto_install'), runtime_card)
+        self._set_button_variant(self.ext_tika_auto_button, 'secondary')
+        self.ext_tika_auto_button.clicked.connect(self._install_tika_runtime_requested)
+        runtime_actions.addWidget(self.ext_tika_auto_button)
+        self.ext_tika_manual_button = QtWidgets.QPushButton(self._tr('extensions_tika_manual_install'), runtime_card)
+        self._set_button_variant(self.ext_tika_manual_button, 'secondary')
+        self.ext_tika_manual_button.clicked.connect(self._show_tika_manual_install_dialog)
+        runtime_actions.addWidget(self.ext_tika_manual_button)
+        self.ext_tika_redetect_button = QtWidgets.QPushButton(self._tr('extensions_tika_redetect'), runtime_card)
+        self._set_button_variant(self.ext_tika_redetect_button, 'secondary')
+        self.ext_tika_redetect_button.clicked.connect(self._schedule_tika_runtime_refresh)
+        runtime_actions.addWidget(self.ext_tika_redetect_button)
+        runtime_actions.addStretch(1)
+
+        format_card, format_layout = self._make_card('extensions_tika_formats_title')
+        layout.addWidget(format_card)
+        self.ext_tika_formats_summary_label = QtWidgets.QLabel(format_card)
+        self.ext_tika_formats_summary_label.setProperty('role', 'guide')
+        self.ext_tika_formats_summary_label.setWordWrap(True)
+        format_layout.addWidget(self.ext_tika_formats_summary_label)
+        self.ext_tika_select_formats_button = QtWidgets.QPushButton(self._tr('extensions_tika_formats_button'), format_card)
+        self._set_button_variant(self.ext_tika_select_formats_button, 'secondary')
+        self.ext_tika_select_formats_button.clicked.connect(self._open_tika_format_dialog)
+        format_layout.addWidget(self.ext_tika_select_formats_button, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
+
+        source_card, source_layout = self._make_card('extensions_source_dirs_title')
+        layout.addWidget(source_card)
+        self.ext_tika_source_table = self._create_extension_source_table(source_card, 'tika')
+        source_layout.addWidget(self.ext_tika_source_table)
+        source_actions = QtWidgets.QHBoxLayout()
+        source_layout.addLayout(source_actions)
+        self.ext_tika_add_dir_button = QtWidgets.QPushButton(self._tr('extensions_add_dir'), source_card)
+        self._set_button_variant(self.ext_tika_add_dir_button, 'secondary')
+        self.ext_tika_add_dir_button.clicked.connect(lambda: self._add_extension_source_directory('tika'))
+        source_actions.addWidget(self.ext_tika_add_dir_button)
+        source_actions.addStretch(1)
+        layout.addStretch(1)
+
+
+    def _build_runtime_page(self, parent: QtWidgets.QWidget) -> None:
+        card, layout = self._make_card('left_tab_runtime')
+        self._insert_card(parent, 0, card)
+        subtitle = QtWidgets.QLabel(self._tr('runtime_page_subtitle'), card)
+        subtitle.setProperty('role', 'subtitle')
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        self.runtime_status_summary_label = QtWidgets.QLabel(card)
+        self.runtime_status_summary_label.setProperty('role', 'guide')
+        self.runtime_status_summary_label.setWordWrap(True)
+        layout.addWidget(self.runtime_status_summary_label)
+
+        self.runtime_root_label = QtWidgets.QLabel(card)
+        self.runtime_root_label.setProperty('role', 'muted')
+        self.runtime_root_label.setWordWrap(True)
+        layout.addWidget(self.runtime_root_label)
+
+        actions = QtWidgets.QHBoxLayout()
+        actions.setSpacing(8)
+        layout.addLayout(actions)
+        self.runtime_refresh_button = QtWidgets.QPushButton(self._tr('runtime_refresh'), card)
+        self._set_button_variant(self.runtime_refresh_button, 'secondary')
+        self.runtime_refresh_button.clicked.connect(self._request_runtime_management_refresh)
+        actions.addWidget(self.runtime_refresh_button)
+        self.runtime_open_dir_button = QtWidgets.QPushButton(self._tr('runtime_open_dir'), card)
+        self._set_button_variant(self.runtime_open_dir_button, 'secondary')
+        self.runtime_open_dir_button.clicked.connect(self._open_runtime_directory)
+        actions.addWidget(self.runtime_open_dir_button)
+        actions.addStretch(1)
+
+        table_card, table_layout = self._make_card('runtime_components_title')
+        layout.addWidget(table_card)
+        table_hint = QtWidgets.QLabel(self._tr('runtime_components_hint'), table_card)
+        table_hint.setProperty('role', 'muted')
+        table_hint.setWordWrap(True)
+        table_layout.addWidget(table_hint)
+        runtime_warning = QtWidgets.QLabel(self._tr('runtime_components_warning'), table_card)
+        runtime_warning.setProperty('role', 'muted')
+        runtime_warning.setWordWrap(True)
+        warning_font = runtime_warning.font()
+        warning_font.setBold(True)
+        runtime_warning.setFont(warning_font)
+        table_layout.addWidget(runtime_warning)
+
+        self.runtime_components_table = QtWidgets.QTableWidget(table_card)
+        self.runtime_components_table.setColumnCount(5)
+        self.runtime_components_table.setHorizontalHeaderLabels([
+            self._tr('runtime_col_name'),
+            self._tr('runtime_col_role'),
+            self._tr('runtime_col_status'),
+            self._tr('runtime_col_missing'),
+            self._tr('runtime_col_actions'),
+        ])
+        self.runtime_components_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.runtime_components_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.runtime_components_table.setAlternatingRowColors(True)
+        self.runtime_components_table.setWordWrap(True)
+        self.runtime_components_table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.runtime_components_table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.runtime_components_table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        self.runtime_components_table.verticalHeader().setVisible(False)
+        self.runtime_components_table.verticalHeader().setDefaultSectionSize(scaled(self._theme, 92, minimum=84))
+        runtime_header = self.runtime_components_table.horizontalHeader()
+        runtime_header.setMinimumHeight(scaled(self._theme, 36, minimum=34))
+        runtime_header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        runtime_header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        runtime_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        runtime_header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        runtime_header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        table_layout.addWidget(self.runtime_components_table)
+        layout.addStretch(1)
+        self._refresh_runtime_management_ui()
+
+    def _runtime_component_descriptors(self) -> list[dict[str, str]]:
+        return [
+            {
+                'component_id': 'semantic-core',
+                'name': self._tr('runtime_component_semantic_core'),
+                'description': self._tr('runtime_component_semantic_core_desc'),
+            },
+            {
+                'component_id': 'vector-store',
+                'name': self._tr('runtime_component_vector_store'),
+                'description': self._tr('runtime_component_vector_store_desc'),
+            },
+            {
+                'component_id': 'gpu-acceleration',
+                'name': self._tr('runtime_component_gpu_acceleration'),
+                'description': self._tr('runtime_component_gpu_acceleration_desc'),
+            },
+        ]
+
+    def _runtime_component_install_target(self, component_id: str, *, context: dict[str, object] | None = None) -> tuple[str, str]:
+        if component_id == 'gpu-acceleration':
+            return 'semantic-core', 'cuda'
+        if component_id == 'semantic-core':
+            # Why: CPU semantic retrieval is the baseline capability. Presence of
+            # an NVIDIA GPU should not force users to download the much heavier
+            # CUDA build before advanced search can recover.
+            return 'semantic-core', 'cpu'
+        return component_id, 'cpu'
+
+    def _runtime_component_state(self, component_id: str, *, force_refresh: bool = False) -> dict[str, object]:
+        context = self._current_runtime_repair_context(force_refresh=force_refresh)
+        if component_id == 'gpu-acceleration':
+            gpu_present = bool(context.get('gpu_present'))
+            if not gpu_present:
+                return {
+                    'component_id': component_id,
+                    'status': 'not-needed',
+                    'ready': True,
+                    'missing_items': [],
+                    'installed_count': 0,
+                    'total_count': 0,
+                    'cleanup_patterns': tuple(),
+                    'disk_usage': self._tr('runtime_usage_not_needed'),
+                    'download_usage': self._tr('runtime_usage_not_needed'),
+                }
+            state = dict(runtime_component_status('semantic-core'))
+            pending_status = str(state.get('status') or '').strip().lower() == 'pending'
+            extra_failures: list[str] = []
+            if not pending_status:
+                if 'cuda_available' in context and not bool(context.get('cuda_available')):
+                    extra_failures.append(self._tr('runtime_missing_cuda_environment'))
+                if 'torch_available' in context and not bool(context.get('torch_available')):
+                    detail = str(context.get('torch_error') or self._tr('runtime_missing_unknown')).strip()
+                    extra_failures.append(f"torch（{detail}）")
+            missing_items = [str(item).strip() for item in list(state.get('missing_items') or []) if str(item).strip()]
+            for item in extra_failures:
+                if item not in missing_items:
+                    missing_items.append(item)
+            state['component_id'] = component_id
+            state['missing_items'] = missing_items
+            cuda_ready = bool(context.get('cuda_available')) if 'cuda_available' in context else True
+            state['ready'] = bool(state.get('ready')) and not extra_failures and cuda_ready
+            if pending_status:
+                state['ready'] = False
+                state['status'] = 'pending'
+            elif state['ready']:
+                state['status'] = 'ready'
+            elif missing_items:
+                state['status'] = 'missing' if int(state.get('installed_count', 0) or 0) <= 0 else 'incomplete'
+            usage = runtime_component_usage('semantic-core', 'cuda')
+            state['disk_usage'] = usage.get('disk_usage', '')
+            state['download_usage'] = usage.get('download_usage', '')
+            return state
+
+        state = dict(runtime_component_status(component_id))
+        pending_status = str(state.get('status') or '').strip().lower() == 'pending'
+        extra_failures: list[str] = []
+        if component_id == 'semantic-core' and not pending_status:
+            if 'torch_available' in context and not bool(context.get('torch_available')):
+                detail = str(context.get('torch_error') or self._tr('runtime_missing_unknown')).strip()
+                extra_failures.append(f"torch（{detail}）")
+            if 'sentence_transformers_available' in context and not bool(context.get('sentence_transformers_available')):
+                detail = str(context.get('sentence_transformers_error') or self._tr('runtime_missing_unknown')).strip()
+                extra_failures.append(f"sentence-transformers（{detail}）")
+        missing_items = [str(item).strip() for item in list(state.get('missing_items') or []) if str(item).strip()]
+        for item in extra_failures:
+            if item not in missing_items:
+                missing_items.append(item)
+        state['missing_items'] = missing_items
+        state['ready'] = bool(state.get('ready')) and not extra_failures
+        if pending_status:
+            state['ready'] = False
+            state['status'] = 'pending'
+        elif state['ready']:
+            state['status'] = 'ready'
+        elif missing_items:
+            state['status'] = 'missing' if int(state.get('installed_count', 0) or 0) <= 0 else 'incomplete'
+        usage = runtime_component_usage(component_id, str(context.get('recommended_profile') or 'cpu'))
+        state['disk_usage'] = usage.get('disk_usage', '')
+        state['download_usage'] = usage.get('download_usage', '')
+        return state
+
+    def _runtime_status_text(self, status: str) -> str:
+        normalized = ((status or 'missing').strip().lower() or 'missing').replace('-', '_')
+        return self._tr(f'runtime_status_{normalized}')
+
+    def _runtime_missing_text(self, state: dict[str, object]) -> str:
+        normalized_status = str(state.get('status') or '').strip().lower()
+        if normalized_status == 'not-needed':
+            return self._tr('runtime_missing_not_needed_gpu')
+        if normalized_status == 'pending':
+            return self._tr('runtime_missing_pending')
+        items = [str(item).strip() for item in list(state.get('missing_items') or []) if str(item).strip()]
+        if not items:
+            return self._tr('runtime_missing_none')
+        return ', '.join(items)
+
+    def _build_runtime_component_actions_widget(self, descriptor: dict[str, str], state: dict[str, object], parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget(parent)
+        container.setMinimumHeight(scaled(self._theme, 74, minimum=68))
+        action_layout = QtWidgets.QGridLayout(container)
+        action_layout.setContentsMargins(0, 2, 0, 2)
+        action_layout.setHorizontalSpacing(8)
+        action_layout.setVerticalSpacing(8)
+        component_id = descriptor['component_id']
+
+        repair_button = QtWidgets.QPushButton(self._tr('runtime_row_repair'), container)
+        self._set_button_variant(repair_button, 'secondary')
+        repair_button.setMinimumHeight(scaled(self._theme, 30, minimum=28))
+        repair_button.clicked.connect(lambda _checked=False, c=component_id: self._open_runtime_component_repair(c))
+        action_layout.addWidget(repair_button, 0, 0)
+
+        clear_button = QtWidgets.QPushButton(self._tr('runtime_row_clear'), container)
+        self._set_button_variant(clear_button, 'danger')
+        clear_button.setMinimumHeight(scaled(self._theme, 30, minimum=28))
+        clear_button.clicked.connect(lambda _checked=False, c=component_id: self._clear_runtime_component(c))
+        action_layout.addWidget(clear_button, 0, 1)
+
+        if component_id == 'gpu-acceleration' and str(state.get('status') or '').strip().lower() == 'not-needed':
+            clear_button.setEnabled(False)
+            repair_button.setEnabled(False)
+
+        refresh_button = QtWidgets.QPushButton(self._tr('runtime_row_refresh'), container)
+        self._set_button_variant(refresh_button, 'secondary')
+        refresh_button.setMinimumHeight(scaled(self._theme, 30, minimum=28))
+        refresh_button.clicked.connect(self._request_runtime_management_refresh)
+        action_layout.addWidget(refresh_button, 1, 0, 1, 2)
+        return container
+
+    def _fit_table_to_contents(self, table: QtWidgets.QTableWidget, *, minimum_height: int = 180, extra_padding: int = 8) -> None:
+        header_height = table.horizontalHeader().height() if table.horizontalHeader() is not None else 0
+        body_height = sum(table.rowHeight(row) for row in range(table.rowCount()))
+        frame_height = table.frameWidth() * 2
+        scroll_height = table.horizontalScrollBar().sizeHint().height() if table.horizontalScrollBar().isVisible() else 0
+        target_height = max(minimum_height, header_height + body_height + frame_height + scroll_height + extra_padding)
+        table.setFixedHeight(target_height)
+
+
+    def _request_runtime_management_refresh(self, _checked: bool = False) -> None:
+        if self._runtime_refresh_worker is not None:
+            return
+        runtime_state = inspect_runtime_environment()
+        pending_components = list(runtime_state.get('runtime_pending_components') or [])
+        if pending_components:
+            self._refresh_runtime_management_ui(force_refresh=False)
+            self.statusMessageChanged.emit(self._tr('runtime_refresh_pending', components=', '.join(pending_components)))
+            return
+        if hasattr(self, 'runtime_refresh_button'):
+            self.runtime_refresh_button.setEnabled(False)
+        if hasattr(self, 'runtime_status_summary_label'):
+            self.runtime_status_summary_label.setText(self._tr('runtime_refresh_running'))
+        self.statusMessageChanged.emit(self._tr('runtime_refresh_running'))
+        worker = FunctionWorker(fn=lambda: detect_acceleration(force_refresh=True))
+        self._runtime_refresh_worker = worker
+        worker.succeeded.connect(self._handle_runtime_management_refresh_success)
+        worker.failed.connect(self._handle_runtime_management_refresh_failure)
+        worker.finished.connect(self._on_runtime_management_refresh_finished)
+        worker.start()
+
+    def _handle_runtime_management_refresh_success(self, payload: object) -> None:
+        payload_dict = dict(payload or {}) if isinstance(payload, dict) else {}
+        self._acceleration_payload = payload_dict or None
+        self._refresh_runtime_management_ui(force_refresh=False)
+        if payload_dict:
+            self._refresh_device_options(payload_dict)
+        self.statusMessageChanged.emit(self._tr('runtime_refresh_done'))
+
+    def _handle_runtime_management_refresh_failure(self, message: str, _traceback_text: str) -> None:
+        text_value = str(message or '').strip() or self._tr('runtime_missing_unknown')
+        self.statusMessageChanged.emit(self._tr('runtime_refresh_failed', error=text_value))
+        self._append_log(self._tr('runtime_refresh_failed', error=text_value))
+
+    def _on_runtime_management_refresh_finished(self) -> None:
+        self._runtime_refresh_worker = None
+        if hasattr(self, 'runtime_refresh_button'):
+            self.runtime_refresh_button.setEnabled(True)
+
+    def _populate_runtime_component_table(self, *, force_refresh: bool = False) -> None:
+        if not hasattr(self, 'runtime_components_table'):
+            return
+        table = self.runtime_components_table
+        table.setRowCount(0)
+        for row, descriptor in enumerate(self._runtime_component_descriptors()):
+            state = self._runtime_component_state(descriptor['component_id'], force_refresh=force_refresh)
+            table.insertRow(row)
+            name_item = QtWidgets.QTableWidgetItem(descriptor['name'])
+            name_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+            table.setItem(row, 0, name_item)
+            role_item = QtWidgets.QTableWidgetItem(descriptor['description'])
+            role_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+            table.setItem(row, 1, role_item)
+            status_item = QtWidgets.QTableWidgetItem(self._runtime_status_text(str(state.get('status', 'missing'))))
+            status_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+            table.setItem(row, 2, status_item)
+            missing_item = QtWidgets.QTableWidgetItem(self._runtime_missing_text(state))
+            missing_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+            table.setItem(row, 3, missing_item)
+            table.setCellWidget(row, 4, self._build_runtime_component_actions_widget(descriptor, state, table))
+        table.resizeRowsToContents()
+        minimum_height = scaled(self._theme, 220, minimum=200)
+        extra_padding = scaled(self._theme, 12, minimum=10)
+        self._fit_table_to_contents(table, minimum_height=minimum_height, extra_padding=extra_padding)
+        QtCore.QTimer.singleShot(0, lambda table=table, minimum_height=minimum_height, extra_padding=extra_padding: self._fit_table_to_contents(table, minimum_height=minimum_height, extra_padding=extra_padding))
+
+    def _refresh_runtime_management_ui(self, *, force_refresh: bool = False) -> None:
+        context = self._current_runtime_repair_context(force_refresh=force_refresh)
+        semantic_state = self._runtime_component_state('semantic-core', force_refresh=force_refresh)
+        vector_state = self._runtime_component_state('vector-store', force_refresh=force_refresh)
+        gpu_state = self._runtime_component_state('gpu-acceleration', force_refresh=force_refresh)
+        overall_ready = bool(semantic_state.get('ready')) and bool(vector_state.get('ready'))
+        gpu_present = bool(context.get('gpu_present'))
+        full_ready = overall_ready and gpu_present and bool(gpu_state.get('ready'))
+        runtime_dir = str(context.get('runtime_dir') or '')
+        missing_summary = ', '.join(list(dict.fromkeys([
+            *[str(item).strip() for item in list(semantic_state.get('missing_items') or []) if str(item).strip()],
+            *[str(item).strip() for item in list(vector_state.get('missing_items') or []) if str(item).strip()],
+        ]))[:6])
+        if hasattr(self, 'runtime_chip'):
+            if overall_ready and not gpu_present:
+                self.runtime_chip.setText(self._tr('runtime_chip_cpu_ready'))
+                self._set_chip_style(self.runtime_chip, ok=True)
+            elif full_ready:
+                self.runtime_chip.setText(self._tr('runtime_chip_ready'))
+                self._set_chip_style(self.runtime_chip, ok=True)
+            elif overall_ready:
+                self.runtime_chip.setText(self._tr('runtime_chip_cpu_ready'))
+                self._set_chip_style(self.runtime_chip, ok=True)
+            elif context.get('runtime_exists'):
+                self.runtime_chip.setText(self._tr('runtime_chip_incomplete'))
+                self._set_chip_style(self.runtime_chip, warn=True)
+            else:
+                self.runtime_chip.setText(self._tr('runtime_chip_missing'))
+                self._set_chip_style(self.runtime_chip, warn=True)
+        if hasattr(self, 'runtime_status_summary_label'):
+            if overall_ready and not gpu_present:
+                summary = self._tr('runtime_page_summary_ready_cpu')
+            elif full_ready:
+                summary = self._tr('runtime_page_summary_ready')
+            elif overall_ready:
+                summary = self._tr('runtime_page_summary_ready_cpu')
+            elif context.get('runtime_exists'):
+                summary = self._tr('runtime_page_summary_incomplete', items=missing_summary or self._tr('runtime_missing_unknown'))
+            else:
+                summary = self._tr('runtime_page_summary_missing')
+            pending_components = list(context.get('runtime_pending_components') or [])
+            if pending_components and not overall_ready:
+                summary = self._tr('runtime_page_summary_pending_only', components=', '.join(pending_components))
+            elif pending_components:
+                summary = f"{summary}\n{self._tr('runtime_page_summary_pending', components=', '.join(pending_components))}"
+            if (not pending_components) and context.get('sentence_transformers_error') and not bool(semantic_state.get('ready')):
+                summary = f"{summary}\n{self._tr('runtime_page_summary_extra_failure', detail=str(context.get('sentence_transformers_error') or ''))}"
+            self.runtime_status_summary_label.setText(summary)
+        if hasattr(self, 'runtime_root_label'):
+            self.runtime_root_label.setText(self._tr('runtime_root_label', path=runtime_dir or self._tr('none_value')))
+        self._populate_runtime_component_table(force_refresh=force_refresh)
+
+    def focus_runtime_management(self) -> None:
+        if hasattr(self, 'sub_tabs') and hasattr(self, 'runtime_page'):
+            self.sub_tabs.setCurrentWidget(self.runtime_page)
+            if hasattr(self, 'runtime_components_table'):
+                self.runtime_components_table.setFocus()
+
+    def _open_runtime_directory(self) -> None:
+        context = self._current_runtime_repair_context(force_refresh=False)
+        runtime_dir = Path(str(context.get('runtime_dir') or '')).expanduser()
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(runtime_dir)))
+
+    def _ask_runtime_repair_mode(self, component_name: str, download_usage: str) -> str | None:
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(self._tr('runtime_repair_choice_title'))
+        box.setText(self._tr('runtime_repair_choice_body', component=component_name, size=download_usage or self._tr('runtime_missing_unknown')))
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        auto_button = box.addButton(self._tr('runtime_repair_choice_auto'), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        manual_button = box.addButton(self._tr('runtime_repair_choice_manual'), QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        box.addButton(self._tr('cancel'), QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is auto_button:
+            return 'auto'
+        if clicked is manual_button:
+            return 'manual'
+        return None
+
+    def _ask_runtime_source(self) -> str | None:
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(self._tr('runtime_source_choice_title'))
+        box.setText(self._tr('runtime_source_choice_body'))
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        official_button = box.addButton(self._tr('runtime_source_official'), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        mirror_button = box.addButton(self._tr('runtime_source_mirror'), QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        box.addButton(self._tr('cancel'), QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is official_button:
+            return 'official'
+        if clicked is mirror_button:
+            return 'mirror'
+        return None
+
+    def _runtime_component_display(self, component_id: str) -> tuple[str, str]:
+        if component_id == 'semantic-core':
+            return self._tr('runtime_component_semantic_core'), self._tr('runtime_component_semantic_core_desc')
+        if component_id == 'vector-store':
+            return self._tr('runtime_component_vector_store'), self._tr('runtime_component_vector_store_desc')
+        if component_id == 'gpu-acceleration':
+            return self._tr('runtime_component_gpu_acceleration'), self._tr('runtime_component_gpu_acceleration_desc')
+        if component_id == 'all':
+            return self._tr('runtime_component_all'), self._tr('runtime_component_all_desc')
+        return self._tr('runtime_component_semantic_core'), self._tr('runtime_component_semantic_core_desc')
+
+    def _runtime_manual_context(self, component_id: str) -> dict[str, object]:
+        context = self._current_runtime_repair_context(force_refresh=True)
+        component_name, component_description = self._runtime_component_display(component_id)
+        install_component, profile = self._runtime_component_install_target(component_id, context=context)
+        usage = {
+            'disk_usage': str(context.get('disk_usage') or ''),
+            'download_usage': str(context.get('download_usage') or ''),
+        } if component_id == 'all' else runtime_component_usage(install_component, profile)
+        sources = runtime_install_sources()
+        runtime_dir = Path(str(context.get('runtime_dir') or '')).expanduser()
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        official_command = build_runtime_install_command(profile, source='official', component=install_component if component_id != 'all' else 'all')
+        mirror_command = build_runtime_install_command(profile, source='mirror', component=install_component if component_id != 'all' else 'all')
+        plain_text = self._tr(
+            'runtime_manual_plain_text',
+            component=component_name,
+            description=component_description,
+            runtime_dir=str(runtime_dir),
+            official_url=sources['official'],
+            official_command=official_command,
+            mirror_url=sources['mirror'],
+            mirror_command=mirror_command,
+            disk_usage=usage.get('disk_usage') or self._tr('runtime_missing_unknown'),
+            download_usage=usage.get('download_usage') or self._tr('runtime_missing_unknown'),
+        )
+        return {
+            'component_name': component_name,
+            'component_description': component_description,
+            'runtime_dir': str(runtime_dir),
+            'official_url': sources['official'],
+            'official_install_command': official_command,
+            'mirror_url': sources['mirror'],
+            'mirror_install_command': mirror_command,
+            'disk_usage': usage.get('disk_usage') or self._tr('runtime_missing_unknown'),
+            'download_usage': usage.get('download_usage') or self._tr('runtime_missing_unknown'),
+            'plain_text': plain_text,
+        }
+
+    def _open_runtime_component_repair(self, component_id: str) -> None:
+        component_name, _component_description = self._runtime_component_display(component_id)
+        state = self._runtime_component_state(component_id if component_id != 'all' else 'semantic-core', force_refresh=True) if component_id == 'all' else self._runtime_component_state(component_id, force_refresh=True)
+        if component_id == 'all':
+            overall_context = self._current_runtime_repair_context(force_refresh=True)
+            semantic_state = self._runtime_component_state('semantic-core', force_refresh=True)
+            vector_state = self._runtime_component_state('vector-store', force_refresh=True)
+            needs_repair = not (bool(semantic_state.get('ready')) and bool(vector_state.get('ready')))
+            download_usage = str(overall_context.get('download_usage') or self._tr('runtime_missing_unknown'))
+        else:
+            needs_repair = not bool(state.get('ready'))
+            download_usage = str(state.get('download_usage') or self._tr('runtime_missing_unknown'))
+        if not needs_repair:
+            QtWidgets.QMessageBox.information(self, self._tr('runtime_repair_not_needed_title'), self._tr('runtime_repair_not_needed_body', component=component_name))
+            return
+        mode = self._ask_runtime_repair_mode(component_name, download_usage)
+        if mode == 'manual':
+            self._show_runtime_repair_manual(component=component_id)
+            return
+        if mode != 'auto':
+            return
+        source = self._ask_runtime_source()
+        if not source:
+            return
+        self._run_runtime_auto_repair(source=source, component=component_id)
+
+    def _clear_runtime_component(self, component_id: str) -> None:
+        component_name, _component_description = self._runtime_component_display(component_id)
+        context = self._current_runtime_repair_context(force_refresh=True)
+        runtime_dir = Path(str(context.get('runtime_dir') or '')).expanduser()
+        if component_id == 'gpu-acceleration' and not bool(context.get('gpu_present')):
+            QtWidgets.QMessageBox.information(self, self._tr('runtime_clear_title'), self._tr('runtime_clear_gpu_hint'))
+            return
+        if not runtime_dir.exists():
+            QtWidgets.QMessageBox.information(self, self._tr('runtime_clear_title'), self._tr('runtime_clear_nothing'))
+            return
+        answer = self._ask_yes_no_cancel(self._tr('runtime_clear_title'), self._tr('runtime_clear_body', component=component_name))
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        patterns: list[str] = []
+        lookup_component_id = 'semantic-core' if component_id == 'gpu-acceleration' else component_id
+        if component_id == 'all':
+            for payload in runtime_component_catalog():
+                patterns.extend(list(payload.get('cleanup_patterns') or ()))
+            patterns.append('_runtime_bootstrap.json')
+        else:
+            try:
+                patterns.extend(list(runtime_component_status(lookup_component_id).get('cleanup_patterns') or ()))
+            except KeyError:
+                for payload in runtime_component_catalog():
+                    if payload.get('component_id') == lookup_component_id:
+                        patterns.extend(list(payload.get('cleanup_patterns') or ()))
+                        break
+            if lookup_component_id == 'semantic-core':
+                patterns.append('_runtime_bootstrap.json')
+        patterns = list(dict.fromkeys(patterns))
+        components_root = runtime_dir / 'components'
+        component_targets: list[Path] = []
+        if component_id == 'all':
+            if components_root.exists():
+                component_targets.append(components_root)
+            registry_path = runtime_layout.runtime_component_registry_path(runtime_dir)
+            if registry_path.exists():
+                component_targets.append(registry_path)
+        else:
+            aliases = {lookup_component_id}
+            if lookup_component_id == 'semantic-core':
+                aliases.update({'compute-core', 'model-stack', 'gpu-acceleration'})
+            for alias in aliases:
+                for registered_root in runtime_layout.clear_runtime_component_registry(runtime_dir, alias):
+                    if registered_root.exists():
+                        component_targets.append(registered_root)
+                if components_root.exists():
+                    for candidate in components_root.glob(f'{runtime_layout.normalize_runtime_component_id(alias)}*'):
+                        component_targets.append(candidate)
+        seen_component_targets: list[Path] = []
+        for target_dir in component_targets:
+            resolved = target_dir.resolve() if target_dir.exists() else target_dir
+            if resolved in seen_component_targets:
+                continue
+            seen_component_targets.append(resolved)
+            try:
+                if target_dir.is_dir():
+                    shutil.rmtree(target_dir, ignore_errors=False)
+                else:
+                    target_dir.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.warning('Failed to clear runtime component %s: %s', target_dir, exc)
+        for pattern in patterns:
+            for entry in runtime_dir.glob(pattern):
+                try:
+                    if entry.is_dir():
+                        shutil.rmtree(entry, ignore_errors=False)
+                    else:
+                        entry.unlink(missing_ok=True)
+                except OSError as exc:
+                    LOGGER.warning('Failed to clear runtime artifact %s: %s', entry, exc)
+        pending_root = runtime_dir / '.pending'
+        if component_id == 'all':
+            if pending_root.exists():
+                shutil.rmtree(pending_root, ignore_errors=True)
+            if components_root.exists():
+                shutil.rmtree(components_root, ignore_errors=True)
+        else:
+            aliases = {lookup_component_id}
+            if lookup_component_id == 'semantic-core':
+                aliases.update({'compute-core', 'model-stack', 'gpu-acceleration'})
+            for alias in aliases:
+                pending_dir = pending_root / alias
+                if pending_dir.exists():
+                    shutil.rmtree(pending_dir, ignore_errors=True)
+        self._refresh_runtime_management_ui(force_refresh=True)
+        self._refresh_device_options(detect_acceleration(force_refresh=True))
+        self.statusMessageChanged.emit(self._tr('runtime_clear_done', component=component_name))
+        self._append_log(self._tr('runtime_clear_done', component=component_name))
+
+    def _create_extension_source_table(self, parent: QtWidgets.QWidget, pipeline: str) -> QtWidgets.QTableWidget:
+        table = QtWidgets.QTableWidget(parent)
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels(
+            [
+                self._tr('extensions_source_col_enabled'),
+                self._tr('extensions_source_col_directory'),
+                self._tr('extensions_source_col_status'),
+                self._tr('extensions_source_col_progress'),
+                self._tr('extensions_source_col_actions'),
+            ]
+        )
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(True)
+        table.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        table.setMinimumHeight(scaled(self._theme, 320, minimum=280))
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(scaled(self._theme, 108, minimum=96))
+        header = table.horizontalHeader()
+        header.setMinimumHeight(scaled(self._theme, 36, minimum=34))
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        table.itemChanged.connect(lambda item, p=pipeline: self._handle_extension_source_table_item_changed(p, item))
+        return table
+
+    def _build_extension_source_actions_widget(self, pipeline: str, source: ExtensionSourceDirectory, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget(parent)
+        container.setMinimumHeight(scaled(self._theme, 84, minimum=76))
+        layout = QtWidgets.QGridLayout(container)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
+        buttons: list[QtWidgets.QPushButton] = []
+
+        def _add_button(row: int, column: int, text_key: str, variant: str, handler, *, enabled: bool = True) -> None:
+            button = QtWidgets.QPushButton(self._tr(text_key), container)
+            self._set_button_variant(button, variant)
+            button.setMinimumHeight(scaled(self._theme, 30, minimum=28))
+            button.setProperty('row_enabled', enabled)
+            button.clicked.connect(handler)
+            button.setEnabled(enabled and self._extension_task_worker is None)
+            layout.addWidget(button, row, column)
+            buttons.append(button)
+
+        source_ready = source.selected and source.state not in {ExtensionDirectoryState.MISSING_TEMPORARILY, ExtensionDirectoryState.REMOVED_CONFIRMED}
+        source_path = source.path
+        _add_button(0, 0, 'extensions_row_preflight', 'secondary', lambda _checked=False, p=pipeline, s=source_path: self._run_extension_source_preflight(p, s), enabled=source_ready)
+        _add_button(0, 1, 'extensions_row_scan_once', 'secondary', lambda _checked=False, p=pipeline, s=source_path: self._run_extension_source_scan_once(p, s), enabled=source_ready)
+        _add_button(1, 0, 'extensions_row_rebuild', 'primary', lambda _checked=False, p=pipeline, s=source_path: self._run_extension_source_rebuild(p, s), enabled=source_ready)
+        _add_button(1, 1, 'extensions_row_delete', 'danger', lambda _checked=False, p=pipeline, s=source_path: self._run_extension_source_delete(p, s), enabled=True)
+        self._extension_source_buttons[(pipeline, source_path)] = buttons
+        return container
+
+    def _populate_extension_source_table(self, table: QtWidgets.QTableWidget, pipeline: str, sources: list[ExtensionSourceDirectory]) -> None:
+        table.blockSignals(True)
+        try:
+            table.setRowCount(0)
+            for key in [item for item in self._extension_source_buttons if item[0] == pipeline]:
+                self._extension_source_buttons.pop(key, None)
+            for row, source in enumerate(sources):
+                table.insertRow(row)
+
+                enabled_item = QtWidgets.QTableWidgetItem('')
+                enabled_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                enabled_item.setData(QtCore.Qt.ItemDataRole.UserRole, source.path)
+                enabled_item.setCheckState(QtCore.Qt.CheckState.Checked if source.selected else QtCore.Qt.CheckState.Unchecked)
+                table.setItem(row, 0, enabled_item)
+
+                label = source.source_label or (Path(source.path).name or source.path)
+                directory_item = QtWidgets.QTableWidgetItem(f'{label}\n{source.path}')
+                directory_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+                directory_item.setData(QtCore.Qt.ItemDataRole.UserRole, source.path)
+                if source.managed_by_workspace:
+                    font = directory_item.font()
+                    font.setBold(True)
+                    directory_item.setFont(font)
+                table.setItem(row, 1, directory_item)
+
+                status_item = QtWidgets.QTableWidgetItem(self._extension_source_status_text(source))
+                status_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+                status_item.setData(QtCore.Qt.ItemDataRole.UserRole, source.path)
+                if source.state in {ExtensionDirectoryState.MISSING_TEMPORARILY, ExtensionDirectoryState.REMOVED_CONFIRMED}:
+                    status_item.setForeground(QtGui.QBrush(QtGui.QColor(self._theme.colors['chip_warn_fg'])))
+                table.setItem(row, 2, status_item)
+
+                progress_item = QtWidgets.QTableWidgetItem(self._extension_source_progress_text(pipeline, source))
+                progress_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+                progress_item.setData(QtCore.Qt.ItemDataRole.UserRole, source.path)
+                table.setItem(row, 3, progress_item)
+
+                table.setCellWidget(row, 4, self._build_extension_source_actions_widget(pipeline, source, table))
+            table.resizeRowsToContents()
+            self._fit_table_to_contents(table, minimum_height=scaled(self._theme, 260, minimum=240), extra_padding=scaled(self._theme, 14, minimum=12))
+        finally:
+            table.blockSignals(False)
+
+    def _extension_source_status_text(self, source: ExtensionSourceDirectory) -> str:
+        if source.state == ExtensionDirectoryState.MISSING_TEMPORARILY:
+            return self._tr('extensions_source_state_missing')
+        if source.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
+            return self._tr('extensions_source_state_removed')
+        if not source.selected:
+            return self._tr('extensions_source_state_disabled')
+        if source.last_error:
+            return self._tr('extensions_status_error')
+        return self._tr('extensions_status_ready') if source.state == ExtensionDirectoryState.ENABLED else self._tr('extensions_status_not_built')
+
+    def _extension_source_progress_text(self, pipeline: str, source: ExtensionSourceDirectory) -> str:
+        key = (pipeline, source.path)
+        cached = self._extension_source_progress.get(key, '').strip()
+        if cached:
+            return cached
+        if source.state == ExtensionDirectoryState.MISSING_TEMPORARILY:
+            return self._tr('extensions_progress_missing')
+        if source.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
+            return self._tr('extensions_progress_pending_cleanup')
+        return self._tr('extensions_progress_idle')
+
+    def _extension_source_table_for_pipeline(self, pipeline: str) -> QtWidgets.QTableWidget:
+        return self.ext_tika_source_table if pipeline == 'tika' else self.ext_pdf_source_table
+
+    def _find_extension_source_row(self, pipeline: str, source_path: str) -> int | None:
+        table = self._extension_source_table_for_pipeline(pipeline)
+        normalized = normalize_vault_path(source_path)
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            if item is None:
+                continue
+            row_path = normalize_vault_path(str(item.data(QtCore.Qt.ItemDataRole.UserRole) or ''))
+            if row_path.lower() == normalized.lower():
+                return row
+        return None
+
+    def _set_extension_source_progress(self, pipeline: str, source_path: str, message: str) -> None:
+        normalized = normalize_vault_path(source_path)
+        key = (pipeline, normalized)
+        self._extension_source_progress[key] = message
+        row = self._find_extension_source_row(pipeline, normalized)
+        if row is None:
+            return
+        table = self._extension_source_table_for_pipeline(pipeline)
+        item = table.item(row, 3)
+        if item is None:
+            item = QtWidgets.QTableWidgetItem(message)
+            item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, normalized)
+            table.setItem(row, 3, item)
+        else:
+            item.setText(message)
+
+    def _refresh_extension_source_tables(self) -> None:
+        self._populate_extension_source_table(self.ext_pdf_source_table, 'pdf', self._extension_state.pdf_config.source_directories)
+        self._populate_extension_source_table(self.ext_tika_source_table, 'tika', self._extension_state.tika_config.source_directories)
+
+    def _current_extension_pipeline(self) -> str:
+        if self.ext_tabs.currentWidget() is self.ext_tika_page:
+            return 'tika'
+        return 'pdf'
+
+    def _extension_pipeline_label(self, pipeline: str) -> str:
+        return self._tr('extensions_tika_tab') if pipeline == 'tika' else self._tr('extensions_pdf_tab')
+
+    def _refresh_extension_action_buttons(self) -> None:
+        busy = self._extension_task_worker is not None
+        runtime = self._extension_state.snapshot.tika.runtime
+        self.ext_preflight_button.setEnabled(not busy)
+        self.ext_rebuild_button.setEnabled(not busy)
+        self.ext_stop_button.setEnabled(busy or runtime.running or runtime.starting)
+        for buttons in self._extension_source_buttons.values():
+            for button in buttons:
+                button.setEnabled(not busy and bool(button.property('row_enabled')))
+
+    def _start_extension_task(self, *, task_key: str, fn, on_success) -> bool:
+        if self._extension_task_worker is not None:
+            self.statusMessageChanged.emit(self._tr('extensions_task_busy'))
+            return False
+        worker = FunctionWorker(fn=fn)
+        self._extension_task_worker = worker
+        self._extension_task_key = task_key
+        self._refresh_extension_action_buttons()
+        worker.succeeded.connect(on_success)
+        worker.failed.connect(lambda message, tb, key=task_key: self._handle_extension_task_failure(key, message, tb))
+        worker.finished.connect(self._on_extension_task_finished)
+        worker.start()
+        return True
+
+    def _on_extension_task_finished(self) -> None:
+        self._extension_task_worker = None
+        self._extension_task_key = None
+        self._extension_active_source_key = None
+        self._refresh_extension_source_tables()
+        self._refresh_extension_action_buttons()
+
+    def _handle_extension_task_failure(self, task_key: str, message: str, traceback_text: str) -> None:
+        LOGGER.error('Extension task %s failed: %s\n%s', task_key, message, traceback_text)
+        if self._extension_active_source_key is not None:
+            pipeline, source_path = self._extension_active_source_key
+            self._set_extension_source_progress(pipeline, source_path, self._tr('extensions_progress_failed'))
+        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        self.statusMessageChanged.emit(message or self._tr('extensions_task_failed_generic'))
+        self._append_log(traceback_text.strip() or message, focus_log=True)
+
+    def _run_extension_preflight(self, _checked: bool = False) -> None:
+        try:
+            config, paths = self._collect_config(False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
+            return
+        pipeline = self._current_extension_pipeline()
+
+        def runner():
+            service = ExtensionService(config, paths, runtime_manager=self._tika_runtime_manager)
+            if pipeline == 'tika':
+                return {'pipeline': pipeline, 'report': service.run_tika_preflight()}
+            return {'pipeline': pipeline, 'report': service.run_pdf_preflight()}
+
+        if self._start_extension_task(task_key=f'preflight:{pipeline}', fn=runner, on_success=self._after_extension_preflight):
+            self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_global_preflight'), pipeline=self._extension_pipeline_label(pipeline)))
+
+    def _after_extension_preflight(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        pipeline = str(payload.get('pipeline') or 'pdf')
+        report = payload.get('report')
+        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        if pipeline == 'tika':
+            message = self._tr(
+                'extensions_tika_preflight_done',
+                files=int(getattr(report, 'total_files', 0) or 0),
+                size=format_bytes(int(getattr(report, 'total_bytes', 0) or 0)),
+                formats=len(tuple(getattr(report, 'enabled_formats', ()) or ())),
+                skipped=int(getattr(report, 'skipped_files', 0) or 0),
+            )
+            missing_dirs = tuple(str(item) for item in (getattr(report, 'missing_directories', ()) or ()))
+        else:
+            message = self._tr(
+                'extensions_pdf_preflight_done',
+                files=int(getattr(report, 'total_files', 0) or 0),
+                pages=int(getattr(report, 'total_pages', 0) or 0),
+                size=format_bytes(int(getattr(report, 'total_bytes', 0) or 0)),
+                skipped=int(getattr(report, 'skipped_files', 0) or 0),
+            )
+            missing_dirs = tuple(str(item) for item in (getattr(report, 'missing_directories', ()) or ()))
+        self.statusMessageChanged.emit(message)
+        self._append_log(message)
+        if missing_dirs:
+            self._append_log(self._tr('extensions_missing_dirs_detail', paths='; '.join(missing_dirs)), focus_log=True)
+
+    def _run_extension_rebuild(self, _checked: bool = False) -> None:
+        try:
+            config, paths = self._collect_config(False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
+            return
+        pipeline = self._current_extension_pipeline()
+
+        def runner():
+            service = ExtensionService(config, paths, runtime_manager=self._tika_runtime_manager)
+            if pipeline == 'tika':
+                return {'pipeline': pipeline, 'report': service.run_tika_full_rebuild()}
+            return {'pipeline': pipeline, 'report': service.run_pdf_full_rebuild()}
+
+        if self._start_extension_task(task_key=f'rebuild:{pipeline}', fn=runner, on_success=self._after_extension_rebuild):
+            self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_global_rebuild'), pipeline=self._extension_pipeline_label(pipeline)))
+
+    def _after_extension_rebuild(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        pipeline = str(payload.get('pipeline') or 'pdf')
+        report = payload.get('report')
+        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        if pipeline == 'tika':
+            message = self._tr(
+                'extensions_tika_rebuild_done',
+                files=int(getattr(report, 'indexed_files', 0) or 0),
+                chunks=int(getattr(report, 'indexed_chunks', 0) or 0),
+                deleted=int(getattr(report, 'deleted_files', 0) or 0),
+                skipped=int(getattr(report, 'skipped_files', 0) or 0),
+            )
+            missing_dirs = tuple(str(item) for item in (getattr(report, 'missing_directories', ()) or ()))
+        else:
+            message = self._tr(
+                'extensions_pdf_rebuild_done',
+                files=int(getattr(report, 'indexed_files', 0) or 0),
+                chunks=int(getattr(report, 'indexed_chunks', 0) or 0),
+                deleted=int(getattr(report, 'deleted_files', 0) or 0),
+                skipped=int(getattr(report, 'skipped_files', 0) or 0),
+            )
+            missing_dirs = tuple(str(item) for item in (getattr(report, 'missing_directories', ()) or ()))
+        self.statusMessageChanged.emit(message)
+        self._append_log(message)
+        if missing_dirs:
+            self._append_log(self._tr('extensions_missing_dirs_detail', paths='; '.join(missing_dirs)), focus_log=True)
+
+    def _start_extension_source_task(self, *, task_key: str, pipeline: str, source_path: str, fn, on_success) -> bool:
+        normalized = normalize_vault_path(source_path)
+        if self._extension_task_worker is not None:
+            self.statusMessageChanged.emit(self._tr('extensions_task_busy'))
+            return False
+        worker = ProgressFunctionWorker(fn=fn)
+        self._extension_task_worker = worker
+        self._extension_task_key = task_key
+        self._extension_active_source_key = (pipeline, normalized)
+        self._set_extension_source_progress(pipeline, normalized, self._tr('extensions_progress_running'))
+        self._refresh_extension_action_buttons()
+        worker.progress.connect(lambda payload, p=pipeline, s=normalized: self._handle_extension_source_progress(p, s, payload))
+        worker.succeeded.connect(on_success)
+        worker.failed.connect(lambda message, tb, key=task_key: self._handle_extension_task_failure(key, message, tb))
+        worker.finished.connect(self._on_extension_task_finished)
+        worker.start()
+        return True
+
+    def _handle_extension_source_progress(self, pipeline: str, source_path: str, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        percent = float(payload.get('overall_percent') or 0.0)
+        current = int(payload.get('current') or 0)
+        total = int(payload.get('total') or 0)
+        if total > 0:
+            message = self._tr('extensions_progress_running_counts', percent=percent, current=current, total=total)
+        else:
+            message = self._tr('extensions_progress_running_percent', percent=percent)
+        self._set_extension_source_progress(pipeline, source_path, message)
+
+    def _run_extension_source_preflight(self, pipeline: str, source_path: str) -> None:
+        try:
+            config, paths = self._collect_config(False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
+            return
+
+        def runner(_emit_progress):
+            service = ExtensionService(config, paths, runtime_manager=self._tika_runtime_manager)
+            if pipeline == 'tika':
+                return {'pipeline': pipeline, 'source_path': source_path, 'action': 'preflight', 'report': service.run_tika_preflight(source_paths=[source_path])}
+            return {'pipeline': pipeline, 'source_path': source_path, 'action': 'preflight', 'report': service.run_pdf_preflight(source_paths=[source_path])}
+
+        if self._start_extension_source_task(task_key=f'row-preflight:{pipeline}', pipeline=pipeline, source_path=source_path, fn=runner, on_success=self._after_extension_source_task):
+            self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_row_preflight'), pipeline=self._extension_pipeline_label(pipeline)))
+
+    def _run_extension_source_scan_once(self, pipeline: str, source_path: str) -> None:
+        try:
+            config, paths = self._collect_config(False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
+            return
+
+        def runner(emit_progress):
+            service = ExtensionService(config, paths, runtime_manager=self._tika_runtime_manager)
+            if pipeline == 'tika':
+                return {'pipeline': pipeline, 'source_path': source_path, 'action': 'scan_once', 'report': service.run_tika_scan_once(source_paths=[source_path], on_progress=emit_progress)}
+            return {'pipeline': pipeline, 'source_path': source_path, 'action': 'scan_once', 'report': service.run_pdf_scan_once(source_paths=[source_path], on_progress=emit_progress)}
+
+        if self._start_extension_source_task(task_key=f'row-scan:{pipeline}', pipeline=pipeline, source_path=source_path, fn=runner, on_success=self._after_extension_source_task):
+            self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_row_scan_once'), pipeline=self._extension_pipeline_label(pipeline)))
+
+    def _run_extension_source_rebuild(self, pipeline: str, source_path: str) -> None:
+        try:
+            config, paths = self._collect_config(False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
+            return
+
+        def runner(emit_progress):
+            service = ExtensionService(config, paths, runtime_manager=self._tika_runtime_manager)
+            if pipeline == 'tika':
+                return {'pipeline': pipeline, 'source_path': source_path, 'action': 'rebuild', 'report': service.run_tika_full_rebuild(source_paths=[source_path], on_progress=emit_progress)}
+            return {'pipeline': pipeline, 'source_path': source_path, 'action': 'rebuild', 'report': service.run_pdf_full_rebuild(source_paths=[source_path], on_progress=emit_progress)}
+
+        if self._start_extension_source_task(task_key=f'row-rebuild:{pipeline}', pipeline=pipeline, source_path=source_path, fn=runner, on_success=self._after_extension_source_task):
+            self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_row_rebuild'), pipeline=self._extension_pipeline_label(pipeline)))
+
+    def _run_extension_source_delete(self, pipeline: str, source_path: str) -> None:
+        answer = QtWidgets.QMessageBox.question(self, self._tr('extensions_source_delete_confirm_title'), self._tr('extensions_source_delete_confirm_body'))
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            config, paths = self._collect_config(False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
+            return
+
+        def runner(_emit_progress):
+            service = ExtensionService(config, paths, runtime_manager=self._tika_runtime_manager)
+            if pipeline == 'tika':
+                return {'pipeline': pipeline, 'source_path': source_path, 'action': 'delete', 'report': service.run_tika_delete_index(source_paths=[source_path])}
+            return {'pipeline': pipeline, 'source_path': source_path, 'action': 'delete', 'report': service.run_pdf_delete_index(source_paths=[source_path])}
+
+        if self._start_extension_source_task(task_key=f'row-delete:{pipeline}', pipeline=pipeline, source_path=source_path, fn=runner, on_success=self._after_extension_source_task):
+            self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_row_delete'), pipeline=self._extension_pipeline_label(pipeline)))
+
+    def _after_extension_source_task(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        pipeline = str(payload.get('pipeline') or 'pdf')
+        source_path = normalize_vault_path(str(payload.get('source_path') or ''))
+        action = str(payload.get('action') or 'rebuild')
+        report = payload.get('report')
+        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        if action == 'preflight':
+            if pipeline == 'tika':
+                message = self._tr('extensions_row_preflight_done_tika', files=int(getattr(report, 'total_files', 0) or 0), formats=len(tuple(getattr(report, 'enabled_formats', ()) or ())))
+            else:
+                message = self._tr('extensions_row_preflight_done_pdf', files=int(getattr(report, 'total_files', 0) or 0), pages=int(getattr(report, 'total_pages', 0) or 0))
+        elif action == 'scan_once':
+            message = self._tr('extensions_row_scan_done', files=int(getattr(report, 'indexed_files', 0) or 0), deleted=int(getattr(report, 'deleted_files', 0) or 0), skipped=int(getattr(report, 'skipped_files', 0) or 0))
+        elif action == 'delete':
+            message = self._tr('extensions_row_delete_done', deleted=int(getattr(report, 'deleted_files', 0) or 0), files=int(getattr(report, 'indexed_files', 0) or 0))
+        else:
+            message = self._tr('extensions_row_rebuild_done', files=int(getattr(report, 'indexed_files', 0) or 0), chunks=int(getattr(report, 'indexed_chunks', 0) or 0), skipped=int(getattr(report, 'skipped_files', 0) or 0))
+        self._set_extension_source_progress(pipeline, source_path, message)
+        self.statusMessageChanged.emit(message)
+        self._append_log(message)
+
+    def _load_extension_state(self, paths, vault_path: str) -> None:
+        try:
+            state = self._extension_registry.load(paths)
+            self._extension_state = self._normalize_extension_registry_state(state, paths, vault_path)
+            self._extension_registry.save(paths, self._extension_state)
+            self._extension_state_loaded = True
+        except OSError as exc:
+            LOGGER.warning('Failed to load extension registry: %s', exc)
+            self._extension_state_loaded = False
+            self._extension_state = ExtensionRegistryState()
+        if hasattr(self, 'ext_pdf_enabled_check'):
+            self._apply_extension_state_to_controls()
+            self._schedule_tika_runtime_refresh()
+
+    def _normalize_extension_registry_state(self, state: ExtensionRegistryState, paths, vault_path: str) -> ExtensionRegistryState:
+        state.tika_config.selected_formats = self._merge_tika_format_catalog(state.tika_config.selected_formats)
+        managed_sources = self._managed_extension_sources(vault_path)
+        state.pdf_config.source_directories = self._normalize_extension_sources(state.pdf_config.source_directories, managed_sources)
+        state.tika_config.source_directories = self._normalize_extension_sources(state.tika_config.source_directories, managed_sources)
+        layout = runtime_layout(paths)
+        state.snapshot.tika.runtime = replace(
+            state.snapshot.tika.runtime,
+            install_root=str(layout.root),
+            installing=False,
+            starting=False,
+            running=False,
+            healthy=False,
+            pid=0,
+        )
+        if not state.pdf_config.enabled:
+            state.snapshot.pdf.index_state = ExtensionIndexState.DISABLED
+        elif state.snapshot.pdf.index_state == ExtensionIndexState.DISABLED:
+            state.snapshot.pdf.index_state = ExtensionIndexState.NOT_BUILT
+        if not state.tika_config.enabled:
+            state.snapshot.tika.index_state = ExtensionIndexState.DISABLED
+        elif state.snapshot.tika.index_state == ExtensionIndexState.DISABLED:
+            state.snapshot.tika.index_state = ExtensionIndexState.NOT_BUILT
+        return state
+
+    def _merge_tika_format_catalog(self, current_formats: list) -> list:
+        defaults = default_tika_format_selections()
+        current_by_id = {item.format_id: item for item in current_formats if getattr(item, 'format_id', '') != 'pdf'}
+        merged = []
+        for default_item in defaults:
+            current = current_by_id.get(default_item.format_id)
+            if current is None:
+                merged.append(default_item)
+                continue
+            merged.append(replace(default_item, enabled=current.enabled, visible=current.visible))
+        return merged
+
+    def _managed_extension_sources(self, active_vault: str) -> list[tuple[str, str]]:
+        active_normalized = normalize_vault_path(active_vault)
+        managed: list[tuple[str, str]] = []
+        for path in self._collect_vault_paths(active_normalized):
+            label = self._tr('extensions_current_workspace_dir') if path == active_normalized else self._tr('extensions_saved_vault_dir', name=Path(path).name or path)
+            managed.append((path, label))
+        return managed
+
+    def _normalize_extension_sources(self, sources: list[ExtensionSourceDirectory], managed_sources: list[tuple[str, str]]) -> list[ExtensionSourceDirectory]:
+        managed_map = {path: label for path, label in managed_sources}
+        existing_managed: dict[str, ExtensionSourceDirectory] = {}
+        manual_sources: list[ExtensionSourceDirectory] = []
+        for source in sources:
+            normalized_path = normalize_vault_path(source.path)
+            if not normalized_path:
+                continue
+            updated = replace(source, path=normalized_path)
+            if updated.managed_by_workspace:
+                if normalized_path in managed_map:
+                    existing_managed[normalized_path] = updated
+                continue
+            manual_sources.append(updated)
+        normalized_sources: list[ExtensionSourceDirectory] = []
+        for managed_path, managed_label in managed_sources:
+            existing = existing_managed.get(managed_path)
+            normalized_sources.append(
+                ExtensionSourceDirectory(
+                    path=managed_path,
+                    state=existing.state if existing else ExtensionDirectoryState.DISABLED,
+                    selected=existing.selected if existing else False,
+                    source_label=managed_label,
+                    last_error=existing.last_error if existing else '',
+                    managed_by_workspace=True,
+                )
+            )
+        normalized_sources.extend(manual_sources)
+        return self._apply_live_source_states(normalized_sources)
+
+    def _extension_controls_alive(self) -> bool:
+        widget = getattr(self, 'ext_pdf_enabled_check', None)
+        if widget is None:
+            return False
+        try:
+            widget.objectName()
+        except RuntimeError:
+            return False
+        return True
+
+    def _apply_live_source_states(self, sources: list[ExtensionSourceDirectory]) -> list[ExtensionSourceDirectory]:
+        normalized: list[ExtensionSourceDirectory] = []
+        seen: set[str] = set()
+        for source in sources:
+            normalized_path = normalize_vault_path(source.path)
+            if not normalized_path:
+                continue
+            key = normalized_path.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidate = replace(source, path=normalized_path)
+            if not candidate.source_label:
+                candidate.source_label = self._tr('extensions_current_workspace_dir') if candidate.managed_by_workspace else (Path(normalized_path).name or normalized_path)
+            if not candidate.selected and candidate.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
+                candidate.state = ExtensionDirectoryState.REMOVED_CONFIRMED
+            else:
+                try:
+                    exists = Path(normalized_path).exists() and Path(normalized_path).is_dir()
+                except OSError:
+                    exists = False
+                if not exists:
+                    candidate.state = ExtensionDirectoryState.MISSING_TEMPORARILY
+                elif candidate.selected:
+                    candidate.state = ExtensionDirectoryState.ENABLED
+                else:
+                    candidate.state = ExtensionDirectoryState.DISABLED
+            normalized.append(candidate)
+        return normalized
+
+    def _apply_extension_state_to_controls(self) -> None:
+        if not self._extension_controls_alive() or not self._extension_state_loaded:
+            return
+        self._extension_ui_sync = True
+        try:
+            self.ext_pdf_enabled_check.setChecked(self._extension_state.pdf_config.enabled)
+            self.ext_tika_enabled_check.setChecked(self._extension_state.tika_config.enabled)
+            self._refresh_extension_source_tables()
+        finally:
+            self._extension_ui_sync = False
+        self._refresh_extension_overview()
+        self._refresh_tika_runtime_status()
+        self._refresh_tika_format_summary()
+        self._refresh_extension_action_buttons()
+
+    def _populate_extension_source_list(self, widget: QtWidgets.QListWidget, sources: list[ExtensionSourceDirectory]) -> None:
+        widget.clear()
+        for source in sources:
+            item = QtWidgets.QListWidgetItem(self._extension_source_text(source), widget)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, source.path)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, source.managed_by_workspace)
+            item.setFlags(
+                QtCore.Qt.ItemFlag.ItemIsEnabled
+                | QtCore.Qt.ItemFlag.ItemIsSelectable
+                | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+            )
+            item.setCheckState(QtCore.Qt.CheckState.Checked if source.selected else QtCore.Qt.CheckState.Unchecked)
+            if source.managed_by_workspace:
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            if source.state in {ExtensionDirectoryState.MISSING_TEMPORARILY, ExtensionDirectoryState.REMOVED_CONFIRMED}:
+                item.setForeground(QtGui.QBrush(QtGui.QColor(self._theme.colors['chip_warn_fg'])))
+
+    def _extension_source_text(self, source: ExtensionSourceDirectory) -> str:
+        label = source.source_label or (Path(source.path).name or source.path)
+        suffix = ''
+        if source.state == ExtensionDirectoryState.MISSING_TEMPORARILY:
+            suffix = self._tr('extensions_source_state_missing')
+        elif source.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
+            suffix = self._tr('extensions_source_state_removed')
+        elif not source.selected:
+            suffix = self._tr('extensions_source_state_disabled')
+        return f'{label}{(" · " + suffix) if suffix else ""}\n{source.path}'
+
+    def _refresh_extension_overview(self) -> None:
+        pdf_status, pdf_ok, pdf_warn = self._extension_pipeline_status(self._extension_state.pdf_config, self._extension_state.snapshot.pdf)
+        tika_status, tika_ok, tika_warn = self._extension_pipeline_status(self._extension_state.tika_config, self._extension_state.snapshot.tika)
+        self.ext_pdf_chip.setText(self._tr('extensions_pdf_chip', status=pdf_status))
+        self._set_chip_style(self.ext_pdf_chip, ok=pdf_ok, warn=pdf_warn)
+        self.ext_tika_chip.setText(self._tr('extensions_tika_chip', status=tika_status))
+        self._set_chip_style(self.ext_tika_chip, ok=tika_ok, warn=tika_warn)
+        tika_count = sum(1 for item in self._extension_state.tika_config.selected_formats if item.enabled and item.tier != TikaFormatSupportTier.POOR)
+        self.ext_tika_formats_chip.setText(self._tr('extensions_tika_formats_chip', count=tika_count))
+        self._set_chip_style(self.ext_tika_formats_chip, ok=tika_count > 0, warn=self._extension_state.tika_config.enabled and tika_count == 0)
+
+    def _extension_pipeline_status(self, config, status) -> tuple[str, bool, bool]:
+        selected_sources = [item for item in config.source_directories if item.selected]
+        if not config.enabled:
+            return self._tr('extensions_status_not_enabled'), False, False
+        if not selected_sources:
+            return self._tr('extensions_status_not_configured'), False, True
+        if any(item.state == ExtensionDirectoryState.MISSING_TEMPORARILY for item in selected_sources):
+            return self._tr('extensions_status_missing'), False, True
+        if getattr(status, 'build_in_progress', False):
+            return self._tr('extensions_status_building'), False, True
+        if getattr(status, 'last_error', ''):
+            return self._tr('extensions_status_error'), False, True
+        if getattr(status, 'index_state', ExtensionIndexState.NOT_BUILT) == ExtensionIndexState.READY:
+            return self._tr('extensions_status_ready'), True, False
+        if getattr(status, 'index_state', ExtensionIndexState.NOT_BUILT) == ExtensionIndexState.STALE:
+            return self._tr('extensions_status_stale'), False, True
+        return self._tr('extensions_status_not_built'), False, True
+
+    def _refresh_tika_runtime_status(self) -> None:
+        runtime = self._extension_state.snapshot.tika.runtime
+        if runtime.installing:
+            status_text = self._tr('extensions_tika_runtime_installing')
+        elif runtime.starting:
+            status_text = self._tr('extensions_tika_runtime_starting')
+        elif runtime.running and runtime.healthy:
+            status_text = self._tr('extensions_tika_runtime_running')
+        elif runtime.installed:
+            status_text = self._tr('extensions_tika_runtime_ready')
+        elif runtime.java_available and not runtime.jar_available:
+            status_text = self._tr('extensions_tika_runtime_missing_jar')
+        elif runtime.jar_available and not runtime.java_available:
+            status_text = self._tr('extensions_tika_runtime_missing_java')
+        else:
+            status_text = self._tr('extensions_tika_runtime_uninstalled')
+        self.ext_tika_runtime_status_label.setText(self._tr('extensions_tika_runtime_status_value', status=status_text))
+        version_bits = [self._tr('extensions_tika_runtime_version_value', version=runtime.version or '--')]
+        if runtime.pid:
+            version_bits.append(self._tr('extensions_tika_runtime_process_value', pid=runtime.pid, port=runtime.port))
+        self.ext_tika_runtime_version_label.setText(' · '.join(version_bits))
+        root_text = self._tr('extensions_tika_runtime_root_value', path=runtime.install_root or '--')
+        if runtime.last_error:
+            root_text = f"{root_text}\n{self._tr('extensions_tika_runtime_error_value', error=runtime.last_error)}"
+        self.ext_tika_runtime_root_label.setText(root_text)
+
+    def _refresh_tika_format_summary(self) -> None:
+        count = sum(1 for item in self._extension_state.tika_config.selected_formats if item.enabled and item.tier != TikaFormatSupportTier.POOR)
+        if count:
+            self.ext_tika_formats_summary_label.setText(self._tr('extensions_tika_formats_summary_count', count=count))
+        else:
+            self.ext_tika_formats_summary_label.setText(self._tr('extensions_tika_formats_summary_none'))
+
+    def _enabled_tika_format_count(self) -> int:
+        return sum(1 for item in self._extension_state.tika_config.selected_formats if item.enabled and item.tier != TikaFormatSupportTier.POOR)
+
+    def _tika_runtime_desired(self) -> bool:
+        return self._extension_state.tika_config.enabled and self._enabled_tika_format_count() > 0
+
+    def _update_tika_runtime_snapshot(
+        self,
+        runtime: TikaRuntimeStatus,
+        *,
+        persist: bool = False,
+        announce_key: str | None = None,
+        sync_tika_sidecar: bool = False,
+    ) -> None:
+        self._extension_state.snapshot.tika.runtime = runtime
+        if persist:
+            self._persist_extension_state(announce_key=announce_key, sync_tika_sidecar=sync_tika_sidecar)
+            return
+        self._refresh_extension_overview()
+        self._refresh_tika_runtime_status()
+
+    def _start_tika_runtime_worker(self, *, fn, on_success, on_failure_message_key: str) -> bool:
+        if self._tika_runtime_worker is not None:
+            self.statusMessageChanged.emit(self._tr('extensions_tika_runtime_busy'))
+            return False
+        worker = FunctionWorker(fn=fn)
+        self._tika_runtime_worker = worker
+        worker.succeeded.connect(on_success)
+        worker.failed.connect(lambda message, tb, key=on_failure_message_key: self._handle_tika_runtime_worker_failure(key, message, tb))
+        worker.finished.connect(self._on_tika_runtime_worker_finished)
+        worker.start()
+        return True
+
+    def _on_tika_runtime_worker_finished(self) -> None:
+        self._tika_runtime_worker = None
+
+    def _handle_tika_runtime_worker_failure(self, message_key: str, message: str, traceback_text: str) -> None:
+        LOGGER.error('Tika runtime worker failed: %s\n%s', message, traceback_text)
+        detected = detect_tika_runtime(self._paths)
+        runtime = replace(detected, last_error=message)
+        self._update_tika_runtime_snapshot(runtime, persist=True, sync_tika_sidecar=False)
+        self.statusMessageChanged.emit(self._tr(message_key, error=message))
+
+    def _schedule_tika_runtime_refresh(self, _checked: bool = False, *, start_if_desired: bool = True) -> None:
+        if self._tika_runtime_worker is not None:
+            return
+        if not self._start_tika_runtime_worker(
+            fn=lambda: self._tika_runtime_manager.status(self._paths),
+            on_success=lambda runtime, start=start_if_desired: self._handle_tika_runtime_refresh_success(runtime, start_if_desired=start),
+            on_failure_message_key='extensions_tika_runtime_detect_failed',
+        ):
+            return
+
+    def _handle_tika_runtime_refresh_success(self, runtime: TikaRuntimeStatus, *, start_if_desired: bool) -> None:
+        if not self._extension_controls_alive():
+            return
+        runtime = replace(runtime, installing=False, starting=False)
+        self._update_tika_runtime_snapshot(runtime, persist=True, sync_tika_sidecar=False)
+        if start_if_desired:
+            self._sync_tika_sidecar_desired_state()
+
+    def _install_tika_runtime_requested(self, _checked: bool = False) -> None:
+        runtime = replace(self._extension_state.snapshot.tika.runtime, installing=True, starting=False, running=False, healthy=False, last_error='')
+        self._update_tika_runtime_snapshot(runtime, persist=True, sync_tika_sidecar=False)
+        started = self._start_tika_runtime_worker(
+            fn=lambda: install_tika_runtime(self._paths),
+            on_success=self._handle_tika_runtime_install_success,
+            on_failure_message_key='extensions_tika_runtime_install_failed',
+        )
+        if started:
+            self.statusMessageChanged.emit(self._tr('extensions_tika_runtime_install_started'))
+        else:
+            refreshed = replace(runtime, installing=False)
+            self._update_tika_runtime_snapshot(refreshed, persist=True, sync_tika_sidecar=False)
+
+    def _handle_tika_runtime_install_success(self, runtime: TikaRuntimeStatus) -> None:
+        runtime = replace(runtime, installing=False, last_error='')
+        self._update_tika_runtime_snapshot(runtime, persist=True, announce_key='extensions_tika_runtime_install_ready', sync_tika_sidecar=False)
+        self._sync_tika_sidecar_desired_state()
+
+    def _show_tika_manual_install_dialog(self, _checked: bool = False) -> None:
+        context = build_manual_install_context(self._paths)
+        message = self._tr(
+            'extensions_tika_manual_install_body',
+            install_root=context['install_root'],
+            jre_url=context['jre_url'],
+            tika_url=context['tika_url'],
+        )
+        QtWidgets.QApplication.clipboard().setText(message)
+        QtWidgets.QMessageBox.information(self, self._tr('extensions_tika_manual_install_title'), message)
+        self.statusMessageChanged.emit(self._tr('extensions_tika_manual_install_copied'))
+
+    def _sync_tika_sidecar_desired_state(self) -> None:
+        runtime = self._extension_state.snapshot.tika.runtime
+        desired = self._tika_runtime_desired()
+        if not desired:
+            if runtime.running or runtime.starting:
+                self._stop_tika_sidecar(announce_key='extensions_tika_runtime_stopped')
+            return
+        if runtime.installing or runtime.starting or runtime.running:
+            return
+        if not runtime.installed:
+            return
+        self._request_tika_sidecar_start()
+
+    def _request_tika_sidecar_start(self) -> None:
+        runtime = replace(self._extension_state.snapshot.tika.runtime, starting=True, last_error='')
+        self._update_tika_runtime_snapshot(runtime, persist=True, sync_tika_sidecar=False)
+        started = self._start_tika_runtime_worker(
+            fn=lambda: self._tika_runtime_manager.ensure_started(self._paths),
+            on_success=self._handle_tika_sidecar_start_success,
+            on_failure_message_key='extensions_tika_runtime_start_failed',
+        )
+        if started:
+            self.statusMessageChanged.emit(self._tr('extensions_tika_runtime_starting_notice'))
+        else:
+            refreshed = replace(runtime, starting=False)
+            self._update_tika_runtime_snapshot(refreshed, persist=True, sync_tika_sidecar=False)
+
+    def _handle_tika_sidecar_start_success(self, runtime: TikaRuntimeStatus) -> None:
+        runtime = replace(runtime, starting=False, installing=False, last_error='')
+        self._update_tika_runtime_snapshot(runtime, persist=True, announce_key='extensions_tika_runtime_running_notice', sync_tika_sidecar=False)
+
+    def _stop_tika_sidecar(self, *, announce_key: str | None = None) -> None:
+        self._tika_runtime_manager.stop()
+        runtime = replace(detect_tika_runtime(self._paths), last_error='')
+        self._update_tika_runtime_snapshot(runtime, persist=True, announce_key=announce_key, sync_tika_sidecar=False)
+
+    def _handle_extension_stop_action(self, _checked: bool = False) -> None:
+        runtime = self._extension_state.snapshot.tika.runtime
+        if self._extension_task_worker is not None:
+            self.statusMessageChanged.emit(self._tr('extensions_stop_busy_not_supported'))
+            return
+        if runtime.running or runtime.starting:
+            self._stop_tika_sidecar(announce_key='extensions_tika_runtime_stopped')
+            return
+        self.statusMessageChanged.emit(self._tr('extensions_stop_noop'))
+
+    def shutdown_extension_runtimes(self) -> None:
+        try:
+            self._tika_runtime_manager.shutdown()
+        finally:
+            runtime = replace(detect_tika_runtime(self._paths), last_error='')
+            self._update_tika_runtime_snapshot(runtime, persist=True, sync_tika_sidecar=False)
+
+    def _on_pdf_enabled_toggled(self, checked: bool) -> None:
+        if self._extension_ui_sync:
+            return
+        self._extension_state.pdf_config.enabled = bool(checked)
+        self._persist_extension_state(announce_key='extensions_config_saved')
+
+    def _on_tika_enabled_toggled(self, checked: bool) -> None:
+        if self._extension_ui_sync:
+            return
+        self._extension_state.tika_config.enabled = bool(checked)
+        self._persist_extension_state(announce_key='extensions_config_saved')
+        self._schedule_tika_runtime_refresh()
+
+    def _add_extension_source_directory(self, pipeline: str) -> None:
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, self._tr('extensions_add_dir'), str(Path.home()))
+        if not directory:
+            return
+        normalized = normalize_vault_path(directory)
+        if not normalized:
+            return
+        config = self._extension_config_for_pipeline(pipeline)
+        for index, source in enumerate(config.source_directories):
+            if normalize_vault_path(source.path).lower() == normalized.lower():
+                config.source_directories[index] = replace(source, selected=True, state=ExtensionDirectoryState.ENABLED, last_error='')
+                break
+        else:
+            config.source_directories.append(
+                ExtensionSourceDirectory(
+                    path=normalized,
+                    state=ExtensionDirectoryState.ENABLED,
+                    selected=True,
+                    source_label=Path(normalized).name or normalized,
+                )
+            )
+        self._persist_extension_state(announce_key='extensions_config_saved')
+
+    def _extension_config_for_pipeline(self, pipeline: str):
+        if pipeline == 'pdf':
+            return self._extension_state.pdf_config
+        if pipeline == 'tika':
+            return self._extension_state.tika_config
+        raise ValueError(f'Unsupported extension pipeline: {pipeline}')
+
+    def _handle_extension_source_table_item_changed(self, pipeline: str, item: QtWidgets.QTableWidgetItem) -> None:
+        if self._extension_ui_sync or item.column() != 0:
+            return
+        raw_path = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or '').strip()
+        normalized = normalize_vault_path(raw_path)
+        if not normalized:
+            return
+        config = self._extension_config_for_pipeline(pipeline)
+        target_index = None
+        for index, source in enumerate(config.source_directories):
+            if normalize_vault_path(source.path).lower() == normalized.lower():
+                target_index = index
+                break
+        if target_index is None:
+            return
+        source = config.source_directories[target_index]
+        new_selected = item.checkState() == QtCore.Qt.CheckState.Checked
+        if new_selected == source.selected:
+            return
+        if not new_selected:
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                self._tr('extensions_source_remove_confirm_title'),
+                self._tr('extensions_source_remove_confirm_body'),
+            )
+            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                self._extension_ui_sync = True
+                try:
+                    item.setCheckState(QtCore.Qt.CheckState.Checked)
+                finally:
+                    self._extension_ui_sync = False
+                return
+            config.source_directories[target_index] = replace(source, selected=False, state=ExtensionDirectoryState.REMOVED_CONFIRMED)
+            self._set_extension_source_progress(pipeline, normalized, self._tr('extensions_progress_pending_cleanup'))
+        else:
+            config.source_directories[target_index] = replace(source, selected=True, state=ExtensionDirectoryState.ENABLED, last_error='')
+            self._set_extension_source_progress(pipeline, normalized, self._tr('extensions_progress_idle'))
+        self._persist_extension_state(announce_key='extensions_config_saved')
+
+    def _open_tika_format_dialog(self) -> None:
+        dialog = TikaFormatDialog(
+            selections=self._extension_state.tika_config.selected_formats,
+            language_code=self._language_code,
+            parent=self,
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        self._extension_state.tika_config.selected_formats = dialog.selected_formats()
+        self._persist_extension_state(announce_key='extensions_tika_formats_saved')
+        self._schedule_tika_runtime_refresh()
+
+    def _persist_extension_state(self, *, announce_key: str | None = None, sync_tika_sidecar: bool = True) -> None:
+        try:
+            self._extension_state = self._normalize_extension_registry_state(
+                self._extension_state,
+                self._paths,
+                getattr(self._config, 'vault_path', ''),
+            )
+            self._extension_registry.save(self._paths, self._extension_state)
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('save_failed_title'), str(exc))
+            return
+        self._apply_extension_state_to_controls()
+        if announce_key:
+            self.statusMessageChanged.emit(self._tr(announce_key))
+        if sync_tika_sidecar:
+            self._sync_tika_sidecar_desired_state()
+
     def _ensure_vector_runtime_ready(self, config: AppConfig) -> bool:
         message = runtime_dependency_issue(config)
         if not message:
@@ -952,6 +2672,78 @@ class ConfigWorkspace(QtWidgets.QWidget):
             extra_detail = text_value
         self._show_runtime_install_guidance(requested, extra_detail=extra_detail)
         return True
+
+    def _current_runtime_repair_context(self, *, force_refresh: bool = False, extra_detail: str = '') -> dict[str, object]:
+        requested = self._current_device_value() if hasattr(self, 'device_combo') else self._normalize_device_code(getattr(self._config, 'vector_device', 'auto'))
+        acceleration_payload = None if force_refresh else (dict(self._acceleration_payload or {}) or None)
+        return runtime_guidance_context(
+            self.runtime_combo.currentText().strip() or 'torch',
+            requested,
+            force_refresh=force_refresh,
+            extra_detail=extra_detail,
+            acceleration_payload=acceleration_payload,
+        )
+
+    def _powershell_executable(self) -> str | None:
+        for candidate in ('pwsh.exe', 'powershell.exe'):
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+        return None
+
+    def _run_runtime_auto_repair(self, _checked: bool = False, *, source: str = 'official', component: str = 'all') -> None:
+        context = self._current_runtime_repair_context(force_refresh=True)
+        install_script = Path(str(context.get('install_script') or '')).resolve()
+        if not install_script.exists():
+            error = f'InstallRuntime.ps1 not found: {install_script}'
+            self.statusMessageChanged.emit(self._tr('runtime_repair_auto_failed', error=error))
+            return
+        powershell = self._powershell_executable()
+        if not powershell:
+            QtWidgets.QMessageBox.warning(self, self._tr('cannot_start_title'), self._tr('runtime_repair_powershell_missing'))
+            self.statusMessageChanged.emit(self._tr('runtime_repair_powershell_missing'))
+            return
+        normalized_source = (source or 'official').strip().lower() or 'official'
+        normalized_component = (component or 'all').strip().lower() or 'all'
+        install_component, profile = self._runtime_component_install_target(normalized_component, context=context)
+        app_dir = Path(str(context.get('app_dir') or install_script.parent)).resolve()
+        command = [
+            powershell,
+            '-ExecutionPolicy', 'Bypass',
+            '-NoExit',
+            '-File', str(install_script),
+            '-Profile', profile,
+            '-Source', normalized_source,
+            '-WaitForProcessName', 'OmniClipRAG',
+        ]
+        if normalized_component != 'all':
+            command.extend(['-Component', install_component])
+        creationflags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
+        try:
+            subprocess.Popen(command, cwd=str(app_dir), creationflags=creationflags)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, self._tr('cannot_start_title'), self._tr('runtime_repair_auto_failed', error=str(exc)))
+            self.statusMessageChanged.emit(self._tr('runtime_repair_auto_failed', error=str(exc)))
+            return
+        component_name, _component_description = self._runtime_component_display(normalized_component)
+        message = self._tr('runtime_repair_auto_started', component=component_name, source=self._tr(f'runtime_source_{normalized_source}'))
+        self.statusMessageChanged.emit(message)
+        self._append_log(message)
+
+    def _show_runtime_repair_manual(self, _checked: bool = False, *, component: str = 'all') -> None:
+        component_name, _component_description = self._runtime_component_display(component)
+        if component != 'all' and self._runtime_component_state(component, force_refresh=True).get('ready'):
+            QtWidgets.QMessageBox.information(self, self._tr('runtime_repair_not_needed_title'), self._tr('runtime_repair_not_needed_body', component=component_name))
+            return
+        if component == 'all':
+            context = self._current_runtime_repair_context(force_refresh=True)
+            semantic_state = self._runtime_component_state('semantic-core', force_refresh=True)
+            vector_state = self._runtime_component_state('vector-store', force_refresh=True)
+            if bool(semantic_state.get('ready')) and bool(vector_state.get('ready')):
+                QtWidgets.QMessageBox.information(self, self._tr('runtime_repair_not_needed_title'), self._tr('runtime_repair_not_needed_body', component=component_name))
+                return
+        dialog = RuntimeInstallDialog(language_code=self._language_code, theme=self._theme, context=self._runtime_manual_context(component), parent=self)
+        dialog.exec()
     def _on_model_text_changed(self, _value: str) -> None:
         self._refresh_model_download_text()
         self._refresh_overview_chips()
@@ -1016,6 +2808,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
             for key in ('files', 'chunks', 'refs'):
                 merged_stats[key] = int(stats.get(key, merged_stats.get(key, 0)) or 0)
             merged['stats'] = merged_stats
+            # Why: rebuild completion can return fresh stats before a follow-up status
+            # snapshot fully reflects the ready marker. When chunks are already > 0,
+            # the UI should present the rebuilt Markdown index as ready instead of
+            # briefly falling back to a stale "missing" chip.
+            if int(merged_stats.get('chunks', 0) or 0) > 0:
+                merged['index_ready'] = True
+                if not isinstance(merged.get('pending_rebuild'), dict):
+                    merged['index_state'] = 'ready'
         return merged or None
     def _refresh_preflight_notice(self) -> None:
         show_notice = self._current_report is not None or self._latest_preflight_snapshot is not None
@@ -1071,7 +2871,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.queryBlockStateChanged.emit(True, self._tr('query_status_blocked_title'), self._tr('query_status_blocked_detail_watch'))
             return
         if not self._index_ready():
-            self.queryBlockStateChanged.emit(True, self._tr('query_status_blocked_title'), self._tr('query_status_blocked_detail_index'))
+            detail_key = 'query_status_blocked_detail_index_checking' if self._current_index_state() == 'checking' else 'query_status_blocked_detail_index'
+            self.queryBlockStateChanged.emit(True, self._tr('query_status_blocked_title'), self._tr(detail_key))
             return
         self.queryBlockStateChanged.emit(False, '', '')
     def _append_log(self, message: str, *, focus_log: bool = False) -> None:
@@ -1097,6 +2898,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.watch_button.setToolTip(self._tip('watch'))
         elif index_state == 'pending':
             self.watch_button.setToolTip(self._tr('watch_start_blocked_pending_body'))
+        elif index_state == 'checking':
+            self.watch_button.setToolTip(self._tr('watch_start_blocked_checking_body'))
         else:
             self.watch_button.setToolTip(self._tr('watch_start_blocked_missing_body'))
     def _apply_config_to_controls(self, config: AppConfig, paths) -> None:
@@ -1117,6 +2920,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.build_profile_combo.setCurrentText(self._build_profile_label(getattr(config, 'build_resource_profile', 'balanced')))
             self.watch_peak_combo.setCurrentText(self._watch_peak_label(getattr(config, 'watch_resource_peak_percent', 15)))
             self.log_size_spin.setValue(normalize_log_file_size_mb(getattr(config, 'log_file_size_mb', DEFAULT_LOG_FILE_SIZE_MB), DEFAULT_LOG_FILE_SIZE_MB))
+            self.query_trace_logging_check.setChecked(bool(getattr(config, 'query_trace_logging_enabled', False)))
             self.local_only_check.setChecked(config.vector_local_files_only)
             self.force_check.setChecked(False)
             self.polling_check.setChecked(False)
@@ -1136,6 +2940,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._live_runtime_sync_suppressed = False
         self.device_summary_label.setText(self._device_summary())
         self.device_runtime_status_label.setText(self._device_runtime_status_text())
+        self._load_extension_state(paths, getattr(config, 'vault_path', ''))
         self.runtimeConfigChanged.emit(self._config, self._paths)
     def _collect_config(self, require_vault: bool) -> tuple[AppConfig, Any]:
         vault = normalize_vault_path(self.vault_edit.text().strip())
@@ -1163,6 +2968,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             build_resource_profile=self._build_profile_code(self.build_profile_combo.currentText()),
             watch_resource_peak_percent=self._watch_peak_value(self.watch_peak_combo.currentText()),
             log_file_size_mb=normalize_log_file_size_mb(self.log_size_spin.value(), DEFAULT_LOG_FILE_SIZE_MB),
+            query_trace_logging_enabled=self.query_trace_logging_check.isChecked(),
             vector_backend=self.backend_combo.currentText().strip() or 'disabled',
             vector_model=self.model_edit.text().strip() or 'BAAI/bge-m3',
             vector_runtime=self.runtime_combo.currentText().strip() or 'torch',
@@ -1204,6 +3010,19 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _toggle_advanced(self) -> None:
         self._show_advanced = not bool(getattr(self, '_show_advanced', True))
         self._refresh_advanced_visibility()
+    def schedule_startup_background_tasks(
+        self,
+        *,
+        safe_mode: bool = False,
+        device_probe_delay_ms: int = 0,
+        initial_status_delay_ms: int = 0,
+    ) -> None:
+        """Serialize heavy startup probes so packaged cold starts do not race native imports."""
+
+        self._startup_status_after_probe = True
+        self._startup_status_delay_ms = max(int(initial_status_delay_ms), 0)
+        self.schedule_device_probe(delay_ms=device_probe_delay_ms, safe_mode=safe_mode)
+
     def schedule_device_probe(self, delay_ms: int = 0, *, safe_mode: bool = False) -> None:
         if self._device_probe_scheduled or self._device_probe_worker is not None:
             return
@@ -1233,6 +3052,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.device_summary_label.setText(self._tr('device_summary_detecting'))
     def _on_device_probe_finished(self) -> None:
         self._device_probe_worker = None
+        if self._startup_status_after_probe:
+            delay_ms = self._startup_status_delay_ms
+            self._startup_status_after_probe = False
+            self._startup_status_delay_ms = 0
+            self.schedule_initial_status_load(delay_ms=delay_ms)
     def schedule_initial_status_load(self, delay_ms: int = 0) -> None:
         if self._initial_status_scheduled or self._initial_status_worker is not None:
             return
@@ -1386,6 +3210,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.build_profile_combo.setCurrentText(self._build_profile_label('balanced'))
         self.watch_peak_combo.setCurrentText(self._watch_peak_label(15))
         self.log_size_spin.setValue(DEFAULT_LOG_FILE_SIZE_MB)
+        self.query_trace_logging_check.setChecked(False)
         self.local_only_check.setChecked(False)
         self.force_check.setChecked(False)
         self.polling_check.setChecked(False)
@@ -1416,6 +3241,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             'build_profile': self._build_profile_code(self.build_profile_combo.currentText()),
             'watch_peak': self._watch_peak_value(self.watch_peak_combo.currentText()),
             'log_size_mb': normalize_log_file_size_mb(self.log_size_spin.value(), DEFAULT_LOG_FILE_SIZE_MB),
+            'query_trace_logging_enabled': self.query_trace_logging_check.isChecked(),
             'local_only': self.local_only_check.isChecked(),
             'force': self.force_check.isChecked(),
             'polling': self.polling_check.isChecked(),
@@ -1445,6 +3271,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.build_profile_combo.setCurrentText(self._build_profile_label(payload.get('build_profile') or self._build_profile_code(self.build_profile_combo.currentText())))
             self.watch_peak_combo.setCurrentText(self._watch_peak_label(payload.get('watch_peak') or self._watch_peak_value(self.watch_peak_combo.currentText())))
             self.log_size_spin.setValue(normalize_log_file_size_mb(payload.get('log_size_mb', self.log_size_spin.value()), DEFAULT_LOG_FILE_SIZE_MB))
+            self.query_trace_logging_check.setChecked(bool(payload.get('query_trace_logging_enabled', self.query_trace_logging_check.isChecked())))
             self.local_only_check.setChecked(bool(payload.get('local_only', self.local_only_check.isChecked())))
             self.force_check.setChecked(bool(payload.get('force', self.force_check.isChecked())))
             self.polling_check.setChecked(bool(payload.get('polling', self.polling_check.isChecked())))
@@ -1539,6 +3366,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         try:
             config, paths = self._collect_config(False)
             config.log_file_size_mb = normalize_log_file_size_mb(self.log_size_spin.value(), DEFAULT_LOG_FILE_SIZE_MB)
+            config.query_trace_logging_enabled = self.query_trace_logging_check.isChecked()
             save_config(config, paths)
             configure_file_logging(paths, config)
         except Exception as exc:
@@ -2157,7 +3985,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_status_summary(snapshot)
         index_state = self._current_index_state(snapshot)
         if index_state != 'ready':
-            body_key = 'watch_start_blocked_pending_body' if index_state == 'pending' else 'watch_start_blocked_missing_body'
+            if index_state == 'pending':
+                body_key = 'watch_start_blocked_pending_body'
+            elif index_state == 'checking':
+                body_key = 'watch_start_blocked_checking_body'
+            else:
+                body_key = 'watch_start_blocked_missing_body'
             message = self._tr(body_key)
             self.statusMessageChanged.emit(message)
             QtWidgets.QMessageBox.information(self, self._tr('watch_start_blocked_title'), message)

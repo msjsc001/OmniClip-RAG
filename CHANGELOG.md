@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## V0.3.0 - 2026-03-16
+
+### Added
+
+- Added the isolated extension-format subsystem under `omniclip_rag/extensions/`, including dedicated PDF parsing/indexing, Tika runtime management, white-listed Tika format selection, independent watch state, and cross-source query broker support.
+- Added a componentized Runtime management flow with a dedicated Qt page, per-component repair/cleanup, pending-update staging, and official-vs-mirror manual/automatic install guidance.
+- Added a packaged self-check query path plus the Markdown query/runtime RCA planning and trace infrastructure, so query diagnosis can be resumed from repo docs instead of conversation history.
+- Added [RELEASE_NOTES_v0.3.0](releases/RELEASE_NOTES_v0.3.0.md) for this source-only extension/runtime milestone release.
+
+### Changed
+
+- Changed the desktop app to a Qt-only shell by removing the legacy Tk UI path from the repository and keeping future fixes focused on one real desktop implementation.
+- Changed the packaged launcher/runtime bootstrap chain to handle pending runtime updates, startup/runtime diagnostics, and packaged-vs-development behavior more explicitly.
+- Changed Runtime UX from one opaque repair block into component-oriented management that separates semantic core, vector storage support, and optional NVIDIA/CUDA acceleration.
+- Changed Markdown query diagnostics so capability logs, execution-path traces, and packaged self-check evidence can be compared against real GUI behavior during RCA.
+
+### Fixed
+
+- Fixed multiple runtime repair drift issues around pending-vs-live application, script-version mismatch, PowerShell compatibility, and stale health checks that previously made successful repairs still look broken.
+- Fixed packaged startup regressions related to launcher bootstrap, Qt runtime loading, and startup sequencing so the EXE can surface earlier, safer startup behavior.
+- Fixed several GUI/query synchronization issues around live config snapshots, runtime status surfacing, and source-filter/query-path plumbing while the Markdown main-query RCA remains in progress.
+
 ## V0.2.4 - 2026-03-14
 
 ### Added

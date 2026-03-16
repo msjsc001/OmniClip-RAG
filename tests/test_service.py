@@ -236,6 +236,37 @@ class ServiceTests(unittest.TestCase):
             self.assertTrue(all(float(item.get('overall_percent', 0.0) or 0.0) >= 0.0 for item in progress))
         finally:
             service.close()
+
+    def test_markdown_query_degrades_to_lexical_when_vector_runtime_is_not_ready(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_runtime_degraded'))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        try:
+            service.rebuild_index()
+            with patch('omniclip_rag.service.runtime_dependency_issue', return_value='当前还不能开始本地语义建库或向量查询。'):
+                result = service.query('块嵌入', limit=5, score_threshold=0, allowed_families={'markdown'})
+            self.assertTrue(result.hits)
+            self.assertTrue(all(hit.source_family == 'markdown' for hit in result.hits))
+            self.assertEqual(result.insights.runtime_warnings, ('markdown_vector_runtime_unavailable',))
+        finally:
+            service.close()
+
+    def test_markdown_query_reports_cpu_ready_when_semantic_runtime_is_healthy_without_cuda(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_runtime_cpu_ready'))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), vector_backend='lancedb', vector_device='auto', reranker_enabled=False)
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        try:
+            with patch.object(service, '_ensure_vector_runtime_ready', return_value=None):
+                service.rebuild_index()
+            with patch('omniclip_rag.service.runtime_dependency_issue', return_value=None),                  patch('omniclip_rag.service.resolve_vector_device', return_value='cpu'):
+                result = service.query('块嵌入', limit=5, score_threshold=0, allowed_families={'markdown'})
+            self.assertTrue(result.hits)
+            self.assertIn('markdown_vector_cpu_ready', result.insights.runtime_warnings)
+            self.assertNotIn('markdown_vector_runtime_unavailable', result.insights.runtime_warnings)
+        finally:
+            service.close()
     def test_single_character_query_skips_vector_noise(self) -> None:
         vault_copy = ROOT / ".tmp" / "single_char_vault_test"
         data_root = ROOT / ".tmp" / "single_char_data_test"

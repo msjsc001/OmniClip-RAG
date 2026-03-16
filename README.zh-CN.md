@@ -4,7 +4,7 @@
 
 **方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。**
 
-[![Version](https://img.shields.io/badge/version-v0.2.4-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.3.0-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md)
 
@@ -111,14 +111,15 @@
 
 ---
 
-## 🔄 V0.2.4 重点更新视角
+## 🔄 V0.3.0 重点更新视角
 
-`v0.2.4` 是建立在 `v0.2.3` 之上的一轮查询界面打磨版本：重点不是动检索后端，而是让检索结果出来之后更容易看、更容易知道自己正在看第几条。
+`v0.3.0` 是建立在 `v0.2.4` 之上的源码里程碑版本。这一版真正把“扩展格式隔离子系统”、“Runtime 组件化管理”和“Qt-only 主桌面链路”全部并入主线代码。
 
-- 🔢 **结果列表最左侧补上序号列**：每条结果现在都有明确的行号，方便你在浏览时快速知道当前看到第几条，也更容易和总结果数建立直觉。
-- 🧹 **查询台顶部按钮进一步收敛**：`查询并复制` 和 `复制当前上下文` 已从顶部查询行去除，让主操作只剩“查询”，避免高频区域堆太多意义接近的按钮。
-- 👀 **查询后的阅读动线更干净**：界面把注意力重新放回结果表和下方详情，而不是让用户在已经命中结果后还要判断顶部该点哪个复制按钮。
-- 📐 **结果表宽度随新序号列一起重排**：在增加序号列的同时，页面、命中原因、语义路径和相关性这些原有列的可读性也一起做了平衡。
+- 🧩 **扩展格式第一次正式入主线**：PDF 走独立解析/索引/查询链，Tika 走独立 sidecar 与白名单格式管理；状态、目录、建库、监听都与 Markdown 主库隔离。
+- 🛠️ **Runtime 不再是一整团黑盒**：现在有独立的 Runtime 页面、组件级修复/清理、待应用更新暂存区，以及官方源/镜像源双路径的自动与手动修复方式。
+- 🧠 **Markdown 主查询终于有了真正的 RCA 骨架**：构建版自检、查询 trace、live/pending/runtime 指纹、以及 Markdown 主查询与 Runtime 稳定性 RCA 计划，已经固化进仓库，不再依赖聊天上下文续命。
+- 🖥️ **旧 Tk 桌面界面已彻底移除**：仓库现在只保留 Qt 主桌面链，后续修复与演进不再被双套 UI 拖慢。
+- ⚠️ **这次 GitHub Release 只发源码不发 EXE**：因为扩展格式与 Runtime 相关的打包体验还在继续收尾，所以这次版本只发布代码、文档与发布说明，不上传 Windows 二进制包。
 
 ---
 
@@ -176,6 +177,8 @@ flowchart LR
 - [更新日志](CHANGELOG.md)
 - [空间预检说明](STORAGE_PRECHECK.md)
 - [运行时安装说明](RUNTIME_SETUP.md)
+- [Markdown 主查询与 Runtime 稳定性 RCA 计划](plans/Markdown主查询与Runtime稳定性RCA计划.md)
+- [扩展格式隔离子系统实施计划](plans/扩展格式隔离子系统实施计划.md)
 - [检索优化计划](plans/检索优化计划.md) 
 - [建库性能优化计划](plans/建库性能优化计划.md)
 

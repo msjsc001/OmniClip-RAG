@@ -38,9 +38,6 @@ local_appdata/
 *.log
 *.lance/
 
-# Local samples and personal notes
-logseq笔记样本/
-
 # Editor / OS noise
 .vscode/
 .idea/
@@ -49,4 +46,5 @@ Thumbs.db
 .wheelhouse_gpu/
 /runtime/
 /appdata/
+/.tmp_dist_runtime_diag*.json
 

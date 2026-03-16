@@ -18,10 +18,14 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import __version__
 from .app_logging import clear_log_files, configure_file_logging
 from .clipboard import copy_text
 from .config import AppConfig, DataPaths, normalize_watch_resource_peak_percent
 from .errors import BuildCancelledError, RuntimeDependencyError
+from .extensions.query import ExtensionQueryBroker, normalize_markdown_hit
+from .extensions.registry import ExtensionRegistry
+from .extensions.models import ExtensionIndexState
 from .models import QueryInsights, QueryResult, RerankOutcome, SearchHit, SpaceEstimate
 from .parser import BLOCK_REF_RE, BULLET_RE, EMBED_RE, PAGE_REF_RE, PROPERTY_RE
 from .query_runtime import QueryRuntimeAdvisor, select_query_hits
@@ -29,9 +33,10 @@ from .retrieval_policy import QueryProfile, build_query_profile, rank_candidates
 from .reranker import CrossEncoderReranker, create_reranker, is_local_reranker_ready
 from .preflight import estimate_storage_for_vault
 from .runtime_recovery import record_runtime_incident
-from .storage import MetadataStore
+from .storage import MetadataStore, _build_fts_query
 from .timing import BuildEtaTracker, append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
-from .vector_index import create_vector_index, is_local_model_ready, prepare_local_model_snapshot, release_process_vector_resources, resolve_vector_device, runtime_dependency_issue
+from .vector_index import create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, prepare_local_model_snapshot, release_process_vector_resources, resolve_vector_device, runtime_dependency_issue
+from .runtime_layout import list_pending_runtime_updates, load_runtime_component_registry, runtime_component_registry_path
 
 try:
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -156,10 +161,15 @@ class OmniClipService:
         self._query_runtime_file = self.paths.state_dir / 'query_runtime.json'
         self._query_runtime_advisor = QueryRuntimeAdvisor(self._query_runtime_file)
         self.reranker = create_reranker(config, paths)
+        self.extension_query_broker = ExtensionQueryBroker(config=config, paths=paths)
 
     def close(self) -> None:
         try:
             release_process_vector_resources(clear_cuda=True, reset_acceleration=False)
+        except Exception:
+            pass
+        try:
+            self.extension_query_broker.close()
         except Exception:
             pass
         self.store.close()
@@ -829,50 +839,453 @@ class OmniClipService:
         if buffer:
             self.vector_index.upsert(buffer)
 
+    def _normalize_query_families(self, allowed_families) -> set[str]:
+        supported = {'markdown', 'pdf', 'tika'}
+        if allowed_families is None:
+            return set(supported)
+        normalized = {str(item).strip().lower() for item in allowed_families if str(item).strip()}
+        return {item for item in normalized if item in supported}
+
+    def _vector_index_status(self) -> dict[str, object]:
+        status_fn = getattr(self.vector_index, 'status', None)
+        if not callable(status_fn):
+            return {}
+        try:
+            payload = status_fn()
+        except Exception:
+            LOGGER.debug('Vector index status probe failed.', exc_info=True)
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _normalize_query_mode(query_mode: str | None) -> str:
+        normalized = str(query_mode or 'hybrid').strip().lower().replace('_', '-').replace(' ', '-')
+        aliases = {
+            '': 'hybrid',
+            'auto': 'hybrid',
+            'default': 'hybrid',
+            'hybrid': 'hybrid',
+            'hybrid-no-rerank': 'hybrid_no_rerank',
+            'hybrid-norerank': 'hybrid_no_rerank',
+            'hybrid_no_rerank': 'hybrid_no_rerank',
+            'lexical': 'lexical-only',
+            'lexical-only': 'lexical-only',
+            'lexical_only': 'lexical-only',
+            'vector': 'vector-only',
+            'vector-only': 'vector-only',
+            'vector_only': 'vector-only',
+        }
+        return aliases.get(normalized, 'hybrid')
+
+    @staticmethod
+    def _trace_json_line(label: str, payload: dict[str, object]) -> str:
+        return f"{label} " + json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+    @staticmethod
+    def _trace_digest(payload: object, prefix: str) -> str:
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        return f"{prefix}:{hashlib.sha1(serialized.encode('utf-8')).hexdigest()[:12]}"
+
+    @staticmethod
+    def _safe_realpath(value: str | Path | None) -> str:
+        if value is None:
+            return ''
+        try:
+            return str(Path(value).resolve(strict=False))
+        except Exception:
+            return str(value)
+
+    @staticmethod
+    def _app_root_dir() -> Path:
+        if getattr(sys, 'frozen', False):
+            return Path(sys.executable).resolve().parent
+        return Path(__file__).resolve().parent.parent
+
+    def _runtime_trace_metadata(self) -> dict[str, object]:
+        runtime_state = inspect_runtime_environment()
+        runtime_dir = Path(runtime_state.get('runtime_dir') or '')
+        registry_path = runtime_component_registry_path(runtime_dir)
+        registry_payload = load_runtime_component_registry(runtime_dir) if runtime_dir.exists() else {}
+        pending_updates = list_pending_runtime_updates(runtime_dir) if runtime_dir.exists() else []
+        manifest_payload: object = {}
+        if registry_path.exists():
+            try:
+                manifest_payload = json.loads(registry_path.read_text(encoding='utf-8'))
+            except Exception:
+                manifest_payload = {'registry_path': str(registry_path), 'invalid': True}
+        elif registry_payload:
+            manifest_payload = registry_payload
+        else:
+            manifest_payload = {'layout': 'legacy-or-empty'}
+        runtime_manifest_version = self._trace_digest(manifest_payload, 'runtime-manifest')
+        live_runtime_id = self._trace_digest(
+            {
+                'runtime_dir': self._safe_realpath(runtime_dir),
+                'registry': registry_payload,
+            },
+            'runtime-live',
+        )
+        pending_runtime_id = ''
+        if pending_updates:
+            pending_runtime_id = self._trace_digest(pending_updates, 'runtime-pending')
+        runtime_instance_id = self._trace_digest(
+            {
+                'runtime_manifest_version': runtime_manifest_version,
+                'live_runtime_id': live_runtime_id,
+                'exe_version': __version__,
+            },
+            'runtime-instance',
+        )
+        return {
+            'runtime_root': self._safe_realpath(runtime_dir),
+            'runtime_manifest_version': runtime_manifest_version,
+            'live_runtime_id': live_runtime_id,
+            'pending_runtime_id': pending_runtime_id,
+            'runtime_instance_id': runtime_instance_id,
+        }
+
+    def _index_trace_metadata(self) -> dict[str, object]:
+        index_state = self._read_index_state() or {}
+        stats = self.store.stats()
+        index_payload = {
+            'workspace_id': self.paths.workspace_id,
+            'vault_path': str(self.config.vault_dir) if self.config.vault_path else '',
+            'index_completed_at': str(index_state.get('completed_at') or ''),
+            'sqlite_realpath': self._safe_realpath(self.paths.sqlite_file),
+            'stats': stats,
+        }
+        return {
+            'workspace_id': self.paths.workspace_id,
+            'index_generation_id': self._trace_digest(index_payload, 'index-generation'),
+            'index_built_for_workspace': index_payload['vault_path'],
+            'index_built_at': index_payload['index_completed_at'],
+            'sqlite_realpath': index_payload['sqlite_realpath'],
+            'fts_rows_in_scope': int(stats.get('chunks', 0) or 0),
+            'vector_rows_in_scope': int(self.store.count_vector_documents() or 0),
+        }
+
+    @staticmethod
+    def _query_expected_steps(*, markdown_requested: bool, query_mode: str, profile: QueryProfile, requested_families: set[str], reranker_enabled: bool) -> tuple[str, ...]:
+        steps: list[str] = []
+        lexical_enabled = markdown_requested and query_mode != 'vector-only'
+        vector_enabled = markdown_requested and profile.use_vector and query_mode != 'lexical-only'
+        if lexical_enabled:
+            steps.append('Markdown 基础候选召回')
+        if vector_enabled:
+            steps.append('Markdown 语义向量召回')
+        if 'pdf' in requested_families:
+            steps.append('PDF 扩展检索')
+        if 'tika' in requested_families:
+            steps.append('Tika 扩展检索')
+        steps.append('跨来源融合排序')
+        if reranker_enabled:
+            steps.append('Reranker')
+        steps.append('上下文组装')
+        return tuple(steps)
+
+    def _build_query_plan_payload(
+        self,
+        *,
+        query_id: str,
+        query_text: str,
+        query_mode: str,
+        requested_families: set[str],
+        profile: QueryProfile,
+        threshold: float,
+        topk: int,
+        reranker_enabled: bool,
+        expected_steps: tuple[str, ...],
+    ) -> dict[str, object]:
+        profile_payload = {
+            'kind': profile.kind,
+            'terms': profile.terms,
+            'use_vector': profile.use_vector,
+            'candidate_limit': profile.candidate_limit,
+            'hydration_pool_size': profile.hydration_pool_size,
+        }
+        return {
+            'query_id': query_id,
+            'query_text': query_text,
+            'query_mode': query_mode,
+            'allowed_families': sorted(requested_families),
+            'lexical_enabled': bool('markdown' in requested_families and query_mode != 'vector-only'),
+            'vector_enabled': bool('markdown' in requested_families and profile.use_vector and query_mode != 'lexical-only'),
+            'vector_mode': self.config.vector_backend,
+            'seed_strategy': 'pure_vector' if query_mode == 'vector-only' else ('hybrid_parallel' if profile.use_vector else 'lexical_only'),
+            'reranker_enabled': bool(reranker_enabled),
+            'threshold': float(threshold),
+            'topk': int(topk),
+            'profile_hash': self._trace_digest(profile_payload, 'query-profile'),
+            'expected_steps': expected_steps,
+        }
+
+    def _build_query_fingerprint_payload(
+        self,
+        *,
+        vector_status: dict[str, object],
+        fts_rows_in_scope: int,
+        vector_rows_in_scope: int,
+    ) -> dict[str, object]:
+        runtime_meta = self._runtime_trace_metadata()
+        index_meta = self._index_trace_metadata()
+        build_payload = {
+            'exe_version': __version__,
+            'frozen': bool(getattr(sys, 'frozen', False)),
+            'sys_executable': sys.executable,
+        }
+        return {
+            'pid': os.getpid(),
+            'thread_name': threading.current_thread().name,
+            'sys_executable': sys.executable,
+            'sys__meipass': str(getattr(sys, '_MEIPASS', '') or ''),
+            'cwd': self._safe_realpath(Path.cwd()),
+            'app_root': self._safe_realpath(self._app_root_dir()),
+            'runtime_root': runtime_meta['runtime_root'],
+            'runtime_manifest_version': runtime_meta['runtime_manifest_version'],
+            'live_runtime_id': runtime_meta['live_runtime_id'],
+            'pending_runtime_id': runtime_meta['pending_runtime_id'],
+            'runtime_instance_id': runtime_meta['runtime_instance_id'],
+            'appdata_root': self._safe_realpath(self.paths.global_root),
+            'workspace_id': index_meta['workspace_id'],
+            'workspace_realpath': str(self.config.vault_dir) if self.config.vault_path else '',
+            'index_generation_id': index_meta['index_generation_id'],
+            'index_built_for_workspace': index_meta['index_built_for_workspace'],
+            'index_built_at': index_meta['index_built_at'],
+            'sqlite_realpath': index_meta['sqlite_realpath'],
+            'vector_db_realpath': self._safe_realpath(vector_status.get('db_dir') or ''),
+            'fts_rows_in_scope': int(fts_rows_in_scope),
+            'vector_rows_in_scope': int(vector_rows_in_scope),
+            'embedding_model_id': self.config.vector_model,
+            'reranker_model_id': getattr(self.config, 'reranker_model', ''),
+            'build_id': self._trace_digest(build_payload, 'build'),
+            'exe_version': __version__,
+        }
+
+    def _build_query_stage_payload(
+        self,
+        *,
+        query_text: str,
+        query_mode: str,
+        vector_query_planned: bool,
+        vector_query_executed: bool,
+        vector_status: dict[str, object],
+        storage_candidates: int,
+        vector_candidates: int,
+        vector_exception_class: str,
+        vector_exception_message: str,
+        fused_count: int,
+        reranker_outcome: RerankOutcome | None,
+        final_candidates_raw: int,
+        final_after_filters: int,
+        postfilter_drop_count: int,
+        fallback_reason: str,
+        stage_ms: dict[str, int],
+    ) -> dict[str, object]:
+        fts_query = _build_fts_query(query_text)
+        reranker_applied = bool(getattr(reranker_outcome, 'applied', False)) if reranker_outcome is not None else False
+        reranker_skip_reason = ''
+        if reranker_outcome is not None:
+            reranker_skip_reason = str(getattr(reranker_outcome, 'skipped_reason', '') or '')
+        return {
+            'query_text_normalized': query_text.strip(),
+            'fts_query_normalized': fts_query or '',
+            'query_mode': query_mode,
+            'lexical_candidates_raw': int(storage_candidates),
+            'vector_query_planned': bool(vector_query_planned),
+            'vector_query_executed': bool(vector_query_executed),
+            'vector_table_ready': vector_status.get('table_ready'),
+            'vector_backend': vector_status.get('backend') or self.config.vector_backend,
+            'vector_candidates_raw': int(vector_candidates),
+            'vector_exception_class': vector_exception_class,
+            'vector_exception_message': vector_exception_message,
+            'fusion_candidates_raw': int(fused_count),
+            'reranker_applied': reranker_applied,
+            'reranker_skip_reason': reranker_skip_reason,
+            'final_candidates_raw': int(final_candidates_raw),
+            'final_after_filters': int(final_after_filters),
+            'postfilter_drop_count': int(postfilter_drop_count),
+            'fallback_reason': fallback_reason,
+            'stage_ms': stage_ms,
+        }
+
     def query(
         self,
         query_text: str,
         limit: int | None = None,
         copy_result: bool = False,
         score_threshold: float | None = None,
+        allowed_families: list[str] | tuple[str, ...] | set[str] | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
+        query_mode: str | None = None,
     ) -> QueryResult:
-        self._require_ready_index(action='query')
-        self._ensure_vector_runtime_ready()
+        requested_families = self._normalize_query_families(allowed_families)
+        if not requested_families:
+            raise RuntimeError('query_family_none_selected')
+        normalized_query_mode = self._normalize_query_mode(query_mode)
         started_at = time.perf_counter()
         limit = max(int(limit or self.config.query_limit or 0), 1)
         profile = build_query_profile(query_text, limit)
         candidate_limit = profile.candidate_limit
-        _emit_query_progress(on_progress, 'prepare', percent=5, query_text=query_text, limit=limit)
-        page_block_patterns = _compile_page_blocklist_patterns(getattr(self.config, 'page_blocklist_rules', ''))
-        storage_candidates = _filter_candidate_rows_by_page_blocklist(self.store.search_candidates(query_text, candidate_limit), page_block_patterns)
-        _emit_query_progress(on_progress, 'candidate', percent=22, candidates=len(storage_candidates), limit=candidate_limit)
-        vector_candidates = {}
-        if profile.use_vector:
-            vector_limit = max(self.config.vector_candidate_limit, candidate_limit)
-            vector_candidates = {item.chunk_id: item.score for item in self.vector_index.search(query_text, vector_limit)}
-            _emit_query_progress(on_progress, 'vector', percent=35, candidates=len(vector_candidates), limit=vector_limit)
-        candidate_rows = _filter_candidate_rows_by_page_blocklist(self._merge_candidate_rows(storage_candidates, vector_candidates), page_block_patterns)
+        reranker_enabled = bool(getattr(self.config, 'reranker_enabled', False)) and normalized_query_mode == 'hybrid'
+        expected_steps = self._query_expected_steps(
+            markdown_requested='markdown' in requested_families,
+            query_mode=normalized_query_mode,
+            profile=profile,
+            requested_families=requested_families,
+            reranker_enabled=reranker_enabled,
+        )
+        query_id = self._trace_digest(
+            {
+                'query_text': query_text,
+                'workspace_id': self.paths.workspace_id,
+                'mode': normalized_query_mode,
+                'limit': limit,
+                'at': time.time_ns(),
+            },
+            'query',
+        )
+        _emit_query_progress(on_progress, 'prepare', percent=5, query_text=query_text, limit=limit, families=sorted(requested_families))
 
-        if candidate_rows:
-            hits = rank_candidates(query_text, candidate_rows, vector_candidates, profile)
-        else:
-            rows = _filter_candidate_rows_by_page_blocklist(self.store.fetch_all_rendered_chunks(), page_block_patterns)
-            hits = rank_candidates(query_text, rows, vector_candidates, profile)
-        _emit_query_progress(on_progress, 'rank', percent=52, candidates=len(hits), limit=limit)
+        family_hits: dict[str, list[SearchHit]] = {}
+        markdown_hits: list[SearchHit] = []
+        runtime_warnings: list[str] = []
+        page_block_patterns = _compile_page_blocklist_patterns(getattr(self.config, 'page_blocklist_rules', ''))
+        trace_storage_candidates = 0
+        trace_vector_candidates = 0
+        trace_vector_error = ''
+        trace_vector_error_class = ''
+        trace_vector_table_ready: object = None
+        trace_vector_query_executed = False
+        fallback_reason = ''
+        stage_ms = {
+            'lexical': 0,
+            'vector': 0,
+            'fusion': 0,
+            'rerank': 0,
+            'finalize': 0,
+        }
+
+        markdown_requested = 'markdown' in requested_families
+        lexical_enabled = markdown_requested and normalized_query_mode != 'vector-only'
+        vector_query_planned = bool(markdown_requested and profile.use_vector and normalized_query_mode != 'lexical-only')
+        vector_status = self._vector_index_status() if markdown_requested else {}
+        trace_vector_table_ready = vector_status.get('table_ready') if vector_status else None
+        fts_rows_in_scope = int(self.store.stats().get('chunks', 0) if markdown_requested else 0)
+        vector_rows_in_scope = int(self.store.count_vector_documents() if markdown_requested else 0)
+
+        if markdown_requested:
+            if self._index_ready():
+                storage_candidates = []
+                lexical_started_at = time.perf_counter()
+                if lexical_enabled:
+                    storage_candidates = _filter_candidate_rows_by_page_blocklist(self.store.search_candidates(query_text, candidate_limit), page_block_patterns)
+                    trace_storage_candidates = len(storage_candidates)
+                    _emit_query_progress(on_progress, 'candidate', percent=22, candidates=len(storage_candidates), limit=candidate_limit)
+                stage_ms['lexical'] = max(int((time.perf_counter() - lexical_started_at) * 1000), 0)
+
+                vector_candidates: dict[str, float] = {}
+                vector_runtime_ready = True
+                if vector_query_planned:
+                    vector_started_at = time.perf_counter()
+                    try:
+                        self._ensure_vector_runtime_ready()
+                    except RuntimeDependencyError as exc:
+                        vector_runtime_ready = False
+                        trace_vector_error_class = exc.__class__.__name__
+                        trace_vector_error = str(exc).strip() or exc.__class__.__name__
+                        runtime_warnings.append('markdown_vector_runtime_unavailable')
+                        fallback_reason = 'vector_runtime_unavailable'
+                        LOGGER.warning(
+                            'Markdown query degraded to lexical-only retrieval because vector runtime is not ready: %s',
+                            trace_vector_error,
+                        )
+                    if vector_runtime_ready:
+                        if trace_vector_table_ready is False:
+                            runtime_warnings.append('markdown_vector_index_missing')
+                            fallback_reason = 'vector_index_missing'
+                        else:
+                            vector_limit = max(self.config.vector_candidate_limit, candidate_limit)
+                            try:
+                                trace_vector_query_executed = True
+                                vector_candidates = {item.chunk_id: item.score for item in self.vector_index.search(query_text, vector_limit)}
+                                trace_vector_candidates = len(vector_candidates)
+                                _emit_query_progress(on_progress, 'vector', percent=35, candidates=len(vector_candidates), limit=vector_limit)
+                                if resolve_vector_device(self.config.vector_device) == 'cpu':
+                                    runtime_warnings.append('markdown_vector_cpu_ready')
+                            except Exception as exc:
+                                trace_vector_error_class = exc.__class__.__name__
+                                trace_vector_error = str(exc).strip() or exc.__class__.__name__
+                                runtime_warnings.append('markdown_vector_query_failed')
+                                fallback_reason = 'vector_query_failed'
+                                LOGGER.exception('Markdown vector search failed during query and was isolated from lexical retrieval.')
+                                vector_candidates = {}
+                    stage_ms['vector'] = max(int((time.perf_counter() - vector_started_at) * 1000), 0)
+
+                if normalized_query_mode == 'vector-only':
+                    candidate_rows = _filter_candidate_rows_by_page_blocklist(
+                        self.store.fetch_rows_by_chunk_ids(vector_candidates.keys()),
+                        page_block_patterns,
+                    ) if vector_candidates else []
+                else:
+                    candidate_rows = _filter_candidate_rows_by_page_blocklist(self._merge_candidate_rows(storage_candidates, vector_candidates), page_block_patterns)
+                if candidate_rows:
+                    markdown_hits = rank_candidates(query_text, candidate_rows, vector_candidates, profile)
+                elif normalized_query_mode != 'vector-only':
+                    rows = _filter_candidate_rows_by_page_blocklist(self.store.fetch_all_rendered_chunks(), page_block_patterns)
+                    markdown_hits = rank_candidates(query_text, rows, vector_candidates, profile)
+                markdown_hits = [normalize_markdown_hit(hit) for hit in markdown_hits]
+                if markdown_hits:
+                    family_hits['markdown'] = markdown_hits
+            elif requested_families == {'markdown'}:
+                self._require_ready_index(action='query')
+            else:
+                fallback_reason = 'markdown_index_not_ready'
+
+        fusion_started_at = time.perf_counter()
+        extension_hits = self.extension_query_broker.collect_extension_hits(
+            query_text,
+            limit=candidate_limit,
+            profile=profile,
+            allowed_families=requested_families,
+        )
+        family_hits.update(extension_hits)
+        fused_hits = self.extension_query_broker.fuse_family_hits(family_hits, limit=max(limit, profile.hydration_pool_size))
+        extension_counts = {
+            'pdf': len(extension_hits.get('pdf', [])),
+            'tika': len(extension_hits.get('tika', [])),
+        }
+        stage_ms['fusion'] = max(int((time.perf_counter() - fusion_started_at) * 1000), 0)
+        _emit_query_progress(
+            on_progress,
+            'rank',
+            percent=52,
+            candidates=len(fused_hits),
+            limit=limit,
+            markdown_candidates=len(markdown_hits),
+            pdf_candidates=extension_counts['pdf'],
+            tika_candidates=extension_counts['tika'],
+            families=sorted(family_hits),
+        )
 
         effective_threshold = self.config.query_score_threshold if score_threshold is None else float(score_threshold or 0.0)
         threshold_floor = max(effective_threshold, 0.0)
-        rerank_limit = min(len(hits), max(limit, profile.hydration_pool_size))
-        if getattr(self.config, 'reranker_enabled', False):
+        rerank_limit = min(len(fused_hits), max(limit, profile.hydration_pool_size))
+        rerank_started_at = time.perf_counter()
+        if reranker_enabled:
             _emit_query_progress(on_progress, 'rerank', percent=68, candidates=rerank_limit, limit=limit)
-            reranked_hits, rerank_outcome = self.reranker.rerank(query_text, hits, rerank_limit)
+            reranked_hits, rerank_outcome = self.reranker.rerank(query_text, fused_hits, rerank_limit)
         else:
-            reranked_hits = hits
-            rerank_outcome = RerankOutcome(enabled=False, applied=False, skipped_reason='disabled')
+            reranked_hits = fused_hits
+            rerank_outcome = RerankOutcome(enabled=bool(getattr(self.config, 'reranker_enabled', False)), applied=False, skipped_reason='disabled' if normalized_query_mode != 'hybrid' else 'disabled')
+        stage_ms['rerank'] = max(int((time.perf_counter() - rerank_started_at) * 1000), 0)
         filtered_hits = [hit for hit in reranked_hits if hit.score >= threshold_floor]
+        postfilter_drop_count = max(len(reranked_hits) - len(filtered_hits), 0)
+
+        finalize_started_at = time.perf_counter()
         finalized_hits, insights = self._finalize_query_hits(query_text, filtered_hits, limit, profile, on_progress=on_progress)
+        stage_ms['finalize'] = max(int((time.perf_counter() - finalize_started_at) * 1000), 0)
         insights.elapsed_ms = max(int((time.perf_counter() - started_at) * 1000), 0)
+        insights.runtime_warnings = tuple(dict.fromkeys(runtime_warnings))
         insights.reranker = rerank_outcome
         insights.recommendation = self._query_runtime_advisor.record_and_recommend(
             resolved_device=resolve_vector_device(self.config.vector_device),
@@ -880,10 +1293,52 @@ class OmniClipService:
             elapsed_ms=insights.elapsed_ms,
             selected_hits=len(finalized_hits),
             hydrated_candidates=insights.hydrated_candidates,
-            reranker_enabled=getattr(self.config, 'reranker_enabled', False),
+            reranker_enabled=reranker_enabled,
             reranker_degraded=bool(rerank_outcome.degraded_to_cpu if rerank_outcome else False),
             reranker_oom=bool(rerank_outcome.oom_recovered if rerank_outcome else False),
         )
+        insights.query_plan = self._build_query_plan_payload(
+            query_id=query_id,
+            query_text=query_text,
+            query_mode=normalized_query_mode,
+            requested_families=requested_families,
+            profile=profile,
+            threshold=threshold_floor,
+            topk=limit,
+            reranker_enabled=reranker_enabled,
+            expected_steps=expected_steps,
+        )
+        insights.query_fingerprint = self._build_query_fingerprint_payload(
+            vector_status=vector_status,
+            fts_rows_in_scope=fts_rows_in_scope,
+            vector_rows_in_scope=vector_rows_in_scope,
+        )
+        insights.query_stage = self._build_query_stage_payload(
+            query_text=query_text,
+            query_mode=normalized_query_mode,
+            vector_query_planned=vector_query_planned,
+            vector_query_executed=trace_vector_query_executed,
+            vector_status=vector_status,
+            storage_candidates=trace_storage_candidates,
+            vector_candidates=trace_vector_candidates,
+            vector_exception_class=trace_vector_error_class,
+            vector_exception_message=trace_vector_error,
+            fused_count=len(fused_hits),
+            reranker_outcome=rerank_outcome,
+            final_candidates_raw=len(filtered_hits),
+            final_after_filters=len(finalized_hits),
+            postfilter_drop_count=postfilter_drop_count,
+            fallback_reason=fallback_reason,
+            stage_ms=stage_ms,
+        )
+        insights.trace_lines = (
+            self._trace_json_line('QUERY_PLAN', insights.query_plan),
+            self._trace_json_line('QUERY_FINGERPRINT', insights.query_fingerprint),
+            self._trace_json_line('QUERY_STAGE', insights.query_stage),
+        )
+        if getattr(self.config, 'query_trace_logging_enabled', False):
+            for line in insights.trace_lines:
+                LOGGER.info('%s', line)
         _emit_query_progress(on_progress, 'context', percent=96, hits=len(finalized_hits), limit=limit)
         context_pack = self.compose_context_pack_text(query_text, finalized_hits, export_mode=getattr(self.config, 'context_export_mode', 'standard'), language=getattr(self.config, 'ui_language', 'zh-CN'))
         if copy_result:
@@ -1025,6 +1480,10 @@ class OmniClipService:
         index_state = self._index_state(pending=pending)
         index_ready = index_state == 'ready'
         index_status = self._read_index_state()
+        extension_registry = ExtensionRegistry().load(self.paths)
+        pdf_ready = bool(extension_registry.pdf_config.enabled and extension_registry.snapshot.pdf.index_state == ExtensionIndexState.READY)
+        tika_ready = bool(extension_registry.tika_config.enabled and extension_registry.snapshot.tika.index_state == ExtensionIndexState.READY)
+        available_query_families = [family for family, enabled in (('markdown', index_ready), ('pdf', pdf_ready), ('tika', tika_ready)) if enabled]
         resolved_vault = str(self.config.vault_dir) if self.config.vault_path else ''
         query_recommendation = asdict(self._query_runtime_advisor.current_recommendation(resolve_vector_device(self.config.vector_device), getattr(self.config, 'reranker_enabled', False)))
         return {
@@ -1044,7 +1503,8 @@ class OmniClipService:
             'index_state': index_state,
             'index_ready': index_ready,
             'watch_allowed': index_ready,
-            'query_allowed': index_ready,
+            'query_allowed': bool(available_query_families),
+            'query_available_families': available_query_families,
             'index_completed_at': str((index_status or {}).get('completed_at') or ''),
             'query_limit_recommendation': query_recommendation,
         }

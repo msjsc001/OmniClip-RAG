@@ -1001,7 +1001,7 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 
 ## 2026-03-13 Extension Formats Must Stay As An Isolated Subsystem
 
-- 扩展格式（第一批：PDF / HTML / MHTML）已经明确不能作为 Markdown 主链里的几个条件分支去实现，而必须作为平行的隔离子系统推进：UI、状态、索引、热监听、删除/重建都要独立；查询层再统一融合。
+- 扩展格式已经明确不能作为 Markdown 主链里的几个条件分支去实现，而必须作为平行的隔离子系统推进：UI、状态、索引、热监听、删除/重建都要独立；查询层再统一融合。后续路线再收敛为 `PDF` 专门链 + `Tika` 统一扩展链。
 - 这项工作的执行蓝图已固定到 `plans/扩展格式隔离子系统实施计划.md`。后续无论在哪个聊天窗继续实现，必须先读取该文档，再继续写代码。
 - 该功能的硬约束是：扩展格式默认关闭时，当前 Markdown 主链的行为必须与“该功能不存在”完全等价；任何破坏该约束的实现都不得合入。
 
@@ -1020,3 +1020,231 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - `Results & Details` 的 Qt 结果表现在新增了最左侧序号列，序号按当前可见顺序实时生成；这意味着排序、页面排序恢复后，用户看到的第 1 / 第 2 / 第 N 条会始终和当前表格顺序一致，不依赖垂直表头。
 - `查询台` 顶部行已经收敛为单一主动作 `查询`；`查询并复制` 与 `复制当前上下文` 仍保留底层方法以减少回归风险，但按钮不再出现在主界面，避免高频区域堆叠语义接近的动作。
 - 这次改动明确只针对 Qt 主线展示层，不改变查询后端、上下文组装、复制逻辑和旧 Tk 兼容层，确保用户即使完全不关心这次 UI 微调，也不会影响原有检索结果本身。
+
+
+## 2026-03-14 Extension Format Plan Guardrails Hardening
+
+- `plans/扩展格式隔离子系统实施计划.md` 已补齐几条必须长期生效的硬约束：目录取消勾选前必须二次确认；目录临时失联只能标记源路径异常，绝不能自动清库；每种扩展格式第一版就必须支持“一次扫描变动更新”。
+- 扩展格式与 Markdown 主链的关系已从“仅隔离”升级为“隔离 + 统一协调”：任何扩展格式的全量建库、重建、一次扫描变动更新和热监听回压，都必须经过统一任务协调器，保证零干扰主程序。
+- 计划文档还明确把“优先使用成熟轻量工具、不自造底层解析轮子”和“未来新增格式必须继续挂在 extensions 子系统下”写成硬规则，避免后续扩展功能把主链重新拖回条件分支式的架构。
+
+
+## 2026-03-14 Tika-First Extension Strategy
+
+- 扩展格式路线已从“PDF / HTML / MHTML 各自平铺”收敛为两条能力线：`PDF` 走专门解析链，`Tika` 作为统一的多格式外置扩展运行时。
+- `Tika` 相关 UI 也已在计划层固定：主界面只暴露 `PDF` 与 `Tika` 两个子页签；`Tika` 通过独立格式选择弹窗管理可用格式，支持搜索、高频置顶、兼容性分层；兼容性差的格式只允许灰色可见，不允许启用。
+- 计划同时明确了 `PDF` 不纳入 Tika 白名单、`Tika` 不打进主包、运行时必须外置安装、查询结果必须能区分 `PDF` 与 `Tika` 的具体子格式，避免未来实现重新把扩展子系统写回主链条件分支。
+
+## 2026-03-14 扩展格式阶段 1 记忆
+
+- 扩展格式阶段 1 已从纯占位页签推进到“独立配置 + UI 管理壳层”。
+- `omniclip_rag/extensions/registry.py` 现在负责把 PDF / Tika 扩展配置写入独立的 `extensions_registry.json`，路径位于当前工作区 `state/` 下，绝不并入 `AppConfig`。
+- `ConfigWorkspace` 新增了扩展格式顶层总览、PDF / Tika 子页签、Tika 运行时状态区和格式选择弹窗，但所有按钮仍只到配置持久化和未接入提示，不触发真实解析/建库。
+- 当前工作区目录会作为扩展来源目录中的托管项自动同步进 PDF / Tika 配置；取消勾选任一来源目录必须二次确认，只清除该目录对应的扩展索引语义，不删除原始文件。
+- Tika 格式选择窗默认排除 PDF，分为推荐 / 兼容性未知 / 兼容性差三层，其中兼容性差项灰色可见但不可选。
+
+## 2026-03-14 扩展格式阶段 2 记忆
+
+- `omniclip_rag/extensions/runtimes/tika_runtime.py` 现在承载 Tika sidecar 的检测、安装、健康检查与进程生灭；运行时目录固定在 `shared/extensions_runtime/tika/`，不并入 Markdown 主链状态。
+- `TikaSidecarManager` 启动时必须通过 `GET /tika` 轮询确认 ready；只有健康检查通过后，UI 才能把状态标成“运行中”。
+- Windows 下给 Tika 子进程绑定了 Job Object `kill-on-close`，并在 `MainWindow.closeEvent()` 显式调用 `config_workspace.shutdown_extension_runtimes()`，双保险防孤儿进程占住 9998 端口。
+- `ConfigWorkspace` 的 Tika 运行时区已经从占位文案升级成真实检测/安装/启停状态联动，但仍未进入真实业务建库；这一阶段只接 sidecar，不接解析。
+
+
+## 2026-03-14 扩展格式阶段 3 记忆
+
+- PDF 扩展链已经明确与 Tika 彻底隔离：`parsers/pdf.py` 通过 `pypdf` 逐页抽取文本，`normalizers/pdf.py` 负责空白噪声清理、软换行缝合和有限跨页续句拼接；PDF 不会复用 Tika 的任何解析入口。
+- `extensions/service.py` 里的 `PdfExtensionService` 已打通 PDF 的预检、全量建库、一次扫描变动更新、删除索引与独立查询，且所有索引都固定落在 `extensions/pdf/` 的独立 SQLite / 向量目录下，不会写进 Markdown 主库。
+- PDF 源目录如果临时失联，当前实现会把目录状态标记为 `missing_temporarily` 并拒绝危险的全量重建，而不是把旧索引清空；单个 PDF 文件损坏时只记 warning 并跳过，不会中断整轮任务。
+- 主查询层已经接入扩展 broker：PDF 命中会以 `source_family='pdf'` 返回，并强制组装成 `PDF · 文件名 · 第 N 页` 的来源标签，避免跨来源融合后丢失具体 PDF 身份。
+- 阶段 3 回归测试新增了 `tests/test_pdf_extension.py`，覆盖 PDF 文本抽取、断句缝合、独立建库与查询页码标识；本轮全量回归结果为 `180/180 OK`。
+
+
+## 2026-03-14 扩展格式阶段 4 记忆
+
+- `TikaExtensionService` 已经把 Tika 路线从“仅运行时”推进到真实业务链：白名单格式会通过本地 sidecar 返回 XHTML，再由 `normalizers/tika_output.py` 清洗成统一段落结构，最后写入 `extensions/tika/` 的独立 SQLite / 向量库。
+- Tika 的一次扫描变动更新已经落地，增量依据仍然是稳定的 `mtime + size` manifest；删除文件时只清理 Tika 自己的索引记录，不会碰 Markdown / PDF 的任何状态。
+- Tika 毒文件或解析异常现在只会在扩展日志里记 warning 并跳过，整轮建库和增量任务会继续完成；这条规则与 PDF 链保持一致，避免一个坏文件拖垮整个扩展批次。
+- `watch.py` 已新增 PDF / Tika 独立监听服务与持久化 `watch_state`。监听循环使用扩展自己的 manifest 和 pending-change 计数，不复用 Markdown 主链的 watch 状态。
+- 当 Markdown 主链正在全量建库，或扩展自身已有重任务占用时，监听触发的扩展增量更新会被 `ExtensionTaskCoordinator` 拦截，只累计到 `watch_state.pending_changes`，从而避免主链与扩展链无序并发导致的资源雪崩。
+- 阶段 4 新增了 `tests/test_tika_extension.py`，覆盖 Tika XHTML 规范化、独立建库、一次扫描变动更新，以及监听在主链繁忙时的阻塞/排队行为；本轮全量回归结果为 `185/185 OK`。
+
+
+## 2026-03-14 扩展格式阶段 5 记忆
+
+- 主查询入口现在已经变成 Broker 结构：Markdown、PDF、Tika 先各自完成来源内召回和排序，再由 `extensions/query.py` 做第二段融合；跨来源阶段明确禁止直接混用不同 LanceDB 表的原始向量距离分数。
+- 跨来源默认排序现在采用 family 内排名驱动的 Rank-based Fusion（RRF 风格）并保留极轻量 lexical anchor 仅用于同层细分，目的是避免某一张表因为分布差异而无脑霸榜。
+- `SearchHit` 已新增 `source_kind`，并和既有 `source_family / source_label` 一起构成统一身份层：Markdown 标为 `markdown`，PDF 标为 `pdf`，Tika 会标具体子格式如 `docx/html/epub`；Tika 标签统一呈现为 `DOCX(Tika) · 文件名` 这类可见格式名。
+- 查询台现在新增了来源复选框 `[Markdown / PDF / 扩展格式(Tika)]`，过滤状态会跟随 Qt 视图快照一起保存和恢复；当所有来源都取消勾选时，UI 会直接阻止查询启动。
+- `OmniClipService.query()` 现在允许在 Markdown 主索引未 ready 时继续执行 PDF/Tika 的 extension-only 查询；`status_snapshot()` 也会额外暴露 `query_available_families`，供 UI 或后续状态流做更细的可查询判断。
+- 阶段 5 新增回归覆盖 Broker 公平融合、extension-only 过滤、PDF/Tika 来源身份和查询台过滤状态，当前全量测试基线为 `191/191 OK`。
+
+## 2026-03-14 打包版启动串行化记忆
+
+- 发现打包版 `OmniClipRAG.exe` 在启动早期会并发触发两条重型后台探测：
+  - `schedule_device_probe()` 在线程中导入 `torch`
+  - `schedule_initial_status_load()` 在线程中导入 `lancedb/pyarrow`
+- 这两条原生库冷启动在包内并发时，可能导致 Windows 侧致命异常并表现为双击 EXE 无响应或秒退。
+- 修复策略：Qt 启动阶段改成严格串行。
+  - 先执行 `schedule_startup_background_tasks()`
+  - 设备探测完成后，再调度初始状态加载
+- Why：避免 `torch` 与 `lancedb/pyarrow` 在打包版冷启动时并发抢占原生初始化路径，优先保证 EXE 能稳定起窗。
+- 顺手收敛了扩展 watch 的初始 manifest 竞态：启动 watch 时先同步抓取一次基线 manifest，再进入轮询，避免“监听刚启动就错过第一批新增文件”的时序波动。
+
+## 2026-03-14 打包版 PySide6/Shiboken DLL 搜索路径修复记忆
+- 症状：`dist/OmniClipRAG-v0.2.4/OmniClipRAG.exe` 双击无响应，进程立即退出，stderr 指向 `PySide6/__init__.py: Unable to import Shiboken`。
+- 根因：PyInstaller 轻量包把 `Shiboken.pyd` 放在 `_internal/shiboken6/`，但 `shiboken6.abi3.dll` 与部分 Qt 依赖 DLL 落在 `_internal/.vendor/PySide6`、`_internal/.vendor/shiboken6`。若启动时未显式把这些 `.vendor` 子目录注册到 DLL 搜索路径，Windows 会在导入 Qt 前直接失败。
+- 解决：在 `launcher.py` 与 `pyi_rth_omniclip.py` 同时补齐 `_internal/.vendor/PySide6`、`_internal/.vendor/PySide6/plugins`、`_internal/.vendor/shiboken6` 以及 bundle 根目录对应 `.vendor` 路径的 `PATH + add_dll_directory` 注册。
+- 防回归：新增 `tests/test_launcher.py`，锁定 vendored Qt/Shiboken DLL 目录不能再被遗漏。修复后打包版冷启动实测可存活 8 秒以上，不再出现“点了没反应”。
+
+## 2026-03-14 Markdown 查询降级记忆
+- 问题：扩展格式未启用、查询台仅勾选 `Markdown` 时，查询仍会先做 `sentence-transformers` / 向量 runtime 检查，导致本来可走 SQLite/FTS 的普通查询被错误拦截并弹出运行环境引导窗。
+- 结论：Markdown 查询必须把向量检索视为“增强项”，不是“硬前置条件”。只要主索引已建立，就必须允许退化到纯字面检索继续工作。
+- 落地：`OmniClipService.query()` 先执行 Markdown 的存储候选检索，再尝试向量增强；若 `runtime_dependency_issue()` 报错，只记录 warning 并退化为 lexical-only，不再对 `allowed_families={'markdown'}` 抛 `RuntimeDependencyError`。
+- 防回归：新增 `tests/test_service.py::test_markdown_query_degrades_to_lexical_when_vector_runtime_is_not_ready`。
+
+## 2026-03-14 扩展格式页收尾记忆
+- 来源目录不再只认当前笔记库；扩展页现在会把“当前工作区关联目录 + 已保存笔记库”全部作为托管来源目录显示到 PDF/Tika 两条管线里。
+- 这类托管来源目录的同步必须晚于 `extensions_registry.json` 的真实加载，否则会把默认空状态回写覆盖掉已有扩展配置。为此新增了 `_extension_state_loaded` 门闩，只有状态真正载入后才允许根据已保存笔记库列表回写扩展源目录。
+- 扩展页顶部全局按钮已经接上真实逻辑：预检和全量建库会按当前子页签分别调用 PDF/Tika 独立服务，不再走“本阶段只接 UI”的 stub 提示。
+- 扩展页说明文案已去掉阶段性灰字，避免和当前已落地的真实 PDF/Tika 链路相冲突。
+
+
+## 2026-03-14 查询相关性与扩展目录表格化记忆
+- 跨来源 Broker 排序和“相关性显示”必须彻底分离。`ExtensionQueryBroker.fuse_family_hits()` 现在只负责决定 Markdown / PDF / Tika 的全局顺序，不再把 RRF 融合分覆写回 `SearchHit.score`。Why：不同来源的融合分只适合排序，不适合作为用户看到的“相关性”，否则会出现一堆结果都看起来像 100 分的假象。
+- Markdown 查询如果因为主向量 runtime 异常而退化成 lexical-only，查询台现在会在来源筛选下方明确显示提示：这是 Markdown 主向量链的问题，和 Tika 扩展运行时无关；修复本地 runtime 后语义增强会自动恢复。
+- 扩展页的来源目录已经开始从“粗粒度勾选列表”收敛为“目录级表格控制台”：每行目录都预留独立的预检、变动更新、建库、删索引入口，并显示自己的状态与进度文本。Why：全局按钮只能做总控，真正的日常使用必须细到目录级，避免用户误以为一次操作会把整条 PDF/Tika 管线全部重跑。
+
+
+## 2026-03-14 查询降级修复入口记忆
+- 查询台里的 `Markdown lexical-only` 提示现在只说明“已降级 + 去配置页修复”，不再提 `Tika`。Why：用户需要的是直接修，不是继续区分技术路线。
+- `配置 -> 设置` 的设备运行时区域现在新增了两个固定入口：`自动修复 runtime` 与 `手动修复说明`。自动修复会直接拉起 `InstallRuntime.ps1` 的独立 PowerShell 终端；手动修复复用现有运行时引导窗。
+- 这条修复链服务于 Markdown 主向量 runtime，本质上和 Tika sidecar 无关；扩展格式功能只让这个问题从“直接报错”变成了“可降级继续用且能看见修复入口”。
+
+## 2026-03-14 Runtime 管理页与修复入口重构
+- `配置 -> Runtime` 现在是主向量 runtime 的唯一管理页；`开始` 页只保留一个轻量状态芯片，不再在 `设置` 页里混放修复按钮。Why：开始页负责让用户知道当前是否完整，真正的下载/清理/刷新管理应该集中到专门页面，避免和设备设置、Tika 扩展、模型下载互相污染。
+- Runtime 页按“组件分类”展示，而不是把整个 runtime 当成一坨不可分的黑盒。当前拆成 `vector-core` 与 `vector-store` 两类；每行都有作用说明、就绪状态、缺失项、`修复/下载`、`清理`、`刷新`。Why：这样用户不需要每次全量重下，后续版本如果增减组件也能按类别扩展。
+- `scripts/install_runtime.ps1` 现在支持 `-Component all|vector-core|vector-store` 与 `-Source official|mirror`。自动修复和手动修复都必须同时给出官方源与镜像源。Why：轻量主程序默认不内置这些运行组件，修复链必须能在官方源不可用时继续落地，而且不能强迫用户永远整包重装。
+- 查询台的 Markdown 降级提示现在带“点击修复”链接，点击后直接切到 `配置 -> Runtime`；提示本身只说明“当前已降级为纯字面检索，修复本地向量 runtime 后语义增强会自动恢复”。Why：用户需要的是一条最短修复路径，而不是继续看到 Tika/扩展路线的概念负担。
+- Runtime 页对 `vector-core` 的健康判定不仅看目录是否存在，还会把 `torch` / `sentence-transformers` 的真实导入失败并入状态摘要；这能显式暴露像 `No module named 'http.cookies'` 这种“目录看起来完整，但主向量链其实坏了”的环境。Why：只看文件存在性会产生假完整状态，最终又让查询台莫名降级。
+
+## 2026-03-14 开始页主索引状态去串线记忆
+- `开始` 页的索引状态芯片现在只表达 Markdown 主索引，不再把扩展格式（PDF/Tika）的状态概念混进来。Why：主索引和扩展索引是平行子系统，用户在开始页只应该看到“当前笔记库的 Markdown 主索引是否已建立”。
+- 当 Qt 还没拿到当前工作区的 `status_snapshot()` 时，索引芯片不再误报“索引还没建立”，而是显示 `索引状态检测中`；查询阻断提示和热监听阻断提示也同步改成“正在检测当前笔记库的索引状态，请稍候”。Why：切换笔记库或启动初期的异步状态加载窗口里，`missing` 会制造假故障感。
+- 新增回归覆盖了两件事：未拿到主状态快照时必须显示 `checking`，以及扩展页状态刷新不能改写开始页的 Markdown 索引芯片。本轮全量回归基线提升到 `202/202 OK`。
+
+## 2026-03-14 Runtime 能力细分与 Markdown 主索引回退记忆
+- Runtime 页现在按能力模块细分成 `compute-core`、`model-stack`、`vector-store` 三类，而不是继续把主向量 runtime 粗暴地捆成一大块。Why：用户真正需要的是按能力修复，不是每次都整包重下；同时后续版本增加或替换组件时，也能继续沿这三类扩展。
+- `scripts/install_runtime.ps1` 已同步支持 `-Component all|compute-core|model-stack|vector-store`。`compute-core` 负责 PyTorch 与计算加速，`model-stack` 负责 sentence-transformers / transformers，`vector-store` 负责 LanceDB / Arrow / 推理存储支撑。Why：这样 Markdown 语义降级时可以优先补模型栈，而不是把整个 runtime 当成黑盒重装。
+- `开始` 页的 Markdown 索引状态如果暂时拿不到 `status_snapshot()`，现在会直接回读当前工作区磁盘上的 `state/index_state.json` 与 `rebuild_state.json`，并且只认 Markdown 主索引，不认扩展格式状态。Why：避免 UI 长时间卡在“索引状态检测中”，也避免扩展 PDF/Tika 状态串线到主索引芯片。
+- 对来自异步快照的脏 `index_state=checking` 也会优先回落到磁盘真实状态。Why：主链只需要回答“Markdown 主索引是否 ready/pending/missing”，不需要把临时检测态长期暴露给用户。
+- 本轮回归把基线提升到 `203/203 OK`，并补了“磁盘已有主索引时索引芯片必须显示 ready”“脏 checking 快照不能覆盖磁盘 ready 状态”两条用例。
+
+## 2026-03-14 Runtime 命令修复与 CPU-only 语义记忆
+- `build_runtime_install_command()` 之前会把 `_powershell_literal()` 的返回值再次外包一层单引号，最终生成 `Set-Location -LiteralPath ''D:\...''` 这类无效命令，导致 Runtime 页手动修复复制出来的 PowerShell 命令直接报“LiteralPath 为空字符串”。现已改为只使用一次已转义好的 PowerShell literal，并补回归测试锁定命令格式。Why：手动修复命令必须做到复制即用，不能让用户自己再猜怎么改引号。
+- Runtime 自动修复链继续保持“只拉起 PowerShell，不在主进程里执行下载”，并通过 Qt 单测验证 `subprocess.Popen(..., cwd=<app_dir>)` 的实际入参；另外补了一条不下载任何东西的真实 shell 冒烟，确认构建目录下 `InstallRuntime.ps1` 的定位与 `Set-Location` 均正确。Why：自动修复是否真正下载是用户决策，但拉起路径和工作目录必须先验证到位。
+- Runtime 页现在在 `compute-core / model-stack / vector-store` 之外新增 `gpu-acceleration` 可选类别；当本机没有可用于本程序的 NVIDIA GPU 时，这一类会显示为 `当前无需安装`，不会再把 CPU-only 机器误导成“Runtime 不完整”。开始页的新手指引芯片会显示 `非N卡都已完整`，Runtime 页摘要也会明确写出“GPU 加速这一项不需要安装”。Why：CPU-only 是合法完整状态，不应该被 GPU 路线绑架。
+- `gpu-acceleration` 行的修复入口会映射到 `compute-core + cuda` 安装目标；若当前机器没有 N 卡，则修复按钮与清理按钮都不再鼓励用户操作，并直接提示“无需安装/无需清理”。Why：Runtime 页应该按能力模块引导用户，而不是让没有 GPU 的机器反复下载毫无意义的 CUDA 组件。
+
+## 2026-03-14 Runtime 挂起更新与热修复记忆
+- 运行中的 OmniClipRAG 会锁住 `runtime/` 里的 `.pyd/.dll`，直接在 live runtime 上执行 `pip --target` 会触发 `WinError 5`。这不是单个包的问题，而是 Windows 文件锁和当前进程已加载模块的物理限制。
+- `scripts/install_runtime.ps1` 现在不再尝试覆盖 live runtime，而是统一下载到 `runtime/.pending/<component>/payload`，并写出 manifest。Why：这样手动修复和自动修复都可以在程序保持打开时完成下载，不会再因为 live `.pyd` 被占用而失败。
+- `launcher.py` 在启动早期会先扫描 `.pending` manifest，并在 bootstrap 本地包目录之前把待应用 payload 覆盖到 live runtime。Why：只有在新进程尚未加载这些扩展模块之前，Windows 才允许安全替换 `.pyd/.dll`。
+- Runtime UI 说明、手动命令和自动修复按钮都已经同步到“下载可在程序打开时进行，重启后自动应用”的语义；自动修复会显式传入 `-WaitForProcessName OmniClipRAG`，手动命令也同样带上这个参数。Why：用户不应该再被迫先手动关程序，也不应该再看到旧的 in-place 安装命令。
+- Runtime 页摘要会额外显示待应用更新的组件列表，提示“保持程序打开也没关系；下次启动会自动切换”。Why：下载完成但尚未重启时，系统需要明确告诉用户当前是 pending 状态，而不是“好像还是没修好”。
+- Windows PowerShell 5.1 不能使用 `[System.Text.Json.JsonSerializer]`，所以 `InstallRuntime.ps1` 里的 pending manifest 序列化必须改回 `ConvertTo-Json -Compress`。Why：构建版默认仍可能由 `powershell.exe` 启动，脚本不能只在 PowerShell 7 下可用。
+- Runtime 页的组件表格在首次进入时会因为 cell widget 的 size hint 还没稳定而显得偏松；`_populate_runtime_component_table()` 现在会在本轮布局结束后再做一次 `singleShot(0)` 的二次收口。Why：默认视觉就应该和点击“刷新”后的紧凑状态一致，不能要求用户先手动刷新一次。
+- `InstallRuntime.ps1` 不能再把模块清单 JSON 直接作为命令行参数传给 Python 校验脚本。PowerShell 会吃掉 JSON 里的双引号，Python 最终会拿到 `[torch,numpy,...]` 这种非法 JSON；现在统一改成先把 `required-modules.json` 写到 pending 目录，再让 Python 从文件读取，同时 `required-modules.json` 与 `manifest.json` 都使用无 BOM UTF-8 写入，避免 Windows PowerShell 5.1 下再次触发 `JSONDecodeError` 或 manifest 读失败。
+
+## 2026-03-15 Runtime 粒度收口记忆
+- Runtime UI 不再把主语义链拆成 `compute-core` 与 `model-stack` 两行给用户分别修复；实际使用上它们共同构成一个“本地语义核心”，拆开只会造成“修完一个仍提示另一个坏了”的割裂体验。现在 UI 收口成三类：`semantic-core`、`vector-store`、`gpu-acceleration`。Why：用户理解的是能力，不是 Python 依赖分层。
+- `scripts/install_runtime.ps1` 继续兼容旧的 `compute-core/model-stack` 参数，但新 UI 与新手动命令统一使用 `-Component semantic-core`。`semantic-core` 会一次下载 PyTorch + sentence-transformers + transformers 这一整条主语义链，避免主查询修复时还要来回猜到底补哪半边。
+- Runtime 页在组件分类说明下新增灰色加粗提示“请勿同时下载同一组件”。Why：不同组件可以并行，但同一组件如果开多个终端同时写同一个 `.pending/<component>` 目录，会互相覆盖，用户侧必须明确知道这条硬限制。
+
+
+## 2026-03-15 Runtime 误判与启动提示修复记忆
+- 打包版 runtime 即使文件已经下载完整，UI 仍可能误判“需要修复”；根因不是下载源，而是健康探测时没有先把 runtime 目录临时挂进 import / DLL 搜索路径，导致 `sentence-transformers` 在探测阶段误报失败。
+- 修复策略：`vector_index.detect_acceleration()` 和 `runtime_dependency_issue()` 统一走 `_runtime_import_environment()`，在探测期间临时挂载 `runtime`、`.libs` 和 `torch/lib`，并读取 `_runtime_bootstrap.json` 中的 DLL 目录；退出后恢复现场，避免污染主进程。
+- 打包启动链还要避免把外部 Python 的 `stdlib/platstdlib` 注入 frozen 进程，否则会把 `C:\Python313\Lib` 这类系统标准库混进来，诱发 `asyncio/base_events` 之类的假性崩溃。`launcher.py` 现在只接收 runtime 的 DLL 目录，不再接收外部 stdlib 路径。
+- `InstallRuntime.ps1` 不能再把模块清单 JSON 直接经由 PowerShell 命令行传给 Python；PowerShell 5.1 对 JSON / 引号 / BOM 的兼容性太差，最终会出现下载成功但校验失败的红字。现在改成把待校验模块写入 `required-modules.txt`，Python 逐行读取。
+- 双击 EXE 后没有反馈会导致用户重复点击。Qt 启动链现在增加了一个可移动、可最小化的 `StartupProgressDialog`，在主窗口真正显示前持续给出“正在启动”的可视反馈。
+
+- 2026-03-15 runtime 修复链补充：pending staging 只能作为“已下载待应用”提示来源，绝不能参与 live runtime 健康检测或导入路径拼装；否则会把 `runtime\.pending\...\payload` 里的半安装组件当成正式运行时，造成 torch DLL / sentence-transformers 的假性红灯。对应修复在 `vector_index.py`，live probe 现在只看正式 `runtime/`。同时 `launcher.py` 必须在启动最早期先执行 `apply_pending_runtime_updates(runtime_dir)`，否则用户下载成功后重启仍不会生效。Runtime 页的“刷新检测”也已改为后台 worker 触发，避免把重量级加速探测放在 UI 线程里造成卡死。
+
+- 2026-03-15: The legacy Tk desktop source has been permanently removed from the repository (`omniclip_rag/gui.py`, `ui_legacy_tk/`, `legacy_single_instance.py`, `ui_tooltip.py`, and `tests/test_gui.py`). Qt is now the only supported desktop UI in both source and packaged builds.
+
+- 2026-03-15 runtime 稳定性补充：`vector_index._runtime_import_environment()` 必须忽略 `_runtime_bootstrap.json` 里的 `stdlib/platstdlib`，只把 live `runtime/` 根目录和必要 DLL 目录挂进当前探测环境。Why：安装 runtime 所用的系统 Python 标准库一旦被注回 frozen 进程，会直接污染 `_multiprocessing` / `asyncio.base_events` / `huggingface_hub` 等导入，表现为‘下载成功但仍红灯’的假故障。
+- 2026-03-15 启动体验补充：`omniclip_rag.ui_next_qt.app` 不能在模块顶层直接导入 Qt 并定义启动窗类，必须改成懒导入/懒建类。Why：否则双击 EXE 后要先等完整 `PySide6` 导入结束，启动提示窗会和主窗口几乎同时出现，用户会误以为程序没响应而重复双击。
+
+
+## 2026-03-15 Runtime 组件切换改造记忆
+- `runtime` 的反复“下载成功但仍显示需要修复”，根因不是单一包缺失，而是旧方案一直在把新包下载到 `.pending` 后再尝试覆盖 live `runtime/` 根目录；一旦提升过程被打断或混用旧脚本，live 根目录就会变成半旧半新的污染状态。Why：这种根目录原地覆盖在 Windows 上天然容易被 `.pyd/.dll` 占用和部分目录残留击穿。
+- 修复方向已切换为“组件独立目录 + 活动组件注册表”：`semantic-core` / `vector-store` 后续应安装到 `runtime/components/<component>-<version>` 这类隔离目录，通过 `runtime/_runtime_components.json` 指向当前活动版本；运行时探测只认活动目录，不再依赖把整个 live 根目录抹来抹去。Why：这样就算程序开着下载，也是在写全新的组件目录，不会再把当前正在使用的运行时写坏。
+- `runtime_layout.py` 现在优先从 `_runtime_components.json` 解析活动组件根目录；只有没有注册表时，才回落到旧的 `runtime/components/<component>` 或历史 flat `runtime/` 布局。Why：新旧构建必须能平滑过渡，不能因为切换布局把历史包直接判死。
+- `_runtime_bootstrap.json` 中来自安装器 Python 的 `stdlib/platstdlib/dll_dir` 都不能再被 frozen 进程直接采信；特别是外部 `C:\Python313\Lib` 一旦回灌，会再次污染 `_multiprocessing` / `asyncio` / `huggingface_hub` 等导入。现在探测只接受位于 runtime 根目录内部的 DLL 路径。Why：安装器环境和应用运行环境必须彻底隔离。
+- `semantic-core` 的用户语义已经固定为“CPU 基线语义核心”，即使本机存在 N 卡，也不能在修这条主链时默认拉 CUDA 版 torch；GPU 加速行是后续可选升级，而不是高级搜索的前置条件。Why：CPU 语义检索必须是默认可恢复能力，否则用户会被 GPU 依赖绑架而长时间无法恢复正常搜索。
+- 2026-03-15：修复启动链两个高频坑。其一，Windows 上 `%APPDATA%\OmniClip RAG\shared` 已存在时，`pathlib.Path.mkdir(exist_ok=True)` 仍可能在 WinError 183 后因 `is_dir()/stat()` 触发 WinError 5；现在 `config.py` 统一通过 `_ensure_directory()` + WinAPI `GetFileAttributesW` 兜底，已存在目录不再被误判成权限错误。其二，`--selfcheck-query` 诊断入口与正常桌面启动必须硬隔离；`app_entry/desktop.py` 现在只有在明确给出诊断参数（或开发者显式设置 `OMNICLIP_ALLOW_SELFCHECK=1`）时才进入自检模式，避免构建版被误带入自检路径。自检 JSON 输出也统一支持 `Path -> str` 序列化，防止再次因 `WindowsPath` 序列化失败而误判为算法链路损坏。
+
+## 2026-03-16 Markdown 主查询 RCA 收束计划
+- 当前最关键的未闭环问题，不再定义为“Runtime 仍然有点红”，而是定义为：构建版 EXE 中 Markdown 主查询看起来没有真正执行高级语义召回。Why：能力健康、Runtime UI 变绿、脚本下载成功，都不能证明这次 query 真正跑了 vector retrieval。
+- 后续排错已收束到 `plans/Markdown主查询与Runtime稳定性RCA计划.md`。任何新窗口或新 AI 接手时，必须先读这份计划，再继续推进；禁止再围绕 Tika、PDF、启动动画、样式等外围问题分散注意力。
+- 查询排错日志现在可通过 `配置 -> 数据 -> 把详细查询排错日志写入活动日志` 开关控制是否写入普通活动日志；查询台仍可显示 trace。Why：这让后续 RCA 能在不污染普通日志的情况下，按需记录 `查询预期 / 查询实际 / 查询诊断` 对照。
+- 这条战线的唯一正确推进顺序已经固定为：
+  1. 结构化查询日志（QUERY_PLAN / QUERY_FINGERPRINT / QUERY_STAGE）
+  2. lexical-only / vector-only / hybrid 三模式对照
+  3. 证明健康探测与真实查询是否使用同一 RuntimeContext
+  4. 再修真正根因
+  5. 最后补端到端 canary
+  任何偏离这条顺序的“继续试着修一圈”都视为无效推进。
+
+- 2026-03-16 Markdown 主查询 RCA 计划已按更高阶审核意见升级：Phase 1 现在必须记录 build/runtime/index 漂移指纹与决策级 QUERY_STAGE，Phase 2 从三模式升级为四模式（`lexical-only / vector-only / hybrid_no_rerank / hybrid`），且 `vector-only` 被明确禁止走独立 helper，必须复用同一 QueryService / RuntimeContext / workspace/index 主链。Why：当前问题的核心不是“能 import”，而是“这次 query 是否真的执行了语义召回，以及哪一步先归零”。
+- 2026-03-16 RCA Phase 1 已实际落地：`service.py` 现在会为每次 Markdown 查询生成 `QUERY_PLAN / QUERY_FINGERPRINT / QUERY_STAGE` 三组结构化 payload，并仍通过现有 `trace_lines` 进入查询台和活动日志；`app_entry/desktop.py --selfcheck-query` 也已支持 `--query-mode <lexical-only|vector-only|hybrid_no_rerank|hybrid|suite>`，用于后续四模式对照，且复用同一个 QueryService 主链。
+- 2026-03-16 RCA 进展补充：Phase 2 的四模式自检已经在最小临时工作区和真实工作区的源码入口上跑通。真实工作区固定 query `我的思维` 当前表现为：`lexical-only` 候选数为 0，而 `vector-only / hybrid_no_rerank / hybrid` 都是 `vector_query_planned=true` 但 `vector_query_executed=false`，并落到 `fallback_reason=vector_runtime_unavailable`。Why：这再次证明当前必须先区分 capability healthy、runtime root 对齐和 query-time vector 实际执行，而不能再把 Runtime UI 状态当成查询已经用上高级搜索的证据。
+
+## 2026-03-16 Markdown 主查询 RCA 关键突破
+- 真实工作区 `D:\8 L-Logseq\l-phone-logseq` 上的固定 query `我的思维` 已经通过四模式主链对照证明：问题不再是“Runtime 看起来没装好”，而是 query-time vector adapter 真正执行时的两处错误。
+- 第一处错误是 runtime 导入优先级：`semantic-core` 组件导入时如果同时存在 legacy flat `runtime/` 根目录，会被根目录里残留的坏 `transformers` 抢占，导致健康探测和真实查询看到不同模块源。修复方式是：`_runtime_import_environment()` 与 `_probe_runtime_semantic_core()` 统一让 `semantic-core` 自动携带 `vector-store` 依赖，并保证 `semantic-core` 的路径优先级高于 flat runtime。
+- 第二处错误是 LanceDB 查询输入类型：`LanceDbVectorIndex.search()` 之前会把 `_encode()` 返回的 `numpy.ndarray` 直接传给 `table.search(...)`，在真实运行时触发 `TypeError: Unsupported query type: <class 'numpy.ndarray'>`。修复方式是 query-time 与写入时保持一致，在 `search()` 前先调用 `_coerce_vector()` 转成 `list[float]`。
+- 修复后，同一条真实主链已经验证：
+  - `vector-only` 能返回 30 条命中；
+  - `hybrid_no_rerank` 能返回 30 条命中；
+  - `hybrid` 能返回 30 条命中且 `reranker_applied=true`。
+- 当前剩余问题已经收缩成：中文 query `我的思维` 的 lexical-only 为 0，这属于 FTS / tokenizer / query normalization 的单独分析课题，不再和 Runtime 健康或语义链执行混为一谈。
+
+## 2026-03-16 Markdown 主查询 RCA 最终收口
+- 继续对真实工作区和构建版 RuntimeContext 做零下载 suite 自检后，最终钉死了更深一层的结构根因：**并不是 Runtime 仍然坏，而是 `LanceDbVectorIndex` 过早拉起 vector-store 栈 + `SentenceTransformer(...)` 模型实例化发生在 runtime context 外。**
+- 第一层根因：`LanceDbVectorIndex.__init__()` 和状态探测过早导入/连接 `lancedb`，把 `pyarrow / pandas / numpy` 这条 vector-store 栈提前注入进程。Why：这会让真正的语义模型导入阶段与运行时探测阶段共享一份已经被 vector-store 污染过的解释器状态，随后非常容易触发 `cannot load module more than once per process` 一类的假性依赖错误。
+- 第二层根因：`_default_embedder_factory()` 之前只把 `from sentence_transformers import SentenceTransformer` 放进 `_runtime_import_environment(component_id='semantic-core')`，但真正的 `SentenceTransformer(...)` 实例化与本地模型权重加载发生在 context 外。Why：导入成功不等于模型构造成功；权重加载阶段同样依赖完整的 runtime `sys.path`、DLL 搜索路径和组件目录。
+- 对应结构修复已经固定为两条硬规则：
+  1. `LanceDbVectorIndex` 必须保持 **lazy vector-store bootstrap**，初始化和状态读取不能提前连接 LanceDB；只有真正打开/创建表时才允许导入 `lancedb`。
+  2. `SentenceTransformer(...)` 的**完整实例化**必须包在 `_runtime_import_environment(component_id='semantic-core')` 里，不能只包 import 语句。
+- 修复后的真实工作区 suite 自检结果已经明确证明 Markdown 主查询主链恢复：
+  - `lexical-only`：`result_count=0`
+  - `vector-only`：`result_count=30`，`vector_candidates_raw=300`
+  - `hybrid_no_rerank`：`result_count=30`
+  - `hybrid`：`result_count=30`，`reranker_applied=true`
+- 这意味着当前构建版主链的真正剩余问题已经缩小到**中文 lexical/FTS 命中策略**，而不是 Runtime 安装、健康探测或 query-time vector 执行本身。
+
+## 2026-03-16 构建版 suite 复验记忆
+- 已直接对验收构建物 `dist/OmniClipRAG-v0.2.4/OmniClipRAG.exe` 执行 `--selfcheck-query --query-mode suite`，目标工作区固定为 `D:\8 L-Logseq\l-phone-logseq`，query 固定为 `我的思维`，阈值 `0`，条数 `30`。
+- 本次复验不再依赖源码态入口，实际产物写出到 `.tmp_dist_runtime_diag_packaged_suite.json`。Why：以后讨论“构建版到底有没有真的跑高级搜索”，必须先看 frozen EXE 自己的 suite 证据，而不是混用源码态结果。
+- 复验结果再次确认：
+  - `lexical-only=0`
+  - `vector-only=30`
+  - `hybrid_no_rerank=30`
+  - `hybrid=30`
+  - `reranker_applied=true`
+- 这条记录的意义是：Markdown 主查询的 CPU 语义召回 + reranker 现在已经在**真实构建版**上被钉死为可执行状态；如果后续 GUI 点查再次表现异常，优先怀疑 QueryWorker/UI 参数传递、查询模式切换或显示链，而不是重新回头怀疑 Runtime 下载器本身。
+
+## 2026-03-16 GUI 查询链 live snapshot 记忆
+- `QueryWorkspace._validate_query_request()` 之前默认只读取自身缓存的 `self._config / self._paths`。Why：这在“用户已在配置页切换笔记库，但尚未触发完整保存/回灌”的窗口里，会让查询页继续拿旧 workspace 去搜，从而出现“构建版 selfcheck 绿、GUI 点同一 query 却像没走高级搜索”的分裂现象。
+- 现在查询页不再信任自己的缓存配置，而是支持 `runtime_snapshot_provider`。每次点击查询前，都会优先向配置页实时拉取一份当前 live snapshot。Why：查询必须基于用户眼前这套 workspace/data-root/runtime 组合，而不是基于某次历史同步留下的快照。
+- `ConfigWorkspace` 新增 `current_runtime_snapshot()`，`MainWindow` 在组装 Query/Config 两页后会显式把 provider 接给查询页。Why：不再依赖 `runtimeConfigChanged` 这种“配置发生变化后希望它能及时广播”的被动同步链，而是把查询前 snapshot 拉取变成主动动作。
+- 新增 Qt 回归验证：当 QueryWorkspace 本地缓存的是旧 vault、provider 返回的是新 vault 时，`_validate_query_request()` 必须优先采用 provider 返回的新 vault/new paths。Why：这条用例直接锁死本轮 RCA 里最可疑的 GUI 偏差点，防止以后回归到“查询页拿旧笔记库”的状态。
+
+## 2026-03-16 v0.3.0 源码里程碑记忆
+- `v0.3.0` 选择以源码里程碑形式发布，不附带 EXE 资产。Why：扩展格式子系统与 Runtime/Markdown 查询链已经大规模并入主线，但打包体验仍在继续收尾，先发源码与文档更诚实。
+- 这次版本正式把三条长期并行的主线合并入仓库：`extensions/` 扩展格式隔离子系统、组件化 Runtime 管理链、以及 Qt-only 桌面主链。Why：后续所有桌面修复都必须围绕这三条真实主线，不再回到历史分叉。
+- 旧 Tk UI 代码已彻底从仓库删除，未来只维护 Qt 桌面链。Why：双套桌面实现已经被证明会放大行为漂移与排错成本，继续保留没有工程价值。
+- 仓库新增最小公开 `logseq笔记样本/` 合成样本库，用于 parser / preflight / service / Qt UI 回归，不包含个人数据。Why：之前测试大量依赖本地私有样本，导致源码发布前无法在干净环境中稳定自测。
+- 这次发布前的回归采用“分组全绿”策略，而不是依赖一条超长 discover 命令。已验证通过的分组包括：扩展链、parser/preflight、service/vector、Qt UI、runtime/launcher/desktop、自检脚本与纯后端工具链。Why：当前环境下单条超长全量命令容易超时，分组结果更可审计。 

@@ -47,6 +47,10 @@ class SearchHit:
     display_text: str = ""
     preview_text: str = ""
     reason: str = ""
+    source_family: str = "markdown"
+    source_kind: str = "markdown"
+    source_label: str = ""
+    page_no: int = 0
 
 
 @dataclass(slots=True)
@@ -84,6 +88,11 @@ class QueryInsights:
     suppressed_duplicates: int = 0
     suppressed_same_page: int = 0
     page_diversity: int = 0
+    runtime_warnings: tuple[str, ...] = ()
+    query_plan: dict[str, object] = field(default_factory=dict)
+    query_fingerprint: dict[str, object] = field(default_factory=dict)
+    query_stage: dict[str, object] = field(default_factory=dict)
+    trace_lines: tuple[str, ...] = ()
     recommendation: QueryLimitRecommendation | None = None
     reranker: RerankOutcome | None = None
 

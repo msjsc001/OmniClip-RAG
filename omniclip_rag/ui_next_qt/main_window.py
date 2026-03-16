@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 from dataclasses import replace
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -26,7 +28,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._header_collapsed = bool(getattr(self._config, 'qt_header_collapsed', False))
         self._replacement_window: MainWindow | None = None
 
-        self.setWindowTitle(self._tr('title'))
+        self.setWindowTitle(self._window_title_text())
         self.resize(1560, 1000)
         self.setMinimumSize(1320, 860)
 
@@ -52,6 +54,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 setattr(app, '_omniclip_live_windows', current)
 
         window.destroyed.connect(_cleanup)
+
+    def _window_title_text(self) -> str:
+        title = self._tr('title')
+        if getattr(sys, 'frozen', False):
+            return title
+        return f"{title} [开发态]"
 
     def _build_shell(self) -> None:
         central = QtWidgets.QWidget(self)
@@ -80,7 +88,7 @@ class MainWindow(QtWidgets.QMainWindow):
         title_row.setSpacing(12)
         title_layout.addLayout(title_row)
 
-        self.title_label = QtWidgets.QLabel(self._tr('title'), self.header_card)
+        self.title_label = QtWidgets.QLabel(self._window_title_text(), self.header_card)
         self.title_label.setProperty('role', 'title')
         title_row.addWidget(self.title_label)
 
@@ -164,6 +172,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.query_workspace.pageBlocklistRequested.connect(self.config_workspace.open_page_blocklist_dialog)
         self.query_workspace.sensitiveFilterRequested.connect(self.config_workspace.open_sensitive_filter_dialog)
+        self.query_workspace.runtimeRepairRequested.connect(self._show_runtime_management)
+        self.query_workspace.set_runtime_snapshot_provider(self.config_workspace.current_runtime_snapshot)
 
         self.status_label = QtWidgets.QLabel(self._query_status_message, self)
         self.status_label.setProperty('role', 'muted')
@@ -264,6 +274,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _show_query_log_tab(self) -> None:
         self.main_tabs.setCurrentWidget(self.query_workspace)
         self.query_workspace.show_log_tab()
+        self._sync_status_bar()
+
+    def _show_runtime_management(self) -> None:
+        self.main_tabs.setCurrentWidget(self.config_workspace)
+        self.config_workspace.focus_runtime_management()
         self._sync_status_bar()
 
     def _set_config_status_message(self, value: str) -> None:
@@ -388,6 +403,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config_workspace.update_theme(theme)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        try:
+            self.config_workspace.shutdown_extension_runtimes()
+        except Exception:
+            pass
         try:
             self._config.query_limit = int(self.query_workspace.limit_edit.text().strip() or self._config.query_limit)
         except Exception:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import html
 import time
 import logging
+from collections.abc import Callable
 from dataclasses import asdict, replace
 
 from PySide6 import QtCore, QtWidgets
@@ -25,13 +27,24 @@ class QueryWorkspace(QtWidgets.QWidget):
     resultSummaryChanged = QtCore.Signal(str)
     pageBlocklistRequested = QtCore.Signal()
     sensitiveFilterRequested = QtCore.Signal()
+    runtimeRepairRequested = QtCore.Signal()
 
-    def __init__(self, *, config, paths, language_code: str, theme: ThemeState, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        config,
+        paths,
+        language_code: str,
+        theme: ThemeState,
+        runtime_snapshot_provider: Callable[[], tuple[object, object]] | None = None,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._config = config
         self._paths = paths
         self._language_code = language_code
         self._theme = theme
+        self._runtime_snapshot_provider = runtime_snapshot_provider
         self._busy = False
         self._external_blocked = False
         self._external_block_title = ''
@@ -39,6 +52,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._query_last_completed_at = 0.0
         self._query_last_result_count = 0
         self._query_last_copied = False
+        self._query_runtime_warnings: tuple[str, ...] = ()
         self._query_progress_payload: dict[str, object] | None = None
         self._current_query_text = ''
         self._current_context = ''
@@ -167,6 +181,31 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.query_limit_hint_label.setProperty('role', 'muted')
         self.query_limit_hint_label.setWordWrap(True)
         meta_row.addWidget(self.query_limit_hint_label, 1, 0, 1, 4)
+
+        source_row = QtWidgets.QHBoxLayout()
+        source_row.setSpacing(10)
+        search_layout.addLayout(source_row)
+
+        source_label = QtWidgets.QLabel(self._tr('query_source_filters_label'), self.search_card)
+        source_label.setProperty('role', 'muted')
+        source_row.addWidget(source_label)
+
+        self.source_markdown_check = QtWidgets.QCheckBox(self._tr('query_source_markdown'), self.search_card)
+        self.source_pdf_check = QtWidgets.QCheckBox(self._tr('query_source_pdf'), self.search_card)
+        self.source_tika_check = QtWidgets.QCheckBox(self._tr('query_source_tika'), self.search_card)
+        for widget in (self.source_markdown_check, self.source_pdf_check, self.source_tika_check):
+            source_row.addWidget(widget)
+        source_row.addStretch(1)
+
+        self.query_runtime_hint_label = QtWidgets.QLabel(self.search_card)
+        self.query_runtime_hint_label.setProperty('role', 'muted')
+        self.query_runtime_hint_label.setWordWrap(True)
+        self.query_runtime_hint_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.query_runtime_hint_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.query_runtime_hint_label.setOpenExternalLinks(False)
+        self.query_runtime_hint_label.linkActivated.connect(self._handle_runtime_hint_link)
+        self.query_runtime_hint_label.setVisible(False)
+        search_layout.addWidget(self.query_runtime_hint_label)
 
     def _build_results_card(self) -> None:
         self.results_card, results_layout, results_header = self._create_card(self._tr('results_title'), self._tr('results_subtitle'))
@@ -340,6 +379,11 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.limit_edit.setText(str(int(getattr(self._config, 'query_limit', 15) or 15)))
         threshold = float(getattr(self._config, 'query_score_threshold', 35.0) or 35.0)
         self.threshold_edit.setText(str(int(threshold)) if threshold.is_integer() else str(threshold))
+        self.source_markdown_check.setChecked(True)
+        self.source_pdf_check.setChecked(True)
+        self.source_tika_check.setChecked(True)
+        self._query_runtime_warnings = ()
+        self._refresh_query_runtime_hint()
         self.preview_panel.set_text(self._tr('preview_empty'))
         self.context_panel.set_text(self._tr('context_empty'))
         self.log_panel.set_text(self._tr('log_empty'))
@@ -396,6 +440,9 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._refresh_page_blocklist_summary()
         self._refresh_query_limit_hint()
 
+    def set_runtime_snapshot_provider(self, provider: Callable[[], tuple[object, object]] | None) -> None:
+        self._runtime_snapshot_provider = provider
+
     def update_theme(self, theme: ThemeState) -> None:
         self._theme = theme
         self.preview_panel.set_theme(theme)
@@ -412,6 +459,9 @@ class QueryWorkspace(QtWidgets.QWidget):
             'query_text': self.query_edit.text(),
             'threshold_text': self.threshold_edit.text(),
             'limit_text': self.limit_edit.text(),
+            'source_markdown_checked': self.source_markdown_check.isChecked(),
+            'source_pdf_checked': self.source_pdf_check.isChecked(),
+            'source_tika_checked': self.source_tika_check.isChecked(),
             'detail_tab_index': self.detail_tabs.currentIndex(),
             'query_splitter_state': self.query_splitter_state(),
             'results_splitter_state': self.results_splitter_state(),
@@ -419,6 +469,7 @@ class QueryWorkspace(QtWidgets.QWidget):
             'selected_chunk_ids': [getattr(hit, 'chunk_id', '') for hit in self.results_model.selected_hits()],
             'selected_chunk_id': self._selected_chunk_id(),
             'current_query_text': self._current_query_text,
+            'query_runtime_warnings': list(self._query_runtime_warnings),
             'log_lines': list(self._log_lines),
             'external_blocked': self._external_blocked,
             'external_block_title': self._external_block_title,
@@ -430,6 +481,9 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.query_edit.setText(str(payload.get('query_text') or ''))
         self.threshold_edit.setText(str(payload.get('threshold_text') or self.threshold_edit.text()))
         self.limit_edit.setText(str(payload.get('limit_text') or self.limit_edit.text()))
+        self.source_markdown_check.setChecked(bool(payload.get('source_markdown_checked', True)))
+        self.source_pdf_check.setChecked(bool(payload.get('source_pdf_checked', True)))
+        self.source_tika_check.setChecked(bool(payload.get('source_tika_checked', True)))
         query_state = payload.get('query_splitter_state')
         results_state = payload.get('results_splitter_state')
         if isinstance(query_state, (bytes, bytearray)) or isinstance(results_state, (bytes, bytearray)):
@@ -438,6 +492,8 @@ class QueryWorkspace(QtWidgets.QWidget):
                 results_state=bytes(results_state) if isinstance(results_state, (bytes, bytearray)) else None,
             )
         hits = list(payload.get('hits') or [])
+        self._query_runtime_warnings = tuple(str(item).strip() for item in (payload.get('query_runtime_warnings') or []) if str(item).strip())
+        self._refresh_query_runtime_hint()
         if hits:
             self.results_model.set_results(hits)
             self.results_model.set_selected_chunk_ids(payload.get('selected_chunk_ids') or [])
@@ -714,8 +770,37 @@ class QueryWorkspace(QtWidgets.QWidget):
             detail=self._tr('query_status_idle_detail'),
         )
 
+    def _refresh_query_runtime_hint(self) -> None:
+        warnings = list(self._query_runtime_warnings)
+        if not warnings:
+            self.query_runtime_hint_label.clear()
+            self.query_runtime_hint_label.setVisible(False)
+            return
+        lines = []
+        for item in warnings:
+            message = html.escape(self._tr(f'query_runtime_warning_{item}')).replace('\n', '<br/>')
+            if item == 'markdown_vector_runtime_unavailable':
+                message = f"{message} <a href=\"runtime-repair\">{html.escape(self._tr('query_runtime_repair_link'))}</a>"
+            lines.append(message)
+        self.query_runtime_hint_label.setText('<br/>'.join(lines))
+        self.query_runtime_hint_label.setVisible(True)
+
+    def _handle_runtime_hint_link(self, href: str) -> None:
+        if str(href).strip().lower() == 'runtime-repair':
+            self.runtimeRepairRequested.emit()
+
     def _backend_enabled(self, config) -> bool:
         return (config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
+
+    def _selected_query_families(self) -> tuple[str, ...]:
+        families: list[str] = []
+        if self.source_markdown_check.isChecked():
+            families.append('markdown')
+        if self.source_pdf_check.isChecked():
+            families.append('pdf')
+        if self.source_tika_check.isChecked():
+            families.append('tika')
+        return tuple(families)
 
     def _validate_query_request(self, *, copy_result: bool):
         if self._busy:
@@ -728,6 +813,10 @@ class QueryWorkspace(QtWidgets.QWidget):
         if not query_text:
             QtWidgets.QMessageBox.information(self, self._tr('empty_query_title'), self._tr('empty_query_body'))
             return None
+        allowed_families = self._selected_query_families()
+        if not allowed_families:
+            QtWidgets.QMessageBox.information(self, self._tr('query_source_none_title'), self._tr('query_source_none_body'))
+            return None
         try:
             score_threshold = float(self.threshold_edit.text().strip() or '0')
             limit = int(self.limit_edit.text().strip() or '15')
@@ -737,11 +826,23 @@ class QueryWorkspace(QtWidgets.QWidget):
         if limit <= 0 or score_threshold < 0:
             QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), self._tr('number_invalid'))
             return None
-        vault_path = normalize_vault_path(getattr(self._config, 'vault_path', ''))
+        config = self._config
+        paths = self._paths
+        if self._runtime_snapshot_provider is not None:
+            try:
+                provided_config, provided_paths = self._runtime_snapshot_provider()
+                if provided_config is not None and provided_paths is not None:
+                    config = provided_config
+                    paths = provided_paths
+                    self._config = config
+                    self._paths = paths
+            except Exception:
+                LOGGER.exception('Failed to collect the latest runtime snapshot for query validation; falling back to cached config.')
+        vault_path = normalize_vault_path(getattr(config, 'vault_path', ''))
         if not vault_path:
             QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), self._tr('choose_vault_first'))
             return None
-        config = replace(self._config, vault_path=vault_path, query_limit=limit, query_score_threshold=score_threshold)
+        config = replace(config, vault_path=vault_path, query_limit=limit, query_score_threshold=score_threshold)
         paths = ensure_data_paths(getattr(config, 'data_root', None), vault_path)
         if self._backend_enabled(config) and not is_local_model_ready(config, paths):
             model_dir = get_local_model_dir(config, paths)
@@ -751,13 +852,13 @@ class QueryWorkspace(QtWidgets.QWidget):
                 f"{self._tr('model_missing')}\n\n{model_dir}\n\n{self._tr('workspace_subtitle')}",
             )
             return None
-        return query_text, score_threshold, config, paths, copy_result
+        return query_text, score_threshold, config, paths, copy_result, allowed_families
 
     def _start_query(self, *, copy_result: bool) -> None:
         prepared = self._validate_query_request(copy_result=copy_result)
         if prepared is None:
             return
-        query_text, score_threshold, config, paths, copy_result = prepared
+        query_text, score_threshold, config, paths, copy_result, allowed_families = prepared
         self._busy = True
         self._query_progress_payload = {'overall_percent': 0.0, 'stage_status': 'prepare'}
         self.search_button.setEnabled(False)
@@ -775,6 +876,7 @@ class QueryWorkspace(QtWidgets.QWidget):
             query_text=query_text,
             copy_result=copy_result,
             score_threshold=score_threshold,
+            allowed_families=allowed_families,
         )
         worker.progress.connect(self._on_query_progress)
         worker.succeeded.connect(self._on_query_success)
@@ -798,6 +900,8 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._query_last_result_count = len(hits)
         self._query_last_copied = payload.copied
         insights = getattr(result, 'insights', None)
+        self._query_runtime_warnings = tuple(getattr(insights, 'runtime_warnings', ()) or ())
+        self._refresh_query_runtime_hint()
         self._query_limit_recommendation = asdict(insights.recommendation) if getattr(insights, 'recommendation', None) is not None else None
         self._refresh_query_limit_hint()
         self.results_model.set_results(hits)
@@ -809,6 +913,11 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.resultSummaryChanged.emit(self._tr('query_hits', count=len(hits)))
         self.statusMessageChanged.emit(self._tr('status_query_copied') if payload.copied else self._tr('status_query_done'))
         self._append_log(self._tr('log_query_done', query=payload.query_text, count=len(hits)))
+        persist_trace = bool(getattr(self._config, 'query_trace_logging_enabled', False))
+        for trace_line in tuple(getattr(insights, 'trace_lines', ()) or ()):
+            self._append_log(trace_line, persist=persist_trace)
+        for warning in self._query_runtime_warnings:
+            self._append_log(self._tr(f'query_runtime_warning_{warning}'))
         reranker = getattr(insights, 'reranker', None)
         if reranker is not None and getattr(reranker, 'enabled', False):
             if getattr(reranker, 'applied', False):
@@ -819,6 +928,8 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._refresh_query_status_banner()
 
     def _on_query_failure(self, message: str, traceback_text: str) -> None:
+        self._query_runtime_warnings = ()
+        self._refresh_query_runtime_hint()
         error_body = message.strip() or traceback_text.strip() or self._tr('cannot_start_title')
         self.statusMessageChanged.emit(f"{self._tr('search_button')}：{error_body}")
         if traceback_text.strip():

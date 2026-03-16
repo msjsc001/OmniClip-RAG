@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import importlib
 import logging
 import os
@@ -12,6 +13,7 @@ import sys
 import threading
 import time
 import traceback
+from contextlib import contextmanager
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Callable, Protocol
@@ -20,6 +22,7 @@ from .build_control import BuildPerformanceController
 from .config import AppConfig, DataPaths
 from .errors import BuildCancelledError, RuntimeDependencyError
 from .process_utils import run_hidden
+from .runtime_layout import list_pending_runtime_updates, normalize_runtime_component_id, runtime_component_live_roots
 
 
 class VectorCandidate(Protocol):
@@ -86,6 +89,25 @@ _VECTOR_BATCH_CHAR_BUDGETS = {
 }
 _VECTOR_SLOW_BATCH_WARNING_SECONDS = 12.0
 _VECTOR_STALL_STACK_DUMP_SECONDS = 45.0
+_RUNTIME_STDLIB_SUPPORT_MODULES = (
+    'asyncio.base_events',
+    'asyncio.base_futures',
+    'asyncio.events',
+    'concurrent.futures',
+    'concurrent.futures.process',
+    'http.cookies',
+    'multiprocessing',
+    'multiprocessing.connection',
+    'multiprocessing.context',
+    'multiprocessing.process',
+    'multiprocessing.reduction',
+    'multiprocessing.util',
+    'pdb',
+    'timeit',
+)
+_RUNTIME_STDLIB_SUPPORT_READY: set[str] = set()
+_RUNTIME_STDLIB_SUPPORT_LOCK = threading.Lock()
+_RUNTIME_STDLIB_SUPPORT_LOGGED = False
 
 LOGGER = logging.getLogger(__name__)
 
@@ -123,6 +145,13 @@ class NullVectorIndex:
             "requested_device": "cpu",
             "resolved_device": resolve_vector_device("cpu"),
             **acceleration,
+        }
+
+    def status(self) -> dict[str, object]:
+        return {
+            'backend': 'disabled',
+            'table_ready': False,
+            'runtime_ready': False,
         }
 
     def reset(self) -> None:
@@ -168,6 +197,14 @@ class MissingRuntimeVectorIndex:
     def warmup(self) -> dict[str, object]:
         self._raise_runtime()
 
+    def status(self) -> dict[str, object]:
+        return {
+            'backend': self.backend,
+            'table_ready': False,
+            'runtime_ready': False,
+            'reason': str(self.reason or ''),
+        }
+
     def reset(self) -> None:
         return None
 
@@ -180,15 +217,13 @@ class LanceDbVectorIndex:
         *,
         embedder_factory: Callable[[], Embedder] | None = None,
     ) -> None:
-        import lancedb
-
         self.config = config
         self.paths = paths
         self._embedder_factory = embedder_factory or self._default_embedder_factory
         self._embedder: Embedder | None = None
         self._db_dir = paths.state_dir / "lancedb"
         self._db_dir.mkdir(parents=True, exist_ok=True)
-        self._db = lancedb.connect(str(self._db_dir))
+        self._db = None
         self._table_name = "chunks"
         self._vector_dimension: int | None = None
 
@@ -708,7 +743,8 @@ class LanceDbVectorIndex:
     def search(self, query_text: str, limit: int) -> list[_VectorCandidate]:
         if not query_text.strip() or not self._table_exists():
             return []
-        vector = self._encode([query_text])[0]
+        raw_vector = self._encode([query_text])[0]
+        vector = self._coerce_vector(raw_vector)
         rows = self._table().search(vector).limit(limit).to_list()
         return [
             _VectorCandidate(chunk_id=row["chunk_id"], score=_distance_to_score(row.get("_distance", 1.0)))
@@ -731,11 +767,21 @@ class LanceDbVectorIndex:
             **acceleration,
         }
 
+    def status(self) -> dict[str, object]:
+        return {
+            'backend': 'lancedb',
+            'table_ready': self._table_exists(),
+            'runtime_ready': True,
+            'db_dir': str(self._db_dir),
+            'table_name': self._table_name,
+            'vector_dimension': int(self._vector_dimension or 0),
+        }
+
     def reset(self) -> None:
-        if self._table_exists():
-            self._db.drop_table(self._table_name)
+        if self._db is not None and self._table_exists():
+            self._db_connection().drop_table(self._table_name)
         self._vector_dimension = None
-        table_dir = self._db_dir / f"{self._table_name}.lance"
+        table_dir = self._table_storage_path()
         if table_dir.exists():
             shutil.rmtree(table_dir, ignore_errors=True)
 
@@ -773,7 +819,8 @@ class LanceDbVectorIndex:
                 self._vector_dimension = schema.field("vector").type.list_size
             return
 
-        import pyarrow as pa
+        with _runtime_import_environment(component_id='vector-store'):
+            import pyarrow as pa
 
         self._vector_dimension = dimension
         schema = pa.schema(
@@ -786,16 +833,28 @@ class LanceDbVectorIndex:
                 pa.field("vector", pa.list_(pa.float32(), dimension)),
             ]
         )
-        self._db.create_table(self._table_name, schema=schema, mode="overwrite")
+        self._db_connection().create_table(self._table_name, schema=schema, mode="overwrite")
 
     def _table_exists(self) -> bool:
-        tables = self._db.list_tables()
-        if hasattr(tables, "tables"):
-            return self._table_name in tables.tables
-        return self._table_name in tables
+        if self._db is not None:
+            tables = self._db_connection().list_tables()
+            if hasattr(tables, "tables"):
+                return self._table_name in tables.tables
+            return self._table_name in tables
+        return self._table_storage_path().exists()
 
     def _table(self):
-        return self._db.open_table(self._table_name)
+        return self._db_connection().open_table(self._table_name)
+
+    def _table_storage_path(self) -> Path:
+        return self._db_dir / f"{self._table_name}.lance"
+
+    def _db_connection(self):
+        if self._db is None:
+            with _runtime_import_environment(component_id='vector-store'):
+                import lancedb
+            self._db = lancedb.connect(str(self._db_dir))
+        return self._db
 
     def _embed_documents(self, documents: list[dict[str, str]], *, batch_size: int | None = None) -> list[dict[str, object]]:
         texts = [item["rendered_text"] for item in documents]
@@ -841,11 +900,6 @@ class LanceDbVectorIndex:
         _configure_huggingface_environment(hf_home_dir)
 
         prepare_local_model_snapshot(self.config, self.paths, allow_download=True)
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as exc:
-            raise RuntimeDependencyError(_runtime_dependency_message(self.config.vector_runtime, self.config.vector_device)) from exc
-
         runtime_name = (self.config.vector_runtime or "torch").lower()
         resolved_device = resolve_vector_device(self.config.vector_device)
         cache_key = (str(local_model_dir), runtime_name, resolved_device)
@@ -853,13 +907,25 @@ class LanceDbVectorIndex:
         if cached is not None:
             return cached
 
-        embedder = SentenceTransformer(
-            str(local_model_dir),
-            device=resolved_device,
-            cache_folder=str(runtime_cache_dir),
-            backend=self.config.vector_runtime,
-            local_files_only=True,
-        )
+        try:
+            # Why: the semantic runtime context must stay active for the whole
+            # model-construction phase, not only for importing the Python module.
+            # `SentenceTransformer(...)` loads local weights and extra
+            # transformers/torch pieces; building it outside the runtime context
+            # makes the packaged app report "semantic ready" while the actual
+            # query path still falls back to lexical-only.
+            with _runtime_import_environment(component_id='semantic-core'):
+                from sentence_transformers import SentenceTransformer
+
+                embedder = SentenceTransformer(
+                    str(local_model_dir),
+                    device=resolved_device,
+                    cache_folder=str(runtime_cache_dir),
+                    backend=self.config.vector_runtime,
+                    local_files_only=True,
+                )
+        except ImportError as exc:
+            raise RuntimeDependencyError(_runtime_dependency_message(self.config.vector_runtime, self.config.vector_device)) from exc
         _EMBEDDER_CACHE[cache_key] = embedder
         return embedder
 
@@ -881,7 +947,7 @@ def create_vector_index(
     if backend in {"lancedb", "lance", "lance-db"}:
         try:
             return LanceDbVectorIndex(config, paths, embedder_factory=embedder_factory)
-        except (ImportError, ModuleNotFoundError, OSError) as exc:
+        except (ImportError, ModuleNotFoundError, OSError, AttributeError, TypeError) as exc:
             return MissingRuntimeVectorIndex(config, paths, backend=backend, reason=exc)
     raise NotImplementedError(f"当前向量后端尚未接入：{config.vector_backend}")
 
@@ -971,6 +1037,223 @@ _RUNTIME_REQUIRED_MARKERS = {
     'scipy': 'scipy',
 }
 _CUDA_SETUP_GUIDE_URL = 'https://pytorch.org/get-started/locally/'
+_RUNTIME_PACKAGE_SOURCE_URLS = {
+    'official': 'https://pypi.org/simple',
+    'mirror': 'https://pypi.tuna.tsinghua.edu.cn/simple',
+}
+_RUNTIME_COMPONENTS = {
+    'semantic-core': {
+        'markers': (
+            '_runtime_bootstrap.json',
+            'torch',
+            'numpy',
+            'scipy',
+            'sentence_transformers',
+            'transformers',
+            'huggingface_hub',
+            'safetensors',
+        ),
+        'cleanup_patterns': (
+            'torch', 'torch-*dist-info',
+            'functorch', 'functorch-*dist-info',
+            'torchgen', 'torchgen-*dist-info',
+            'numpy', 'numpy-*dist-info', 'numpy.libs',
+            'scipy', 'scipy-*dist-info', 'scipy.libs',
+            'sentence_transformers', 'sentence_transformers-*dist-info',
+            'transformers', 'transformers-*dist-info',
+            'huggingface_hub', 'huggingface_hub-*dist-info',
+            'safetensors', 'safetensors-*dist-info',
+        ),
+        'disk_usage': {
+            'cpu': '约 1.1 GB - 1.9 GB',
+            'cuda': '约 3.2 GB - 4.3 GB',
+        },
+        'download_usage': {
+            'cpu': '约 0.9 GB - 1.6 GB',
+            'cuda': '约 2.5 GB - 4.4 GB',
+        },
+    },
+    'compute-core': {
+        'markers': (
+            '_runtime_bootstrap.json',
+            'torch',
+            'numpy',
+            'scipy',
+        ),
+        'cleanup_patterns': (
+            'torch', 'torch-*dist-info',
+            'functorch', 'functorch-*dist-info',
+            'torchgen', 'torchgen-*dist-info',
+            'numpy', 'numpy-*dist-info', 'numpy.libs',
+            'scipy', 'scipy-*dist-info', 'scipy.libs',
+        ),
+        'disk_usage': {
+            'cpu': '约 0.9 GB - 1.4 GB',
+            'cuda': '约 3.0 GB - 3.8 GB',
+        },
+        'download_usage': {
+            'cpu': '约 0.7 GB - 1.2 GB',
+            'cuda': '约 2.3 GB - 4.0 GB',
+        },
+    },
+    'model-stack': {
+        'markers': (
+            'sentence_transformers',
+            'transformers',
+            'huggingface_hub',
+            'safetensors',
+        ),
+        'cleanup_patterns': (
+            'sentence_transformers', 'sentence_transformers-*dist-info',
+            'transformers', 'transformers-*dist-info',
+            'huggingface_hub', 'huggingface_hub-*dist-info',
+            'safetensors', 'safetensors-*dist-info',
+        ),
+        'disk_usage': {
+            'cpu': '约 0.2 GB - 0.5 GB',
+            'cuda': '约 0.2 GB - 0.5 GB',
+        },
+        'download_usage': {
+            'cpu': '约 0.2 GB - 0.4 GB',
+            'cuda': '约 0.2 GB - 0.4 GB',
+        },
+    },
+    'vector-store': {
+        'markers': (
+            'lancedb',
+            'onnxruntime',
+            'pyarrow',
+            'pandas',
+        ),
+        'cleanup_patterns': (
+            'lancedb', 'lancedb-*dist-info',
+            'onnxruntime', 'onnxruntime-*dist-info',
+            'pyarrow', 'pyarrow-*dist-info', 'pyarrow.libs',
+            'pandas', 'pandas-*dist-info',
+        ),
+        'disk_usage': {
+            'cpu': '约 0.4 GB - 0.9 GB',
+            'cuda': '约 0.5 GB - 1.0 GB',
+        },
+        'download_usage': {
+            'cpu': '约 0.3 GB - 0.8 GB',
+            'cuda': '约 0.4 GB - 0.9 GB',
+        },
+    },
+}
+_RUNTIME_VISIBLE_COMPONENT_IDS = (
+    'semantic-core',
+    'vector-store',
+)
+_RUNTIME_COMPONENT_MODULES = {
+    'semantic-core': ('torch', 'numpy', 'scipy', 'sentence_transformers', 'transformers', 'huggingface_hub', 'safetensors'),
+    'compute-core': ('torch', 'numpy', 'scipy'),
+    'model-stack': ('sentence_transformers', 'transformers', 'huggingface_hub', 'safetensors'),
+    'vector-store': ('lancedb', 'onnxruntime', 'pyarrow', 'pandas'),
+}
+_RUNTIME_IMPORT_RESET_PREFIXES = (
+    'torch',
+    'sentence_transformers',
+    'transformers',
+    'huggingface_hub',
+    'safetensors',
+    'numpy',
+    'scipy',
+    'lancedb',
+    'onnxruntime',
+    'pyarrow',
+    'pandas',
+    'sklearn',
+    'asyncio',
+)
+_RUNTIME_REQUIRED_STRUCTURE = {
+    'torch': ('__init__.py',),
+    'numpy': ('__init__.py', '_core'),
+    'scipy': ('__init__.py', 'linalg'),
+    'sentence_transformers': ('__init__.py',),
+    'transformers': ('__init__.py', 'utils'),
+    'huggingface_hub': ('__init__.py', 'hf_api.py'),
+    'safetensors': ('__init__.py',),
+    'lancedb': ('__init__.py',),
+    'onnxruntime': ('__init__.py',),
+    'pyarrow': ('__init__.py',),
+    'pandas': ('__init__.py',),
+}
+
+def runtime_component_catalog() -> tuple[dict[str, object], ...]:
+    catalog = []
+    for component_id in _RUNTIME_VISIBLE_COMPONENT_IDS:
+        payload = _RUNTIME_COMPONENTS[component_id]
+        catalog.append({
+            'component_id': component_id,
+            'markers': tuple(payload.get('markers', ())),
+            'cleanup_patterns': tuple(payload.get('cleanup_patterns', ())),
+            'disk_usage': dict(payload.get('disk_usage', {})),
+            'download_usage': dict(payload.get('download_usage', {})),
+        })
+    return tuple(catalog)
+
+
+def runtime_component_status(component_id: str) -> dict[str, object]:
+    component = _RUNTIME_COMPONENTS.get(component_id)
+    if component is None:
+        raise KeyError(f'Unknown runtime component: {component_id}')
+    layout = _inspect_runtime_layout_state()
+    runtime_dir = Path(layout['runtime_dir'])
+    total_count = len(tuple(component.get('markers', ())))
+    missing_items = _runtime_component_missing_items(runtime_dir, component_id) if layout['runtime_exists'] else [_RUNTIME_REQUIRED_MARKERS.get(marker, marker) for marker in component.get('markers', ())]
+    installed = max(total_count - len(missing_items), 0)
+    live_ready = bool(layout['runtime_exists']) and not missing_items
+    status = 'ready' if live_ready else ('missing' if installed <= 0 else 'incomplete')
+    pending_aliases = _runtime_component_pending_aliases(component_id)
+    pending_match = bool(set(layout.get('runtime_pending_components') or []).intersection(pending_aliases | {'all'}))
+    if pending_match and not live_ready:
+        status = 'pending'
+    return {
+        'component_id': component_id,
+        'status': status,
+        'ready': live_ready,
+        'missing_items': missing_items,
+        'installed_count': installed,
+        'total_count': total_count,
+        'cleanup_patterns': tuple(component.get('cleanup_patterns', ())),
+    }
+
+
+def build_runtime_install_command(profile: str, *, source: str = 'official', component: str = 'all') -> str:
+    normalized_profile = (profile or 'cpu').strip().lower() or 'cpu'
+    normalized_source = (source or 'official').strip().lower() or 'official'
+    normalized_component = (component or 'all').strip().lower() or 'all'
+    if normalized_source not in _RUNTIME_PACKAGE_SOURCE_URLS:
+        normalized_source = 'official'
+    if normalized_component != 'all' and normalized_component not in _RUNTIME_COMPONENTS:
+        normalized_component = 'all'
+    app_dir_literal = _powershell_literal(_application_root_dir())
+    script_literal = _powershell_literal(_install_runtime_script_relative())
+    command = (
+        "PowerShell -ExecutionPolicy Bypass -NoProfile -Command "
+        f'\"Set-Location -LiteralPath {app_dir_literal}; & {script_literal} -Profile {normalized_profile} -Source {normalized_source} -WaitForProcessName OmniClipRAG'
+    )
+    if normalized_component != 'all':
+        command += f" -Component {normalized_component}"
+    command += '\"'
+    return command
+
+
+def runtime_install_sources() -> dict[str, str]:
+    return dict(_RUNTIME_PACKAGE_SOURCE_URLS)
+
+
+def runtime_component_usage(component_id: str, profile: str) -> dict[str, str]:
+    component = _RUNTIME_COMPONENTS.get(component_id)
+    if component is None:
+        raise KeyError(f'Unknown runtime component: {component_id}')
+    normalized_profile = (profile or 'cpu').strip().lower() or 'cpu'
+    return {
+        'disk_usage': str(component.get('disk_usage', {}).get(normalized_profile) or component.get('disk_usage', {}).get('cpu') or ''),
+        'download_usage': str(component.get('download_usage', {}).get(normalized_profile) or component.get('download_usage', {}).get('cpu') or ''),
+    }
+
 _RUNTIME_REQUIRED_IMPORTS = (
     ('torch', 'torch'),
     ('sentence_transformers', 'sentence-transformers'),
@@ -1015,14 +1298,453 @@ def _powershell_literal(value: str) -> str:
     return str(value).replace("'", "''")
 
 
-def _runtime_marker_exists(runtime_dir: Path, marker: str) -> bool:
-    candidate = runtime_dir / marker
-    if candidate.exists():
+def _runtime_component_dependency_ids(component_id: str) -> tuple[str, ...]:
+    normalized = normalize_runtime_component_id(component_id)
+    if normalized in {'semantic-core', 'vector-store'}:
+        # Why: query-time vector execution depends on semantic-core's numpy/scipy
+        # stack even when lancedb/pyarrow still live at the flat vector-store root.
+        # Keeping semantic-core first guarantees the packaged app sees one canonical
+        # numerical stack instead of mixing legacy flat runtime leftovers.
+        return ('semantic-core', 'vector-store')
+    return (normalized,)
+
+
+def _runtime_component_pending_aliases(component_id: str) -> set[str]:
+    aliases: set[str] = set()
+    for candidate_id in _runtime_component_dependency_ids(component_id):
+        aliases.add(candidate_id)
+        if candidate_id == 'semantic-core':
+            aliases.update({'compute-core', 'model-stack'})
+    return aliases
+
+
+def _runtime_search_roots(runtime_dir: Path, *, include_pending: bool = False, component_id: str | None = None) -> list[Path]:
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    normalized_component = normalize_runtime_component_id(component_id) if component_id else ''
+
+    def register(candidate: Path | None, *, prepend: bool = False) -> None:
+        if candidate is None or not candidate.exists() or not candidate.is_dir():
+            return
+        resolved = candidate.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        if prepend:
+            roots.insert(0, candidate)
+        else:
+            roots.append(candidate)
+
+    component_ids = _runtime_component_dependency_ids(normalized_component) if normalized_component else ('semantic-core', 'vector-store', 'all')
+    live_roots: list[Path] = []
+    for candidate_id in component_ids:
+        component_roots = list(runtime_component_live_roots(runtime_dir, candidate_id))
+        if component_roots:
+            live_roots.extend(component_roots)
+        elif runtime_dir.exists() and runtime_dir.is_dir():
+            # Why: a partially componentized runtime may still keep some legacy
+            # payloads at the flat runtime root. Semantic imports must be able to
+            # see their transitive storage dependencies until every component has
+            # been migrated to isolated live roots.
+            live_roots.append(runtime_dir)
+    if not live_roots and runtime_dir.exists() and runtime_dir.is_dir():
+        live_roots.append(runtime_dir)
+    for root in live_roots:
+        register(root)
+
+    if include_pending:
+        aliases = _runtime_component_pending_aliases(normalized_component) if normalized_component else None
+        for payload in list_pending_runtime_updates(runtime_dir):
+            payload_component = normalize_runtime_component_id(str(payload.get('component') or ''))
+            if aliases is not None and payload_component not in aliases and payload_component != 'all':
+                continue
+            payload_dir = Path(str(payload.get('payload_dir') or '')).resolve()
+            register(payload_dir, prepend=True)
+    return roots
+
+
+def _runtime_bootstrap_metadata(runtime_root: Path) -> dict[str, str]:
+    marker = runtime_root / '_runtime_bootstrap.json'
+    if not marker.exists():
+        return {}
+    try:
+        payload = json.loads(marker.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+    normalized: dict[str, str] = {}
+    for key in ('python_exe', 'stdlib', 'platstdlib', 'dll_dir'):
+        value = str(payload.get(key) or '').strip()
+        if value:
+            normalized[key] = value
+    return normalized
+
+
+def _runtime_bootstrap_dll_dir(runtime_root: Path) -> Path | None:
+    payload = _runtime_bootstrap_metadata(runtime_root)
+    dll_value = payload.get('dll_dir', '')
+    if not dll_value:
+        return None
+    candidate = Path(dll_value)
+    if not candidate.exists():
+        return None
+    try:
+        candidate.resolve().relative_to(Path(runtime_root).resolve())
+    except Exception:
+        # Why: runtime payloads installed by an external Python must not leak
+        # that interpreter's DLL directory back into the packaged app.
+        return None
+    return candidate
+
+
+def _runtime_bootstrap_sys_paths(runtime_root: Path) -> list[Path]:
+    # Why: the frozen app must keep using its own interpreter stdlib.
+    # Re-injecting stdlib/platstdlib from the Python used to install runtime
+    # corrupts imports (for example asyncio/_multiprocessing/base_events) and
+    # makes healthy runtime payloads look broken.
+    return []
+
+
+def _runtime_component_validation_manifest(runtime_root: Path) -> dict[str, object]:
+    marker = runtime_root / '_runtime_validation.json'
+    if not marker.exists():
+        return {}
+    try:
+        payload = json.loads(marker.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _runtime_probe_python_command(runtime_root: Path) -> list[str]:
+    payload = _runtime_bootstrap_metadata(runtime_root)
+    python_exe = str(payload.get('python_exe') or '').strip()
+    if python_exe and Path(python_exe).exists():
+        return [python_exe]
+    for candidate in (['py', '-3.13'], ['python']):
+        try:
+            result = run_hidden(candidate + ['--version'], capture_output=True, text=True, timeout=5)
+        except Exception:
+            continue
+        if result.returncode == 0:
+            return candidate
+    return []
+
+
+def _probe_runtime_semantic_core(runtime_dir: Path) -> dict[str, object] | None:
+    roots = _runtime_search_roots(runtime_dir, include_pending=False, component_id='semantic-core')
+    if not roots:
+        return None
+    runtime_root = Path(roots[0]).resolve()
+    command = _runtime_probe_python_command(runtime_root)
+    if not command:
+        return None
+    script = (
+        "import importlib, json, os, sys\n"
+        "from pathlib import Path\n"
+        "result = {'torch_available': False, 'torch_version': '', 'torch_error': '', 'sentence_transformers_available': False, 'sentence_transformers_error': '', 'cuda_available': False, 'cuda_device_count': 0, 'cuda_name': ''}\n"
+        "existing = []\n"
+        "roots = [Path(raw_root).resolve() for raw_root in sys.argv[1:]]\n"
+        "for root in reversed(roots):\n"
+        "    paths = [root, root / 'bin', root / 'pyarrow.libs', root / 'numpy.libs', root / 'scipy.libs', root / 'torch' / 'lib']\n"
+        "    for candidate in paths:\n"
+        "        if candidate.exists():\n"
+        "            sys.path.insert(0, str(candidate))\n"
+        "            existing.append(str(candidate))\n"
+        "            if hasattr(os, 'add_dll_directory'):\n"
+        "                try: os.add_dll_directory(str(candidate))\n"
+        "                except OSError: pass\n"
+        "if existing:\n"
+        "    os.environ['PATH'] = os.pathsep.join(existing + [os.environ.get('PATH', '')])\n"
+        "try:\n"
+        "    torch = importlib.import_module('torch')\n"
+        "    result['torch_available'] = True\n"
+        "    result['torch_version'] = str(getattr(torch, '__version__', '') or '')\n"
+        "    try:\n"
+        "        result['cuda_available'] = bool(torch.cuda.is_available())\n"
+        "    except Exception:\n"
+        "        result['cuda_available'] = False\n"
+        "    if result['cuda_available']:\n"
+        "        try: result['cuda_device_count'] = int(torch.cuda.device_count())\n"
+        "        except Exception: result['cuda_device_count'] = 0\n"
+        "        if result['cuda_device_count'] > 0:\n"
+        "            try: result['cuda_name'] = str(torch.cuda.get_device_name(0))\n"
+        "            except Exception: result['cuda_name'] = ''\n"
+        "except Exception as exc:\n"
+        "    result['torch_error'] = f'{type(exc).__name__}: {exc}'\n"
+        "if result['torch_available']:\n"
+        "    try:\n"
+        "        importlib.import_module('sentence_transformers')\n"
+        "        result['sentence_transformers_available'] = True\n"
+        "    except Exception as exc:\n"
+        "        result['sentence_transformers_error'] = f'{type(exc).__name__}: {exc}'\n"
+        "print(json.dumps(result, ensure_ascii=True))\n"
+    )
+    try:
+        completed = run_hidden(command + ['-I', '-S', '-c', script, *[str(Path(root).resolve()) for root in roots]], capture_output=True, text=True, timeout=180)
+    except Exception as exc:
+        return {'probe_error': f'{type(exc).__name__}: {exc}'}
+    stdout = str(completed.stdout or '').strip()
+    stderr = str(completed.stderr or '').strip()
+    if completed.returncode != 0:
+        return {'probe_error': stderr or stdout or f'probe exited with {completed.returncode}'}
+    try:
+        payload = json.loads(stdout or '{}')
+    except Exception as exc:
+        return {'probe_error': f'JSONDecodeError: {exc}: {stdout[:240]}'}
+    if not isinstance(payload, dict):
+        return {'probe_error': 'probe returned non-dict payload'}
+    return payload
+
+
+def _probe_runtime_semantic_core_inprocess(runtime_dir: Path) -> dict[str, object] | None:
+    roots = _runtime_search_roots(runtime_dir, include_pending=False, component_id='semantic-core')
+    if not roots:
+        return None
+    payload: dict[str, object] = {
+        'torch_available': False,
+        'torch_version': '',
+        'torch_error': '',
+        'sentence_transformers_available': False,
+        'sentence_transformers_error': '',
+        'cuda_available': False,
+        'cuda_device_count': 0,
+        'cuda_name': '',
+    }
+    # Why: the in-process probe runs inside the same frozen process as the real
+    # query path. Purging runtime modules here forces numpy/torch/scipy style
+    # C-extensions to reload later in the same process, which can explode with
+    # "cannot load module more than once per process" and makes a healthy CPU
+    # semantic stack look broken only at query time. The probe must therefore be
+    # observational, not destructive.
+    with _runtime_import_environment(component_id='semantic-core'):
+        torch = None
+        try:
+            import torch
+            if not _module_resolves_inside_roots(torch, roots):
+                raise ImportError('torch resolved outside semantic runtime roots')
+        except Exception as exc:
+            payload['torch_error'] = f'{type(exc).__name__}: {exc}'
+        else:
+            payload['torch_available'] = True
+            payload['torch_version'] = str(getattr(torch, '__version__', '') or '')
+            try:
+                payload['cuda_available'] = bool(torch.cuda.is_available())
+            except Exception:
+                payload['cuda_available'] = False
+            if payload['cuda_available']:
+                try:
+                    payload['cuda_device_count'] = int(torch.cuda.device_count())
+                except Exception:
+                    payload['cuda_device_count'] = 0
+                if payload['cuda_device_count'] > 0:
+                    try:
+                        payload['cuda_name'] = str(torch.cuda.get_device_name(0))
+                    except Exception:
+                        payload['cuda_name'] = ''
+
+        if payload['torch_available']:
+            try:
+                import sentence_transformers
+                if not _module_resolves_inside_roots(sentence_transformers, roots):
+                    raise ImportError('sentence-transformers resolved outside semantic runtime roots')
+            except Exception as exc:
+                payload['sentence_transformers_error'] = f'{type(exc).__name__}: {exc}'
+            else:
+                payload['sentence_transformers_available'] = True
+    return payload
+
+
+def _purge_runtime_import_state() -> None:
+    importlib.invalidate_caches()
+    for module_name in list(sys.modules):
+        if any(module_name == prefix or module_name.startswith(prefix + '.') for prefix in _RUNTIME_IMPORT_RESET_PREFIXES):
+            sys.modules.pop(module_name, None)
+
+
+def _collect_module_origins(module: object) -> list[Path]:
+    origins: list[Path] = []
+    module_file = getattr(module, '__file__', None)
+    if module_file:
+        origins.append(Path(str(module_file)).resolve())
+    module_path = getattr(module, '__path__', None)
+    if module_path:
+        try:
+            iterator = iter(module_path)
+        except TypeError:
+            iterator = ()
+        for entry in iterator:
+            try:
+                origins.append(Path(str(entry)).resolve())
+            except Exception:
+                continue
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for item in origins:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
+def _module_resolves_inside_roots(module: object, roots: Iterable[Path]) -> bool:
+    resolved_roots = [Path(root).resolve() for root in roots]
+    origins = _collect_module_origins(module)
+    if not origins or not resolved_roots:
+        return False
+    for origin in origins:
+        if not any(_path_under_runtime(origin, root) for root in resolved_roots):
+            return False
+    return True
+
+
+def _module_resolves_inside_runtime(module: object, runtime_dir: Path) -> bool:
+    return _module_resolves_inside_roots(module, [Path(runtime_dir).resolve()])
+
+
+def _purge_runtime_import_state_for_roots(active_roots: Iterable[Path]) -> None:
+    resolved_roots = [Path(root).resolve() for root in active_roots if Path(root).exists()]
+    if not resolved_roots:
+        return
+    importlib.invalidate_caches()
+    for module_name, module in list(sys.modules.items()):
+        if not any(module_name == prefix or module_name.startswith(prefix + '.') for prefix in _RUNTIME_IMPORT_RESET_PREFIXES):
+            continue
+        if module is None or not _module_resolves_inside_roots(module, resolved_roots):
+            sys.modules.pop(module_name, None)
+
+
+def _ensure_runtime_stdlib_support_loaded() -> None:
+    global _RUNTIME_STDLIB_SUPPORT_LOGGED
+    loaded_now: list[str] = []
+    with _RUNTIME_STDLIB_SUPPORT_LOCK:
+        for module_name in _RUNTIME_STDLIB_SUPPORT_MODULES:
+            if module_name in _RUNTIME_STDLIB_SUPPORT_READY:
+                continue
+            try:
+                importlib.import_module(module_name)
+            except Exception as exc:
+                LOGGER.error('Runtime stdlib support preload failed for %s: %s: %s', module_name, type(exc).__name__, exc)
+                raise
+            _RUNTIME_STDLIB_SUPPORT_READY.add(module_name)
+            loaded_now.append(module_name)
+        if loaded_now and not _RUNTIME_STDLIB_SUPPORT_LOGGED:
+            LOGGER.info('Runtime stdlib support preloaded: %s', ', '.join(loaded_now))
+            _RUNTIME_STDLIB_SUPPORT_LOGGED = True
+
+
+def _path_under_runtime(candidate: Path, runtime_root: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(runtime_root)
         return True
-    return any(runtime_dir.glob(f'{marker}-*.dist-info'))
+    except Exception:
+        return False
 
 
-def inspect_runtime_environment() -> dict[str, object]:
+@contextmanager
+def _runtime_import_environment(*, component_id: str | None = None) -> Iterable[None]:
+    runtime_dir = _runtime_dir_path()
+    if not runtime_dir.exists() or not runtime_dir.is_dir():
+        yield
+        return
+
+    # Why: pending payloads are only a staged update. The current session should
+    # keep using the live runtime tree until startup applies the staged update on
+    # the next launch.
+    search_roots = _runtime_search_roots(runtime_dir, include_pending=False, component_id=component_id)
+    # Why: the packaged app must keep using one stable semantic runtime inside a
+    # single process. Re-purging C-extension modules like numpy/torch on every
+    # query causes "cannot load module more than once per process" failures.
+    inserted_sys_paths: list[str] = []
+    dll_paths: list[str] = []
+    dll_handles: list[object] = []
+    original_path = os.environ.get('PATH', '')
+    original_sys_path = list(sys.path)
+
+    runtime_root_resolved = runtime_dir.resolve()
+    sys.path[:] = [
+        item for item in sys.path
+        if not (
+            str(item).strip()
+            and Path(str(item)).exists()
+            and _path_under_runtime(Path(str(item)), runtime_root_resolved)
+        )
+    ]
+
+    def register_sys_path(candidate: Path | None) -> None:
+        if candidate is None or not candidate.exists():
+            return
+        candidate_str = str(candidate)
+        if candidate_str not in sys.path:
+            sys.path.insert(0, candidate_str)
+            inserted_sys_paths.append(candidate_str)
+
+    def register_dll_path(candidate: Path | None) -> None:
+        if candidate is None or not candidate.exists():
+            return
+        candidate_str = str(candidate)
+        if candidate_str not in dll_paths:
+            dll_paths.append(candidate_str)
+
+    for root in reversed(search_roots):
+        register_sys_path(root)
+        for bootstrap_sys_path in reversed(_runtime_bootstrap_sys_paths(root)):
+            register_sys_path(bootstrap_sys_path)
+
+    for root in search_roots:
+        bootstrap_dll_dir = _runtime_bootstrap_dll_dir(root)
+        for candidate in (
+            root / 'bin',
+            root / 'pyarrow.libs',
+            root / 'numpy.libs',
+            root / 'scipy.libs',
+            root / 'torch' / 'lib',
+        ):
+            register_dll_path(candidate)
+        register_dll_path(bootstrap_dll_dir)
+
+    if dll_paths:
+        os.environ['PATH'] = os.pathsep.join(dll_paths + ([original_path] if original_path else []))
+        if hasattr(os, 'add_dll_directory'):
+            for item in dll_paths:
+                try:
+                    dll_handles.append(os.add_dll_directory(item))
+                except OSError:
+                    continue
+    _ensure_runtime_stdlib_support_loaded()
+
+    try:
+        yield
+    finally:
+        os.environ['PATH'] = original_path
+        for handle in dll_handles:
+            try:
+                handle.close()
+            except Exception:
+                pass
+        sys.path[:] = original_sys_path
+
+
+def _runtime_marker_structure_ready(root: Path, marker: str) -> bool:
+    if marker == '_runtime_bootstrap.json':
+        return (root / marker).exists()
+    candidate = root / marker
+    if not candidate.exists() or not candidate.is_dir():
+        return False
+    for required_entry in _RUNTIME_REQUIRED_STRUCTURE.get(marker, ()):
+        if not (candidate / required_entry).exists():
+            return False
+    return True
+
+
+def _runtime_marker_exists(runtime_dir: Path, marker: str, *, include_pending: bool = False, component_id: str | None = None) -> bool:
+    for root in _runtime_search_roots(runtime_dir, include_pending=include_pending, component_id=component_id):
+        if _runtime_marker_structure_ready(root, marker):
+            return True
+    return False
+
+
+def _inspect_runtime_layout_state() -> dict[str, object]:
     runtime_dir = _runtime_dir_path()
     runtime_dir_exists = runtime_dir.exists() and runtime_dir.is_dir()
     runtime_dir_has_content = False
@@ -1031,16 +1753,42 @@ def inspect_runtime_environment() -> dict[str, object]:
             runtime_dir_has_content = any(runtime_dir.iterdir())
         except OSError:
             runtime_dir_has_content = False
-    missing_items = [
-        display_name
-        for marker, display_name in _RUNTIME_REQUIRED_MARKERS.items()
-        if not _runtime_marker_exists(runtime_dir, marker)
-    ] if runtime_dir_exists else list(_RUNTIME_REQUIRED_MARKERS.values())
+    pending_updates = list_pending_runtime_updates(runtime_dir) if runtime_dir_exists else []
+    pending_components = []
+    for payload in pending_updates:
+        component_name = normalize_runtime_component_id(str(payload.get('component') or '').strip())
+        if component_name and component_name not in pending_components:
+            pending_components.append(component_name)
     return {
         'runtime_dir': runtime_dir,
         'runtime_exists': runtime_dir_exists,
         'runtime_has_content': runtime_dir_has_content,
-        'runtime_complete': runtime_dir_exists and runtime_dir_has_content and not missing_items,
+        'runtime_pending': bool(pending_updates),
+        'runtime_pending_components': pending_components,
+    }
+
+
+def _runtime_component_missing_items(runtime_dir: Path, component_id: str) -> list[str]:
+    component = _RUNTIME_COMPONENTS.get(component_id)
+    if component is None:
+        raise KeyError(f'Unknown runtime component: {component_id}')
+    normalized_component = normalize_runtime_component_id(component_id)
+    return [
+        _RUNTIME_REQUIRED_MARKERS.get(marker, marker)
+        for marker in component.get('markers', ())
+        if not _runtime_marker_exists(runtime_dir, marker, include_pending=False, component_id=normalized_component)
+    ]
+
+
+def inspect_runtime_environment() -> dict[str, object]:
+    layout = _inspect_runtime_layout_state()
+    runtime_dir = Path(layout['runtime_dir'])
+    semantic_missing = _runtime_component_missing_items(runtime_dir, 'semantic-core') if layout['runtime_exists'] else list(_RUNTIME_COMPONENT_MODULES['semantic-core'])
+    vector_missing = _runtime_component_missing_items(runtime_dir, 'vector-store') if layout['runtime_exists'] else list(_RUNTIME_COMPONENT_MODULES['vector-store'])
+    missing_items = list(dict.fromkeys([*semantic_missing, *vector_missing]))
+    return {
+        **layout,
+        'runtime_complete': bool(layout['runtime_exists']) and bool(layout['runtime_has_content']) and not missing_items,
         'runtime_missing_items': missing_items,
     }
 
@@ -1054,7 +1802,9 @@ def detect_acceleration(*, force_refresh: bool = False, safe_mode: bool = False)
         if not safe_mode and not force_refresh and _ACCELERATION_CACHE is not None:
             return dict(_ACCELERATION_CACHE)
 
+        runtime_dir = _runtime_dir_path()
         runtime_state = inspect_runtime_environment()
+        semantic_missing = _runtime_component_missing_items(runtime_dir, 'semantic-core') if runtime_state['runtime_exists'] else list(_RUNTIME_COMPONENT_MODULES['semantic-core'])
         payload: dict[str, object] = {
             "torch_available": False,
             "torch_version": "",
@@ -1093,47 +1843,41 @@ def detect_acceleration(*, force_refresh: bool = False, safe_mode: bool = False)
             payload['torch_error'] = 'safe startup deferred torch probe'
             return dict(payload)
 
-        try:
-            import torch
-        except Exception as exc:
-            payload["torch_error"] = f"{type(exc).__name__}: {exc}"
-            torch = None
+        if semantic_missing:
+            detail = ', '.join(semantic_missing[:6])
+            payload['torch_error'] = f'semantic runtime files are incomplete: {detail}'
+            payload['sentence_transformers_error'] = f'semantic runtime files are incomplete: {detail}'
+            _ACCELERATION_CACHE = dict(payload)
+            return dict(payload)
 
-        if torch is not None:
-            payload["torch_available"] = True
-            payload["torch_version"] = getattr(torch, "__version__", "")
-            payload["runtime_status"] = "cpu"
-            try:
-                cuda_available = bool(torch.cuda.is_available())
-            except Exception:
-                cuda_available = False
-            payload["cuda_available"] = cuda_available
-            if cuda_available:
-                try:
-                    device_count = int(torch.cuda.device_count())
-                except Exception:
-                    device_count = 0
-                payload["cuda_device_count"] = device_count
-                if device_count > 0:
-                    try:
-                        payload["cuda_name"] = str(torch.cuda.get_device_name(0))
-                    except Exception:
-                        payload["cuda_name"] = ""
-                payload["device_options"] = ["auto", "cpu", "cuda"]
-                payload["recommended_device"] = "cuda"
-                payload["runtime_status"] = "cuda"
-            elif gpu_names:
-                payload["recommended_device"] = "cpu"
+        probe_payload = _probe_runtime_semantic_core_inprocess(runtime_dir) or {}
+        if not probe_payload.get('torch_available') and not probe_payload.get('sentence_transformers_available'):
+            external_probe = _probe_runtime_semantic_core(runtime_dir)
+            if external_probe is not None and not external_probe.get('probe_error'):
+                probe_payload = external_probe
+            elif external_probe is not None and external_probe.get('probe_error') and not probe_payload.get('torch_error'):
+                probe_payload['torch_error'] = str(external_probe.get('probe_error') or '')
+                probe_payload['sentence_transformers_error'] = str(external_probe.get('probe_error') or '')
 
-        try:
-            import sentence_transformers  # noqa: F401
-        except Exception as exc:
-            payload["sentence_transformers_error"] = f"{type(exc).__name__}: {exc}"
-        else:
-            payload["sentence_transformers_available"] = True
+        payload['torch_available'] = bool(probe_payload.get('torch_available'))
+        payload['torch_version'] = str(probe_payload.get('torch_version') or '')
+        payload['torch_error'] = str(probe_payload.get('torch_error') or '')
+        payload['sentence_transformers_available'] = bool(probe_payload.get('sentence_transformers_available'))
+        payload['sentence_transformers_error'] = str(probe_payload.get('sentence_transformers_error') or '')
+        payload['cuda_available'] = bool(probe_payload.get('cuda_available'))
+        payload['cuda_device_count'] = int(probe_payload.get('cuda_device_count') or 0)
+        payload['cuda_name'] = str(probe_payload.get('cuda_name') or '')
+        if payload['torch_available']:
+            payload['runtime_status'] = 'cuda' if payload['cuda_available'] else 'cpu'
+        if payload['cuda_available']:
+            payload['device_options'] = ['auto', 'cpu', 'cuda']
+            payload['recommended_device'] = 'cuda'
+        elif gpu_names:
+            payload['recommended_device'] = 'cpu'
 
         _ACCELERATION_CACHE = dict(payload)
         return dict(payload)
+
 
 def get_device_options() -> list[str]:
     acceleration = detect_acceleration()
@@ -1182,9 +1926,11 @@ def runtime_guidance_context(
     *,
     force_refresh: bool = False,
     extra_detail: str = '',
+    acceleration_payload: dict[str, object] | None = None,
+    runtime_state: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    acceleration = detect_acceleration(force_refresh=force_refresh)
-    runtime_state = inspect_runtime_environment()
+    acceleration = dict(acceleration_payload or detect_acceleration(force_refresh=force_refresh))
+    runtime_state = dict(runtime_state or inspect_runtime_environment())
     requested = (device_name or 'auto').strip().lower() or 'auto'
     runtime_name = (runtime_name or 'torch').strip().lower() or 'torch'
     wants_gpu = requested in {'auto', 'gpu', 'cuda'} and bool(acceleration.get('gpu_present'))
@@ -1192,12 +1938,10 @@ def runtime_guidance_context(
     app_dir = _application_root_dir()
     runtime_dir = Path(runtime_state['runtime_dir'])
     install_script = _install_runtime_script_path()
-    relative_script = _install_runtime_script_relative()
-    app_dir_literal = _powershell_literal(str(app_dir))
-    command = (
-        "PowerShell -ExecutionPolicy Bypass -NoProfile -Command "
-        f"\"Set-Location -LiteralPath '{app_dir_literal}'; & '{relative_script}' -Profile {recommended_profile}\""
-    )
+    source_urls = runtime_install_sources()
+    official_command = build_runtime_install_command(recommended_profile, source='official', component='all')
+    mirror_command = build_runtime_install_command(recommended_profile, source='mirror', component='all')
+    command = official_command
     gpu_name = str(acceleration.get('gpu_name') or acceleration.get('cuda_name') or '').strip()
     nvcc_version = str(acceleration.get('nvcc_version') or '').strip()
     if recommended_profile == 'cuda':
@@ -1217,7 +1961,9 @@ def runtime_guidance_context(
         cuda_step_status = '未检测到 NVIDIA 显卡或可用 CUDA 条件'
 
     missing_items = list(runtime_state['runtime_missing_items'])
-    if runtime_state['runtime_complete']:
+    if runtime_state.get('runtime_pending_components'):
+        runtime_step_status = '已下载待应用更新，关闭程序后会自动生效'
+    elif runtime_state['runtime_complete']:
         runtime_step_status = 'runtime 已完整'
     elif runtime_state['runtime_exists'] and runtime_state['runtime_has_content']:
         runtime_step_status = 'runtime 已存在，但内容还不完整'
@@ -1238,6 +1984,9 @@ def runtime_guidance_context(
     ]
     if missing_items:
         current_status_lines.append(f"- runtime 缺少项：{', '.join(missing_items)}")
+    pending_components = list(runtime_state.get('runtime_pending_components') or [])
+    if pending_components:
+        current_status_lines.append(f"- 待应用更新：{', '.join(pending_components)}（关闭程序后自动生效）")
     if acceleration.get('torch_error'):
         current_status_lines.append(f"- PyTorch 导入失败：{acceleration.get('torch_error')}")
     if acceleration.get('sentence_transformers_error'):
@@ -1263,9 +2012,12 @@ def runtime_guidance_context(
         '- 做完后会发生什么：程序就能识别到系统里的 NVIDIA / CUDA 条件；如果第二步还没做，本地向量功能仍然不能直接运行。',
         '',
         f'第二步：在 Windows 终端里安装 runtime（状态：{runtime_step_status}）',
-        f'- 命令（可复制）：{command}',
+        f"- 官方源（可复制）：{source_urls['official']}",
+        f'- 官方命令（可复制）：{official_command}',
+        f"- 镜像源（可复制）：{source_urls['mirror']}",
+        f'- 镜像命令（可复制）：{mirror_command}',
         f'- 会安装到：{runtime_dir}',
-        '- 安装后会发生什么：会补齐 PyTorch、LanceDB、sentence-transformers、pyarrow、onnxruntime 等本地运行时；重启程序后就能正常执行本地语义建库、向量查询和 GPU 加速。',
+        '- 安装后会发生什么：会先把 PyTorch、LanceDB、sentence-transformers、pyarrow、onnxruntime 等本地运行时下载到待应用目录；关闭一次程序后后台会自动切换到新组件，下一次打开时就能正常执行本地语义建库、向量查询和 GPU 加速。',
         f'- 预计落盘：{disk_usage}；预计下载：{download_usage}',
         '',
         '当前状态',
@@ -1285,6 +2037,10 @@ def runtime_guidance_context(
         'runtime_dir': runtime_dir,
         'install_script': install_script,
         'install_command': command,
+        'official_install_command': official_command,
+        'mirror_install_command': mirror_command,
+        'official_runtime_source_url': source_urls['official'],
+        'mirror_runtime_source_url': source_urls['mirror'],
         'cuda_guide_url': _CUDA_SETUP_GUIDE_URL,
         'gpu_present': bool(acceleration.get('gpu_present')),
         'gpu_name': gpu_name,
@@ -1299,6 +2055,8 @@ def runtime_guidance_context(
         'runtime_exists': bool(runtime_state['runtime_exists']),
         'runtime_complete': bool(runtime_state['runtime_complete']),
         'runtime_missing_items': missing_items,
+        'runtime_pending': bool(runtime_state.get('runtime_pending')),
+        'runtime_pending_components': list(runtime_state.get('runtime_pending_components') or []),
         'cuda_step_status': cuda_step_status,
         'runtime_step_status': runtime_step_status,
         'resolved_device': resolve_vector_device(requested),
@@ -1310,23 +2068,32 @@ def runtime_guidance_context(
     }
 
 
-def runtime_dependency_issue(config: AppConfig) -> str | None:
+def runtime_dependency_issue(config: AppConfig, *, force_refresh: bool = False) -> str | None:
     backend = (config.vector_backend or 'disabled').strip().lower()
     if backend in {'', 'disabled', 'none', 'off'}:
         return None
     runtime_name = (config.vector_runtime or 'torch').strip().lower() or 'torch'
+    runtime_state = inspect_runtime_environment()
+    acceleration = detect_acceleration(force_refresh=force_refresh)
     failures: list[str] = []
-    required_imports = [*_RUNTIME_REQUIRED_IMPORTS, *_RUNTIME_REQUIRED_IMPORTS_BY_RUNTIME.get(runtime_name, ())]
-    for module_name, display_name in required_imports:
-        try:
-            importlib.import_module(module_name)
-        except Exception as exc:
-            failures.append(f'- {display_name}: {type(exc).__name__}: {exc}')
-    if not failures:
+    semantic_state = runtime_component_status('semantic-core')
+    vector_state = runtime_component_status('vector-store')
+    for item in list(semantic_state.get('missing_items') or []):
+        failures.append(f'- 本地语义核心: {item}')
+    for item in list(vector_state.get('missing_items') or []):
+        failures.append(f'- 索引与存储支撑: {item}')
+    if runtime_name == 'torch' and not bool(acceleration.get('torch_available')):
+        failures.append(f"- torch: {acceleration.get('torch_error') or 'unavailable'}")
+    if not bool(acceleration.get('sentence_transformers_available')):
+        failures.append(f"- sentence-transformers: {acceleration.get('sentence_transformers_error') or 'unavailable'}")
+    if runtime_name == 'onnx' and not bool(vector_state.get('ready')):
+        failures.append('- onnxruntime: 索引与存储支撑尚未完整')
+    failures = list(dict.fromkeys([str(item).strip() for item in failures if str(item).strip()]))
+    if not failures and runtime_state.get('runtime_complete'):
         return None
-    detail = '底层缺失：\n' + '\n'.join(failures)
-    context = runtime_guidance_context(runtime_name, config.vector_device, force_refresh=True, extra_detail=detail)
-    return str(context.get('plain_text') or '').strip() or detail
+    detail = '底层缺失：\n' + '\n'.join(failures) if failures else ''
+    context = runtime_guidance_context(runtime_name, config.vector_device, force_refresh=True, extra_detail=detail, acceleration_payload=acceleration, runtime_state=runtime_state)
+    return str(context.get('plain_text') or '').strip() or detail or None
 
 
 def _runtime_dependency_message(runtime_name: str | None, device_name: str | None) -> str:

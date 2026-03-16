@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import threading
@@ -12,9 +13,10 @@ from PySide6 import QtCore, QtWidgets
 
 from omniclip_rag.app_entry.desktop import launch_desktop, main as desktop_main
 from omniclip_rag.ui_next_qt import app as qt_app
+from omniclip_rag.ui_next_qt.app import StartupProgressDialog
 from omniclip_rag.config import AppConfig, ensure_data_paths, load_config, save_config
 from omniclip_rag.errors import BuildCancelledError
-from omniclip_rag.models import SearchHit, SpaceEstimate
+from omniclip_rag.models import QueryInsights, QueryResult, SearchHit, SpaceEstimate
 from omniclip_rag.ui_i18n import text
 from omniclip_rag.preflight import estimate_storage_for_vault
 from omniclip_rag.vector_index import get_local_model_dir
@@ -24,6 +26,7 @@ from omniclip_rag.ui_next_qt.main_window import MainWindow
 from omniclip_rag.ui_next_qt.query_table_model import QueryResultsTableModel
 from omniclip_rag.ui_next_qt.query_workspace import QueryWorkspace
 from omniclip_rag.ui_next_qt.theme import build_stylesheet, build_theme
+from omniclip_rag.ui_next_qt.workers import QueryTaskResult
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_ROOT = ROOT / '.tmp' / 'test_qt_ui'
@@ -47,16 +50,40 @@ class QtUiTests(unittest.TestCase):
             self.assertEqual(desktop_main([]), 0)
         launch_mock.assert_called_once_with('next')
 
-    def test_desktop_entry_can_open_legacy_ui(self) -> None:
-        with patch('omniclip_rag.ui_legacy_tk.app.main', return_value=7) as legacy_mock:
-            self.assertEqual(launch_desktop('legacy'), 7)
-        legacy_mock.assert_called_once_with()
+    def test_desktop_entry_retires_legacy_flag_and_still_uses_qt(self) -> None:
+        with patch('omniclip_rag.app_entry.desktop.launch_desktop', return_value=0) as launch_mock:
+            self.assertEqual(desktop_main(['--ui', 'legacy']), 0)
+        launch_mock.assert_called_once_with('legacy')
 
     def test_qt_app_resets_offscreen_env_for_interactive_launch(self) -> None:
         with patch.dict(os.environ, {'QT_QPA_PLATFORM': 'offscreen'}, clear=False):
             os.environ.pop('OMNICLIP_ALLOW_OFFSCREEN', None)
             qt_app._normalize_qpa_platform()
             self.assertNotEqual(os.environ.get('QT_QPA_PLATFORM'), 'offscreen')
+
+    def test_startup_progress_dialog_marks_source_mode_in_title(self) -> None:
+        app = get_app()
+        dialog = StartupProgressDialog()
+        try:
+            self.assertIn('开发态', dialog.windowTitle())
+            self.assertIn('开发态', dialog._title_label.text())
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            app.processEvents()
+
+    def test_startup_progress_dialog_is_minimizable_and_updates_status(self) -> None:
+        app = get_app()
+        dialog = StartupProgressDialog()
+        try:
+            self.assertTrue(bool(dialog.windowFlags() & QtCore.Qt.WindowType.WindowMinimizeButtonHint))
+            dialog.set_status('正在准备主界面...', detail='测试细节')
+            self.assertIn('正在准备主界面', dialog._status_label.text())
+            self.assertIn('测试细节', dialog._detail_label.text())
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            app.processEvents()
 
     def test_config_roundtrip_keeps_qt_layout_fields(self) -> None:
         vault = SAMPLE_ROOT
@@ -121,6 +148,122 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_query_workspace_filters_return_allowed_families(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace.query_edit.setText('filter smoke test')
+            workspace.source_pdf_check.setChecked(False)
+            workspace.source_tika_check.setChecked(False)
+            prepared = workspace._validate_query_request(copy_result=False)
+            self.assertIsNotNone(prepared)
+            assert prepared is not None
+            self.assertEqual(prepared[-1], ('markdown',))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_query_workspace_prefers_live_runtime_snapshot_over_cached_config(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        vault_a = TEST_ROOT / 'vault_a'
+        vault_b = TEST_ROOT / 'vault_b'
+        vault_a.mkdir(parents=True, exist_ok=True)
+        vault_b.mkdir(parents=True, exist_ok=True)
+        paths_a = ensure_data_paths(str(TEST_ROOT / 'data_a'), str(vault_a))
+        paths_b = ensure_data_paths(str(TEST_ROOT / 'data_b'), str(vault_b))
+        cached_config = AppConfig(vault_path=str(vault_a), data_root=str(paths_a.global_root), vector_backend='disabled')
+        live_config = AppConfig(vault_path=str(vault_b), data_root=str(paths_b.global_root), vector_backend='disabled')
+        workspace = QueryWorkspace(
+            config=cached_config,
+            paths=paths_a,
+            language_code='zh-CN',
+            theme=theme,
+            runtime_snapshot_provider=lambda: (live_config, paths_b),
+        )
+        try:
+            workspace.query_edit.setText('我的思维')
+            workspace.source_pdf_check.setChecked(False)
+            workspace.source_tika_check.setChecked(False)
+            prepared = workspace._validate_query_request(copy_result=False)
+            self.assertIsNotNone(prepared)
+            assert prepared is not None
+            _query_text, _threshold, prepared_config, prepared_paths, _copy_result, allowed_families = prepared
+            self.assertEqual(prepared_config.vault_path, str(vault_b))
+            self.assertEqual(str(prepared_paths.root), str(paths_b.root))
+            self.assertEqual(allowed_families, ('markdown',))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_query_workspace_requires_at_least_one_source_family(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace.query_edit.setText('filter smoke test')
+            workspace.source_markdown_check.setChecked(False)
+            workspace.source_pdf_check.setChecked(False)
+            workspace.source_tika_check.setChecked(False)
+            with patch('PySide6.QtWidgets.QMessageBox.information') as info_mock:
+                prepared = workspace._validate_query_request(copy_result=False)
+            self.assertIsNone(prepared)
+            info_mock.assert_called_once()
+            self.assertIn('请选择查询来源', info_mock.call_args.args[1])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_query_workspace_shows_runtime_warning_hint(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._query_runtime_warnings = ('markdown_vector_runtime_unavailable',)
+            workspace._refresh_query_runtime_hint()
+            self.assertFalse(workspace.query_runtime_hint_label.isHidden())
+            self.assertIn('纯字面检索', workspace.query_runtime_hint_label.text())
+            self.assertIn('点击修复', workspace.query_runtime_hint_label.text())
+            requested: list[bool] = []
+            workspace.runtimeRepairRequested.connect(lambda: requested.append(True))
+            workspace._handle_runtime_hint_link('runtime-repair')
+            self.assertEqual(requested, [True])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_query_workspace_snapshot_restores_source_filters(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace.source_markdown_check.setChecked(True)
+            workspace.source_pdf_check.setChecked(False)
+            workspace.source_tika_check.setChecked(True)
+            snapshot = workspace.snapshot_view_state()
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+        replacement = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            replacement.restore_view_state(snapshot)
+            self.assertTrue(replacement.source_markdown_check.isChecked())
+            self.assertFalse(replacement.source_pdf_check.isChecked())
+            self.assertTrue(replacement.source_tika_check.isChecked())
+        finally:
+            replacement.deleteLater()
+            app.processEvents()
+
     def test_query_workspace_rebuilds_context_and_summary(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -170,6 +313,27 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_query_runtime_warning_text_points_to_runtime_repair(self) -> None:
+        warning = text('zh-CN', 'query_runtime_warning_markdown_vector_runtime_unavailable')
+        self.assertIn('纯字面检索', warning)
+        self.assertNotIn('Tika 扩展运行时无关', warning)
+
+    def test_config_workspace_exposes_runtime_management_ui(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            self.assertEqual(workspace.sub_tabs.tabText(workspace.sub_tabs.indexOf(workspace.runtime_page)), text('zh-CN', 'left_tab_runtime'))
+            self.assertEqual(workspace.runtime_refresh_button.text(), text('zh-CN', 'runtime_refresh'))
+            self.assertEqual(workspace.runtime_open_dir_button.text(), text('zh-CN', 'runtime_open_dir'))
+            self.assertEqual(workspace.runtime_components_table.rowCount(), 3)
+            self.assertTrue(hasattr(workspace, 'runtime_chip'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_config_workspace_init_does_not_probe_acceleration_synchronously(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -179,6 +343,26 @@ class QtUiTests(unittest.TestCase):
             workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             self.assertIn(workspace.device_combo.currentText(), {text('zh-CN', 'device_option_auto'), text('zh-CN', 'device_option_cpu')})
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_startup_background_tasks_serialize_heavy_probes(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        scheduled: list[tuple[str, object]] = []
+        try:
+            with patch.object(workspace, '_start_device_probe', side_effect=lambda *, safe_mode=False: scheduled.append(('probe', safe_mode))), \
+                 patch.object(workspace, 'schedule_initial_status_load', side_effect=lambda delay_ms=0: scheduled.append(('status', delay_ms))):
+                workspace.schedule_startup_background_tasks(safe_mode=True, initial_status_delay_ms=120)
+                self.assertEqual(scheduled, [('probe', True)])
+                workspace._on_device_probe_finished()
+            self.assertEqual(scheduled, [('probe', True), ('status', 120)])
+            workspace._on_device_probe_finished()
+            self.assertEqual(scheduled, [('probe', True), ('status', 120)])
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -301,7 +485,7 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
-    def test_config_workspace_quick_start_steps_are_not_empty(self) -> None:
+    def test_config_workspace_quick_start_steps_include_runtime_guidance(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
@@ -311,6 +495,9 @@ class QtUiTests(unittest.TestCase):
             labels = [label.text().strip() for label in workspace.quick_steps_widget.findChildren(QtWidgets.QLabel)]
             self.assertEqual(len(labels), 3)
             self.assertTrue(all(labels))
+            self.assertIn('runtime', labels[1].lower())
+            self.assertIn('下载当前模型', labels[1])
+            self.assertIn('预检查空间时间', labels[2])
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -424,6 +611,68 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_config_workspace_index_chip_reads_markdown_index_state_from_disk(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        states: list[tuple[bool, str, str]] = []
+        workspace.queryBlockStateChanged.connect(lambda blocked, title, detail: states.append((blocked, title, detail)))
+        try:
+            (paths.state_dir / 'index_state.json').write_text(json.dumps({
+                'version': 1,
+                'vault_path': str(SAMPLE_ROOT),
+                'completed_at': '2026-03-14T00:00:00Z',
+            }, ensure_ascii=False), encoding='utf-8')
+            workspace._refresh_status_summary(None)
+            self.assertEqual(workspace.index_chip.text(), text('zh-CN', 'index_ready'))
+            self.assertFalse(states[-1][0])
+            self.assertNotIn('检测当前笔记库的索引状态', workspace.watch_button.toolTip())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+
+    def test_config_workspace_checking_snapshot_falls_back_to_markdown_disk_state(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            (paths.state_dir / 'index_state.json').write_text(json.dumps({
+                'version': 1,
+                'vault_path': str(SAMPLE_ROOT),
+                'completed_at': '2026-03-14T00:00:00Z',
+            }, ensure_ascii=False), encoding='utf-8')
+            workspace._refresh_status_summary({'index_state': 'checking', 'index_ready': False, 'stats': {'files': 0, 'chunks': 0, 'refs': 0}})
+            self.assertEqual(workspace.index_chip.text(), text('zh-CN', 'index_ready'))
+            self.assertNotIn('检测中', workspace.index_chip.text())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_overview_refresh_does_not_change_markdown_index_chip(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._refresh_status_summary({
+                'stats': {'files': 3, 'chunks': 7, 'refs': 1},
+                'index_state': 'ready',
+                'index_ready': True,
+                'watch_allowed': True,
+                'query_allowed': True,
+            })
+            workspace._refresh_extension_overview()
+            self.assertEqual(workspace.index_chip.text(), text('zh-CN', 'index_ready'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_config_workspace_cuda_selection_uses_guidance_dialog_and_preserves_cuda_value(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -489,6 +738,103 @@ class QtUiTests(unittest.TestCase):
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual(loaded.watch_resource_peak_percent, 60)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+
+    def test_config_workspace_runtime_refresh_uses_background_function_worker(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        class _Signal:
+            def __init__(self) -> None:
+                self._callbacks = []
+            def connect(self, callback):
+                self._callbacks.append(callback)
+        class _FakeWorker:
+            def __init__(self, *, fn) -> None:
+                self.fn = fn
+                self.succeeded = _Signal()
+                self.failed = _Signal()
+                self.finished = _Signal()
+                self.started = False
+            def start(self) -> None:
+                self.started = True
+        try:
+            with patch('omniclip_rag.ui_next_qt.config_workspace.FunctionWorker', _FakeWorker):
+                workspace._request_runtime_management_refresh()
+            self.assertIsNotNone(workspace._runtime_refresh_worker)
+            self.assertTrue(workspace._runtime_refresh_worker.started)
+            self.assertFalse(workspace.runtime_refresh_button.isEnabled())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_runtime_chip_uses_cpu_ready_text_when_gpu_is_not_needed(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_current_runtime_repair_context', return_value={
+                'runtime_complete': True,
+                'sentence_transformers_available': True,
+                'gpu_present': False,
+                'runtime_dir': str(paths.shared_root / 'runtime'),
+                'runtime_exists': True,
+                'runtime_missing_items': [],
+            }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_status', side_effect=lambda component_id: {
+                'component_id': component_id,
+                'status': 'ready',
+                'ready': True,
+                'missing_items': [],
+                'installed_count': 1,
+                'total_count': 1,
+                'cleanup_patterns': tuple(),
+            }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_usage', return_value={'disk_usage': '0 GB', 'download_usage': '0 GB'}):
+                workspace._refresh_runtime_management_ui(force_refresh=True)
+            self.assertEqual(workspace.runtime_chip.text(), text('zh-CN', 'runtime_chip_cpu_ready'))
+            self.assertIn('GPU 加速这一项不需要安装', workspace.runtime_status_summary_label.text())
+            self.assertEqual(workspace.runtime_components_table.rowCount(), 3)
+            self.assertEqual(workspace.runtime_components_table.item(2, 2).text(), text('zh-CN', 'runtime_status_not_needed'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_runtime_auto_repair_launches_expected_powershell_command(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        install_script = TEST_ROOT / 'runtime_auto_repair_smoke' / 'InstallRuntime.ps1'
+        install_script.parent.mkdir(parents=True, exist_ok=True)
+        install_script.write_text('Write-Host runtime smoke', encoding='utf-8')
+        try:
+            with patch.object(workspace, '_current_runtime_repair_context', return_value={
+                'install_script': str(install_script),
+                'recommended_profile': 'cuda',
+                'app_dir': str(install_script.parent),
+            }), patch.object(workspace, '_powershell_executable', return_value='powershell.exe'), patch('omniclip_rag.ui_next_qt.config_workspace.subprocess.Popen') as popen_mock:
+                workspace._run_runtime_auto_repair(source='mirror', component='semantic-core')
+            popen_mock.assert_called_once()
+            command = popen_mock.call_args.args[0]
+            self.assertEqual(command[0], 'powershell.exe')
+            self.assertIn('-File', command)
+            self.assertIn(str(install_script), command)
+            self.assertIn('-Profile', command)
+            self.assertIn('cpu', command)
+            self.assertIn('-Source', command)
+            self.assertIn('mirror', command)
+            self.assertIn('-WaitForProcessName', command)
+            self.assertIn('OmniClipRAG', command)
+            self.assertIn('-Component', command)
+            self.assertIn('semantic-core', command)
+            self.assertEqual(popen_mock.call_args.kwargs['cwd'], str(install_script.parent))
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -674,12 +1020,37 @@ class QtUiTests(unittest.TestCase):
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             workspace.log_size_spin.setValue(32)
+            workspace.query_trace_logging_check.setChecked(True)
             workspace._save_log_preferences()
             loaded = load_config(paths)
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual(loaded.log_file_size_mb, 32)
+            self.assertTrue(loaded.query_trace_logging_enabled)
             self.assertIn('32 MB', workspace.log_storage_summary_label.text())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+
+    def test_query_workspace_trace_lines_only_persist_when_enabled(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'query_trace_toggle'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), query_trace_logging_enabled=False)
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        calls: list[tuple[str, bool]] = []
+
+        def capture(message: str, *, persist: bool = True) -> None:
+            calls.append((str(message), bool(persist)))
+
+        workspace._append_log = capture  # type: ignore[method-assign]
+        try:
+            insights = QueryInsights(trace_lines=('查询预期：字面检索 -> 语义检索 -> Reranker',))
+            result = QueryResult(hits=[], context_text='', insights=insights)
+            payload = QueryTaskResult(query_text='我的思维', copied=False, result=result)
+            workspace._on_query_success(payload)
+            assert ('查询预期：字面检索 -> 语义检索 -> Reranker', False) in calls
         finally:
             workspace.deleteLater()
             app.processEvents()

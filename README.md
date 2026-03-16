@@ -4,7 +4,7 @@
 
 **A silent gravity field between your private notes and the universe of AI.**
 
-[![Version](https://img.shields.io/badge/version-v0.2.4-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.3.0-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md)
 
@@ -111,14 +111,15 @@ OmniClip was primarily built for personal use. Therefore, instead of indulging i
 
 ---
 
-## 🔄 V0.2.4 Key Updates
+## 🔄 V0.3.0 Key Updates
 
-`v0.2.4` is a small but practical query-workspace refinement built on top of `v0.2.3`: the goal is to make result review calmer and more legible once a search has already returned.
+`v0.3.0` is a source-milestone release built on top of `v0.2.4`. It is the point where the extension-format subsystem, the new runtime manager, and the Qt-only desktop shell are all merged into the main code line together.
 
-- 🔢 **Results now include a dedicated leftmost index column**: the results table shows an explicit per-row sequence number so you can immediately tell which item you are reading and how far down the result list you are.
-- 🧹 **The query toolbar is cleaner**: `Search and copy` plus `Copy current context` were removed from the top query row to keep the main action focused on search itself.
-- 👀 **Review flow now puts more weight on reading instead of button choice**: the visible query area is simpler, while the result list and detail panes carry the information users actually inspect after retrieval.
-- 📐 **Result table spacing was rebalanced for the new sequence column**: column widths now leave room for row numbering without squeezing the existing title, reason, anchor, and score columns too aggressively.
+- 🧩 **Extension formats became a real isolated subsystem**: PDF now runs through its own dedicated parsing / indexing / query path, while Tika sidecar support, format whitelisting, runtime management, and independent watch states all landed under `omniclip_rag/extensions/`.
+- 🛠️ **Runtime management was rebuilt around components instead of one opaque blob**: the packaged app now has a dedicated Runtime page, automatic/manual repair entry points, pending-update staging, and source-aware official vs mirror install commands.
+- 🧠 **Markdown query RCA now has a real diagnostic spine**: packaged self-check modes, query trace hooks, runtime/live-vs-pending fingerprints, and the ongoing Markdown main-query RCA plan are all in-tree so future debugging no longer depends on chat memory.
+- 🖥️ **The legacy Tk desktop path is gone**: the repository is now Qt-only, which removes an entire class of duplicate UI logic and keeps future fixes focused on the real desktop shell.
+- ⚠️ **This GitHub release is intentionally source-only**: the code for the new subsystem is in, but packaged EXE validation is still being polished, so this milestone publishes code and docs without a Windows binary asset.
 
 ---
 
@@ -176,6 +177,8 @@ Currently, all source code and distribution packages have survived rigorous unit
 - [Changelog](CHANGELOG.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
 - [Runtime Setup](RUNTIME_SETUP.md)
+- [Markdown Query & Runtime RCA Plan](plans/Markdown主查询与Runtime稳定性RCA计划.md)
+- [Extension Format Isolation Plan](plans/扩展格式隔离子系统实施计划.md)
 - [Retrieval Optimization Plan](plans/检索优化计划.md)
 - [Build Performance Plan](plans/建库性能优化计划.md)
 

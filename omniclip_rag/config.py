@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import ctypes
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -21,6 +22,8 @@ WATCH_RESOURCE_PEAK_OPTIONS = (5, 10, 15, 20, 30, 40, 50, 60, 70, 80, 90)
 DEFAULT_LOG_FILE_SIZE_MB = 16
 LOG_FILE_SIZE_MB_MIN = 4
 LOG_FILE_SIZE_MB_MAX = 256
+_INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+_FILE_ATTRIBUTE_DIRECTORY = 0x10
 
 
 @dataclass(slots=True)
@@ -65,6 +68,7 @@ class AppConfig:
     build_resource_profile: str = "balanced"
     watch_resource_peak_percent: int = 15
     log_file_size_mb: int = DEFAULT_LOG_FILE_SIZE_MB
+    query_trace_logging_enabled: bool = False
     vector_local_files_only: bool = False
     reranker_enabled: bool = False
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
@@ -220,7 +224,7 @@ def _create_data_paths(global_root: Path, vault_path: str | Path | None = None) 
     logs_dir = shared_root / "logs"
     cache_dir = shared_root / "cache"
     for directory in (global_root, shared_root, workspaces_dir, workspace_root, state_dir, exports_dir, logs_dir, cache_dir):
-        directory.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(directory)
 
     _migrate_legacy_workspace_data(workspace_root, shared_root)
 
@@ -316,3 +320,32 @@ def _migrate_legacy_workspace_data(workspace_root: Path, shared_root: Path) -> N
             legacy_dir.rmdir()
         except OSError:
             pass
+
+
+def _ensure_directory(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return
+    except OSError as exc:
+        if _win_directory_exists(path):
+            return
+        raise PermissionError(f"无法访问或创建数据目录：{path}") from exc
+
+
+def _win_directory_exists(path: Path) -> bool:
+    candidate = str(path)
+    if not candidate:
+        return False
+    try:
+        attrs = ctypes.windll.kernel32.GetFileAttributesW(candidate)
+    except Exception:
+        try:
+            return path.exists() and path.is_dir()
+        except OSError:
+            return False
+    if attrs == _INVALID_FILE_ATTRIBUTES:
+        try:
+            return path.exists() and path.is_dir()
+        except OSError:
+            return False
+    return bool(attrs & _FILE_ATTRIBUTE_DIRECTORY)
