@@ -14,7 +14,7 @@ from omniclip_rag.extensions.runtimes.tika_runtime import (
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_ROOT = ROOT / '.tmp' / 'test_tika_runtime'
-SAMPLE_ROOT = ROOT / 'logseq笔记样本'
+SAMPLE_ROOT = ROOT / '笔记样本'
 
 
 class _FakeProcess:

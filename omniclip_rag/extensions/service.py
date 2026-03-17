@@ -42,6 +42,11 @@ def _enabled_tika_suffixes(enabled_formats: set[str]) -> set[str]:
     return parser.enabled_tika_suffixes(enabled_formats)
 
 
+def _build_tika_suffix_matcher(enabled_formats: set[str]):
+    parser = import_module('omniclip_rag.extensions.parsers.tika')
+    return parser.build_tika_suffix_matcher(enabled_formats)
+
+
 def _parse_tika_file(source_root: Path, absolute_path: Path, xhtml: str, *, format_id: str):
     parser = import_module('omniclip_rag.extensions.parsers.tika')
     return parser.parse_tika_file(source_root, absolute_path, xhtml, format_id=format_id)
@@ -1246,24 +1251,32 @@ class TikaExtensionService:
         return _unique_paths(selected), _unique_paths(missing)
 
     def _enabled_tika_formats(self) -> list[str]:
-        return [item.format_id for item in self._state.tika_config.selected_formats if item.enabled and item.tier != TikaFormatSupportTier.POOR]
+        return [item.format_id for item in self._state.tika_config.selected_formats if item.enabled]
 
     def _iter_tika_files(self, source_dirs: list[Path], enabled_formats: list[str]):
-        suffixes = _enabled_tika_suffixes(enabled_formats)
-        if not suffixes:
+        matcher = _build_tika_suffix_matcher(set(enabled_formats))
+        if not matcher:
             return
         seen: set[str] = set()
-        suffix_set = {item.lower() for item in suffixes}
         for source_root in source_dirs:
             for file_path in sorted(source_root.rglob('*')):
-                if not file_path.is_file() or file_path.suffix.lower() not in suffix_set:
+                if not file_path.is_file():
+                    continue
+                last_suffix = file_path.suffix.lower()
+                candidates = matcher.get(last_suffix)
+                if not candidates:
+                    continue
+                name_lower = file_path.name.lower()
+                format_id = ''
+                for candidate_id, suffix_pattern in candidates:
+                    if name_lower.endswith(suffix_pattern):
+                        format_id = candidate_id
+                        break
+                if not format_id:
                     continue
                 resolved_path = file_path.resolve()
                 resolved = str(resolved_path)
                 if resolved in seen:
-                    continue
-                format_id = _detect_tika_format(resolved_path)
-                if format_id not in enabled_formats:
                     continue
                 seen.add(resolved)
                 yield source_root, resolved_path, format_id
@@ -1296,7 +1309,19 @@ class TikaExtensionService:
 
     def _decorate_tika_hit(self, hit: SearchHit) -> SearchHit:
         source_name = Path(hit.source_path).name or Path(hit.source_path).stem or 'Tika'
-        format_id = _detect_tika_format(Path(hit.source_path)) or Path(hit.source_path).suffix.lstrip('.').lower() or 'tika'
+        enabled_formats = self._enabled_tika_formats()
+        format_id = ''
+        if enabled_formats:
+            matcher = _build_tika_suffix_matcher(set(enabled_formats))
+            candidates = matcher.get(Path(hit.source_path).suffix.lower())
+            if candidates:
+                name_lower = Path(hit.source_path).name.lower()
+                for candidate_id, suffix_pattern in candidates:
+                    if name_lower.endswith(suffix_pattern):
+                        format_id = candidate_id
+                        break
+        if not format_id:
+            format_id = Path(hit.source_path).suffix.lstrip('.').lower() or 'tika'
         format_label = format_id.upper() if format_id else 'Tika'
         source_label = f'{format_label}(Tika) · {source_name}'
         hit.source_family = 'tika'

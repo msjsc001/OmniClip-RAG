@@ -19,6 +19,8 @@ The project already includes:
 - a SQLite metadata authority,
 - `FTS5 + LIKE + structure scoring` candidate retrieval,
 - `LanceDB + bge-m3` vector retrieval,
+- an isolated extension-format subsystem for PDF and Tika-backed formats,
+- a componentized Runtime sidecar manager for packaged builds,
 - a desktop GUI workflow,
 - a CLI workflow for debugging,
 - local model bootstrap,
@@ -134,6 +136,7 @@ Why: users can accidentally point the app at a home directory, browser profile, 
 - `omniclip_rag.preflight`: disk estimation
 - `omniclip_rag.vector_index`: embeddings and LanceDB
 - `omniclip_rag.service`: indexing, querying, watching, cleanup
+- `omniclip_rag.extensions`: isolated extension-format runtimes, registries, parsers, and build/query services
 - `omniclip_rag.gui`: desktop interaction layer
 - `omniclip_rag.clipboard`: clipboard handoff
 
@@ -145,6 +148,9 @@ Current validation includes:
 - successful `bge-m3` warmup with `1024`-dimensional embeddings,
 - successful bootstrap / index / query / watch flows,
 - successful GUI startup and shutdown,
+- successful Runtime shared-root and legacy-runtime reuse checks,
+- successful Tika packaged fallback-catalog checks,
+- `232` passing automated tests on the current stabilization branch,
 - successful Windows EXE packaging.
 
 ## Intentional Tradeoffs In The Current Mainline
@@ -172,10 +178,10 @@ It does **not** yet try to ship everything at once.
 
 ## Next Priorities
 
-1. add reranker support,
-2. add tray mode and global hotkeys,
-3. add richer settings panels,
-4. reduce model and package footprint further.
+1. finish the remaining GPU Runtime truthfulness and execution-verification UX,
+2. finish the extension source-directory build UX and stage-aware progress surfacing,
+3. continue tightening packaged startup behavior and footprint,
+4. keep hardening retrieval quality without regressing the now-stabilized packaged flow.
 
 ### 9. Desktop UX must be newcomer-first
 
@@ -219,9 +225,39 @@ Current asset policy:
 Why: the desktop app, taskbar icon, and packaged EXE must present a consistent identity without adding heavy image-tool dependencies.
 
 ### 12. Global shared data and per-vault workspace data must be separated explicitly
-### 13. Lean packaged builds must discover external runtime installs explicitly
 
-### 14. Late-stage build optimizations are independent performance tracks
+Current data split:
+
+- `%APPDATA%\OmniClip RAG\shared\` keeps app-level shared material such as logs, shared Runtime payloads, and other cross-vault assets,
+- per-vault workspace data remains isolated in vault-scoped data roots for indexes, watch state, and retrieval stores,
+- user notes themselves remain outside both of those trees.
+
+Why: shared Runtime reuse and clean packaged upgrades only work when cross-vault shared assets are not mixed into per-vault index directories.
+
+### 13. Runtime is a shared sidecar, not an EXE-folder singleton
+
+Current Runtime policy:
+
+- the public Windows package stays lean and still does not bundle `torch` or `sentence-transformers`,
+- the preferred install / repair target for packaged builds is now `%APPDATA%\OmniClip RAG\shared\runtime`,
+- packaged startup may still reuse a healthy legacy Runtime from the current EXE folder, a manually moved `runtime/`, or a sibling `OmniClipRAG-v*/runtime` directory,
+- new component registrations prefer relocatable relative paths, while stale absolute-path manifests are salvaged when possible,
+- packaged startup restores the external Runtime search paths before probing `torch` or `sentence_transformers`.
+
+Why: Runtime should survive packaged version drift. A user-installed Runtime is a sidecar capability layer, not disposable baggage tied to one exact EXE folder name.
+
+### 14. Tika format visibility must not depend on local Tika installation
+
+Current Tika picker policy:
+
+- if an installed Tika server JAR is available, parse its format catalog first,
+- otherwise fall back to the packaged suffix catalog bundled inside the app,
+- curated defaults are only the last fallback,
+- `pdf` remains permanently excluded from the Tika picker because PDF follows its own dedicated parse/index/query chain.
+
+Why: the user must be able to understand the Tika format universe before committing to a Runtime install. Format visibility is product UX, not a side effect of a successfully installed sidecar.
+
+### 15. Late-stage build optimizations are independent performance tracks
 
 Current build-performance work is intentionally split into two groups:
 
@@ -240,38 +276,15 @@ The remaining items such as deeper LanceDB profiling and narrower late-tail spec
 
 Why: this keeps the product boundary clear. Not shipping those later-stage optimizations must never be interpreted as "full rebuild is broken" or "daily search quality depends on them". They only affect how far the product pushes the throughput ceiling on huge full rebuilds.
 
-
-Current runtime policy:
-
-- the public Windows package stays lean and does not bundle `torch` or `sentence-transformers`,
-- optional local runtimes are installed into `dist/OmniClipRAG/runtime/`,
-- the runtime installer writes `_runtime_bootstrap.json` with the Python stdlib and DLL locations used during installation,
-- packaged startup reads that marker and restores the search paths before probing `torch` or `sentence_transformers`.
-
-Why: a lean PyInstaller build cannot assume that every stdlib module or DLL needed by an externally installed runtime is already discoverable inside the frozen app environment.
-
-### 15. Rebuilds must preserve an existing local runtime install
+### 16. Lean packaged builds must preserve user-installed sidecars
 
 Current packaging rule:
 
-- rebuilding the EXE must not wipe a user's already-downloaded `dist/OmniClipRAG/runtime/` directory,
-- source control still ignores `runtime/`, `dist/`, and other large local artifacts,
-- GitHub releases may ship a lightweight app package, but the heavyweight runtime remains a user-installed optional layer.
+- EXE builds and GitHub releases should keep Runtime payloads, Tika JARs, JREs, model caches, and user data outside the bundled app,
+- source control continues to ignore `runtime/`, `dist/`, and other large local artifacts,
+- a new packaged version should prefer reusing a healthy existing Runtime rather than forcing a multi-GB reinstall.
 
-Why: deleting a multi-gigabyte local runtime on every rebuild is wasteful and makes packaged testing far slower than necessary.
-
-
-Current storage policy:
-
-- the user still chooses one global data root,
-- the saved config stays at that global root,
-- common data now lives under `shared/`,
-- each vault gets a deterministic workspace under `workspaces/<workspace-id>/`,
-- the vault workspace owns only vault-specific state such as SQLite, LanceDB state, and exported context packs,
-- the shared area owns only cross-vault data such as model cache and general logs,
-- legacy per-workspace cache/log folders are migrated forward into the shared area automatically.
-
-Why: one shared data directory is convenient, but shared data and vault-local data should not be mixed. The product stays easier to manage when common assets are centralized and vault-specific assets remain isolated.
+Why: the product promise is "lean shell plus durable local sidecars," not "every upgrade is a full reinstall."
 
 ### 13. Long-running desktop actions must expose visible progress, not silent waiting
 
@@ -1245,7 +1258,7 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - `v0.3.0` 选择以源码里程碑形式发布，不附带 EXE 资产。Why：扩展格式子系统与 Runtime/Markdown 查询链已经大规模并入主线，但打包体验仍在继续收尾，先发源码与文档更诚实。
 - 这次版本正式把三条长期并行的主线合并入仓库：`extensions/` 扩展格式隔离子系统、组件化 Runtime 管理链、以及 Qt-only 桌面主链。Why：后续所有桌面修复都必须围绕这三条真实主线，不再回到历史分叉。
 - 旧 Tk UI 代码已彻底从仓库删除，未来只维护 Qt 桌面链。Why：双套桌面实现已经被证明会放大行为漂移与排错成本，继续保留没有工程价值。
-- 仓库新增最小公开 `logseq笔记样本/` 合成样本库，用于 parser / preflight / service / Qt UI 回归，不包含个人数据。Why：之前测试大量依赖本地私有样本，导致源码发布前无法在干净环境中稳定自测。
+- 仓库新增最小公开 `笔记样本/` 合成样本库，用于 parser / preflight / service / Qt UI 回归，不包含个人数据。Why：之前测试大量依赖本地私有样本，导致源码发布前无法在干净环境中稳定自测。
 - 这次发布前的回归采用“分组全绿”策略，而不是依赖一条超长 discover 命令。已验证通过的分组包括：扩展链、parser/preflight、service/vector、Qt UI、runtime/launcher/desktop、自检脚本与纯后端工具链。Why：当前环境下单条超长全量命令容易超时，分组结果更可审计。 
 
 ## 2026-03-16 GPU Runtime 与扩展建库 UX 新阶段

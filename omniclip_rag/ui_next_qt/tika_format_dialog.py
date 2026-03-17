@@ -51,42 +51,47 @@ class TikaFormatDialog(QtWidgets.QDialog):
         return text(self._language_code, key, **kwargs)
 
     def _populate_tree(self) -> None:
-        self.tree.clear()
-        groups = [
-            (TikaFormatSupportTier.RECOMMENDED, self._tr('extensions_tika_group_recommended')),
-            (TikaFormatSupportTier.UNKNOWN, self._tr('extensions_tika_group_unknown')),
-            (TikaFormatSupportTier.POOR, self._tr('extensions_tika_group_poor')),
-        ]
-        grouped: dict[TikaFormatSupportTier, QtWidgets.QTreeWidgetItem] = {}
-        for tier, label in groups:
-            item = QtWidgets.QTreeWidgetItem([label])
-            font = item.font(0)
-            font.setBold(True)
-            item.setFont(0, font)
-            grouped[tier] = item
-            self.tree.addTopLevelItem(item)
-        for selection in self._selections:
-            parent = grouped[selection.tier]
-            text_value = selection.display_name
-            if selection.tier == TikaFormatSupportTier.UNKNOWN:
-                text_value = f"{text_value} {self._tr('extensions_tika_item_unknown_suffix')}"
-            elif selection.tier == TikaFormatSupportTier.POOR:
-                text_value = f"{text_value} {self._tr('extensions_tika_item_poor_suffix')}"
-            item = QtWidgets.QTreeWidgetItem([text_value])
-            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, selection.format_id)
-            if selection.tier == TikaFormatSupportTier.POOR:
-                item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
-                item.setForeground(0, QtGui.QBrush(QtGui.QColor('#8b8f99')))
-            else:
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self.tree.clear()
+            groups = [
+                (TikaFormatSupportTier.RECOMMENDED, self._tr('extensions_tika_group_recommended')),
+                (TikaFormatSupportTier.UNKNOWN, self._tr('extensions_tika_group_unknown')),
+                (TikaFormatSupportTier.UNTESTED, self._tr('extensions_tika_group_untested')),
+                (TikaFormatSupportTier.POOR, self._tr('extensions_tika_group_poor')),
+            ]
+            grouped: dict[TikaFormatSupportTier, QtWidgets.QTreeWidgetItem] = {}
+            for tier, label in groups:
+                item = QtWidgets.QTreeWidgetItem([label])
+                font = item.font(0)
+                font.setBold(True)
+                item.setFont(0, font)
+                grouped[tier] = item
+                self.tree.addTopLevelItem(item)
+            for selection in self._selections:
+                parent = grouped[selection.tier]
+                text_value = selection.display_name
+                if selection.tier == TikaFormatSupportTier.UNKNOWN:
+                    text_value = f"{text_value} {self._tr('extensions_tika_item_unknown_suffix')}"
+                elif selection.tier == TikaFormatSupportTier.UNTESTED:
+                    text_value = f"{text_value} {self._tr('extensions_tika_item_untested_suffix')}"
+                elif selection.tier == TikaFormatSupportTier.POOR:
+                    text_value = f"{text_value} {self._tr('extensions_tika_item_poor_suffix')}"
+                item = QtWidgets.QTreeWidgetItem([text_value])
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, selection.format_id)
                 item.setFlags(
                     QtCore.Qt.ItemFlag.ItemIsEnabled
                     | QtCore.Qt.ItemFlag.ItemIsSelectable
                     | QtCore.Qt.ItemFlag.ItemIsUserCheckable
                 )
                 item.setCheckState(0, QtCore.Qt.CheckState.Checked if selection.enabled else QtCore.Qt.CheckState.Unchecked)
-            parent.addChild(item)
-        self.tree.expandAll()
-        self._apply_search(self.search_edit.text())
+                if selection.tier == TikaFormatSupportTier.POOR:
+                    item.setForeground(0, QtGui.QBrush(QtGui.QColor('#8b8f99')))
+                parent.addChild(item)
+            self.tree.expandAll()
+            self._apply_search(self.search_edit.text())
+        finally:
+            self.tree.setUpdatesEnabled(True)
 
     def _apply_search(self, raw_query: str) -> None:
         query = str(raw_query or '').strip().lower()
@@ -114,10 +119,7 @@ class TikaFormatDialog(QtWidgets.QDialog):
                 selection = selection_by_id.get(format_id)
                 if selection is None:
                     continue
-                if selection.tier == TikaFormatSupportTier.POOR:
-                    selection.enabled = False
-                else:
-                    selection.enabled = child.checkState(0) == QtCore.Qt.CheckState.Checked
+                selection.enabled = child.checkState(0) == QtCore.Qt.CheckState.Checked
                 selection_by_id[format_id] = selection
         return [selection_by_id[item.format_id] for item in self._selections if item.format_id in selection_by_id]
 

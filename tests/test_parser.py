@@ -5,12 +5,12 @@ from omniclip_rag.parser import parse_markdown_file
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SAMPLE_ROOT = ROOT / "logseq笔记样本"
+SAMPLE_ROOT = ROOT / "笔记样本"
 
 
 class ParserTests(unittest.TestCase):
     def test_logseq_sample_extracts_blocks_and_refs(self) -> None:
-        parsed = parse_markdown_file(SAMPLE_ROOT, SAMPLE_ROOT / "pages" / "Logseq笔记样本.md")
+        parsed = parse_markdown_file(SAMPLE_ROOT, SAMPLE_ROOT / "pages" / "笔记样本.md")
         self.assertEqual(parsed.kind, "logseq")
         self.assertTrue(parsed.page_properties)
         block_ids = {chunk.block_id for chunk in parsed.chunks if chunk.block_id}

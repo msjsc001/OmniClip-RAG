@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## V0.3.2 - 2026-03-17
+
+### Added
+
+- Added a bundled Tika suffix catalog fallback so the `Select Tika formats` dialog can expose a much larger format set even before any local Tika JAR is installed.
+- Added explicit active-vs-preferred Runtime path surfacing in the Qt Runtime page, making it clear which runtime is currently in use and where future repairs/downloads will be installed.
+- Added [RELEASE_NOTES_v0.3.2](releases/RELEASE_NOTES_v0.3.2.md) for the cross-version Runtime stabilization and Tika catalog completion release.
+- Added the in-repo execution record [Runtime跨版本稳定化与Tika全量格式闭环计划](plans/Runtime跨版本稳定化与Tika全量格式闭环计划.md) so this packaging/runtime/Tika closure work can be resumed without chat history.
+
+### Changed
+
+- Changed the packaged Runtime install target so frozen builds now default to the shared AppData runtime root under `%APPDATA%\\OmniClip RAG\\shared\\runtime` instead of writing only to the current EXE folder.
+- Changed Runtime discovery so packaged builds can reuse valid legacy runtimes from the current version folder, a moved runtime folder, or sibling `OmniClipRAG-v*/runtime` directories before asking users to download again.
+- Changed `_runtime_components.json` handling so new installs prefer relocatable relative paths while old absolute-path manifests remain backward compatible.
+- Changed Tika catalog construction to use a strict fallback chain of `installed jar -> bundled suffix list -> curated defaults`, while continuing to exclude PDF from the Tika picker.
+- Changed the visible app/package version metadata to `v0.3.2`.
+
+### Fixed
+
+- Fixed the cross-version Runtime breakage where moving `v0.3.0/runtime` into a newer packaged folder could still make healthy components appear missing because of stale absolute registry paths.
+- Fixed component discovery for versioned Runtime payload directories such as `components/semantic-core-<timestamp>`, so the newest valid payload is discovered automatically.
+- Fixed the Tika format picker regression where users without a locally installed Tika JAR still saw only the old tiny curated list instead of the larger catalog.
+- Fixed the packaged build closure so the Tika fallback resource is bundled into the app, while Runtime payloads, Tika JARs, and JRE assets still stay outside the EXE package.
+
 ## V0.3.0 - 2026-03-16
 
 ### Added

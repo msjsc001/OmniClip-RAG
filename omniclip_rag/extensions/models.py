@@ -35,6 +35,7 @@ class TikaFormatSupportTier(str, Enum):
 
     RECOMMENDED = 'recommended'
     UNKNOWN = 'unknown'
+    UNTESTED = 'untested'
     POOR = 'poor'
 
 

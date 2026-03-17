@@ -2,46 +2,76 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Iterable
 
 from ...models import ChunkRecord, ParsedFile
 from ..normalizers.tika_output import normalize_tika_xhtml
 
-TIKA_FORMAT_SUFFIXES: dict[str, tuple[str, ...]] = {
-    'docx': ('.docx',),
-    'doc': ('.doc',),
-    'pptx': ('.pptx',),
-    'ppt': ('.ppt',),
+_FORMAT_SUFFIX_ALIASES: dict[str, tuple[str, ...]] = {
+    # Curated aliases that collapse multiple common suffixes into one UI choice.
     'html': ('.html', '.htm'),
-    'xml': ('.xml',),
-    'txt': ('.txt',),
-    'rtf': ('.rtf',),
-    'epub': ('.epub',),
-    'odt': ('.odt',),
     'mhtml': ('.mhtml', '.mht'),
-    'eml': ('.eml',),
-    'msg': ('.msg',),
-    'xlsx': ('.xlsx',),
-    'xls': ('.xls',),
 }
 
 
 def detect_tika_format(path: Path) -> str:
-    """Map a file suffix onto the enabled Tika catalog key."""
+    """Best-effort suffix mapping for display labeling.
 
-    suffix = path.suffix.lower()
-    for format_id, suffixes in TIKA_FORMAT_SUFFIXES.items():
-        if suffix in suffixes:
+    For multi-part suffixes (for example .tar.gz) this function may return the
+    last segment only. The build/query pipeline should prefer the enabled-format
+    matcher when an exact format id is required.
+    """
+
+    name_lower = path.name.lower()
+    for format_id, suffixes in _FORMAT_SUFFIX_ALIASES.items():
+        if any(name_lower.endswith(suffix) for suffix in suffixes):
             return format_id
-    return ''
+    return path.suffix.lstrip('.').lower()
 
 
-def enabled_tika_suffixes(format_ids: list[str]) -> tuple[str, ...]:
+def suffix_patterns_for_format(format_id: str) -> tuple[str, ...]:
+    """Return the suffix patterns (lowercase, with leading dot) for one format id."""
+
+    normalized = str(format_id or '').strip().lower().lstrip('.')
+    if not normalized:
+        return ()
+    aliases = _FORMAT_SUFFIX_ALIASES.get(normalized)
+    if aliases:
+        return tuple(dict.fromkeys([item.lower() for item in aliases if str(item).startswith('.')]))
+    return (f'.{normalized}',)
+
+
+def enabled_tika_suffixes(format_ids: Iterable[str]) -> tuple[str, ...]:
     """Return the flattened suffix whitelist for enabled Tika formats."""
 
     values: list[str] = []
     for format_id in format_ids:
-        values.extend(TIKA_FORMAT_SUFFIXES.get(format_id, ()))
+        values.extend(suffix_patterns_for_format(str(format_id)))
     return tuple(dict.fromkeys(values))
+
+
+def build_tika_suffix_matcher(enabled_formats: Iterable[str]) -> dict[str, list[tuple[str, str]]]:
+    """Build a fast suffix matcher for enabled formats.
+
+    Returns a dict keyed by the last suffix segment (e.g. ".gz") that maps to a
+    list of (format_id, suffix_pattern) pairs. Each bucket is sorted by suffix
+    length descending so multi-part suffixes win (e.g. ".tar.gz" before ".gz").
+    """
+
+    buckets: dict[str, list[tuple[str, str]]] = {}
+    for format_id_raw in enabled_formats:
+        format_id = str(format_id_raw or '').strip().lower()
+        if not format_id:
+            continue
+        for suffix in suffix_patterns_for_format(format_id):
+            suffix_lower = str(suffix).lower()
+            if not suffix_lower.startswith('.'):
+                continue
+            last_segment = f".{suffix_lower.rsplit('.', 1)[-1]}" if '.' in suffix_lower[1:] else suffix_lower
+            buckets.setdefault(last_segment, []).append((format_id, suffix_lower))
+    for items in buckets.values():
+        items.sort(key=lambda pair: len(pair[1]), reverse=True)
+    return buckets
 
 
 def parse_tika_file(source_root: Path, absolute_path: Path, xhtml: str, *, format_id: str) -> ParsedFile:

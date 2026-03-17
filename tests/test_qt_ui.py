@@ -30,7 +30,7 @@ from omniclip_rag.ui_next_qt.workers import QueryTaskResult
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_ROOT = ROOT / '.tmp' / 'test_qt_ui'
-SAMPLE_ROOT = ROOT / 'logseq笔记样本'
+SAMPLE_ROOT = ROOT / '笔记样本'
 
 
 def get_app() -> QtWidgets.QApplication:
@@ -330,6 +330,7 @@ class QtUiTests(unittest.TestCase):
             self.assertEqual(workspace.runtime_open_dir_button.text(), text('zh-CN', 'runtime_open_dir'))
             self.assertEqual(workspace.runtime_components_table.rowCount(), 3)
             self.assertTrue(hasattr(workspace, 'runtime_chip'))
+            self.assertTrue(hasattr(workspace, 'runtime_install_target_label'))
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -883,6 +884,68 @@ class QtUiTests(unittest.TestCase):
             self.assertEqual(state['install_state'], 'ready')
             self.assertEqual(state['probe_state'], 'ready')
             self.assertEqual(state['execution_state'], 'verified')
+            self.assertEqual(state['missing_items'], [])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_gpu_runtime_row_accepts_cuda_build_even_if_registry_profile_cpu(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        runtime_dir = Path(paths.shared_root) / 'runtime'
+        runtime_state = {
+            'runtime_dir': runtime_dir,
+            'runtime_exists': True,
+            'runtime_has_content': True,
+            'runtime_pending': False,
+            'runtime_pending_components': [],
+            'runtime_complete': True,
+            'runtime_missing_items': [],
+            'preferred_runtime_dir': runtime_dir,
+        }
+        # Simulate an environment where the actual torch build supports CUDA, but the
+        # runtime registry "profile" is stale and still reports cpu.
+        workspace._acceleration_payload = {
+            'gpu_present': True,
+            'gpu_name': 'NVIDIA RTX',
+            'cuda_available': True,
+            'torch_available': True,
+            'torch_version': '2.10.0+cu128',
+            'torch_cuda_build': '12.8',
+            'sentence_transformers_available': True,
+            'gpu_probe_state': 'verified',
+            'gpu_probe_verified': True,
+            'gpu_probe_reason': '',
+            'gpu_probe_error_message': '',
+            'gpu_execution_state': 'verified',
+            'gpu_execution_verified': True,
+            'gpu_execution_reason': '',
+            'gpu_execution_error_message': '',
+            'gpu_execution_actual_device': 'cuda:0',
+            'gpu_execution_reranker_actual_device': 'cuda:0',
+        }
+        try:
+            with patch('omniclip_rag.vector_index.inspect_runtime_environment', return_value=runtime_state), \
+                 patch('omniclip_rag.vector_index.resolve_vector_device', return_value='cuda'), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_status', return_value={
+                     'component_id': 'semantic-core',
+                     'status': 'ready',
+                     'ready': True,
+                     'missing_items': [],
+                     'installed_count': 1,
+                     'total_count': 1,
+                     'cleanup_patterns': tuple(),
+                     'profile': 'cpu',
+                 }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_usage', return_value={'disk_usage': '0 GB', 'download_usage': '0 GB'}):
+                context = workspace._current_runtime_repair_context(force_refresh=False)
+                self.assertEqual(context.get('torch_cuda_build'), '12.8')
+                self.assertEqual(context.get('gpu_execution_state'), 'verified')
+                state = workspace._runtime_component_state('gpu-acceleration', context=context)
+            self.assertTrue(state['ready'])
+            self.assertEqual(state['status'], 'ready')
             self.assertEqual(state['missing_items'], [])
         finally:
             workspace.deleteLater()

@@ -38,9 +38,6 @@ function Get-PreferredRuntimeRoot {
         }
         return $override
     }
-    if ($appDir) {
-        return (Join-Path $appDir 'runtime')
-    }
     $defaultRoot = Get-DefaultDataRoot
     $configPath = Join-Path $defaultRoot 'config.json'
     $dataRoot = $defaultRoot
@@ -540,10 +537,11 @@ from pathlib import Path
 
 registry_path = Path(sys.argv[1]).resolve()
 component_names = [name.strip() for name in sys.argv[2].split(',') if name.strip()]
-payload_target = str(Path(sys.argv[3]).resolve())
-profile_name = sys.argv[4].strip()
-source_name = sys.argv[5].strip()
-created_at = sys.argv[6].strip()
+runtime_root = Path(sys.argv[3]).resolve()
+payload_target_path = Path(sys.argv[4]).resolve()
+profile_name = sys.argv[5].strip()
+source_name = sys.argv[6].strip()
+created_at = sys.argv[7].strip()
 registry = {}
 if registry_path.exists():
     try:
@@ -554,6 +552,10 @@ if registry_path.exists():
         registry = {}
 if 'all' in registry and 'all' not in component_names:
     registry.pop('all', None)
+try:
+    payload_target = str(payload_target_path.relative_to(runtime_root))
+except Exception:
+    payload_target = str(payload_target_path)
 for component_name in component_names:
     registry[component_name] = {
         'path': payload_target,
@@ -563,7 +565,7 @@ for component_name in component_names:
         'validated': True,
     }
 registry_path.write_text(json.dumps(registry, ensure_ascii=True, indent=2), encoding='utf-8')
-"@ | & $pythonExe @pythonPrefix -I - $componentRegistryPath $(if ($normalizedRequestedComponent -eq 'all') { 'semantic-core,vector-store' } else { $normalizedRequestedComponent }) $payloadTarget $effectiveProfile $Source (Get-Date).ToString('o')
+"@ | & $pythonExe @pythonPrefix -I - $componentRegistryPath $(if ($normalizedRequestedComponent -eq 'all') { 'semantic-core,vector-store' } else { $normalizedRequestedComponent }) $target $payloadTarget $effectiveProfile $Source (Get-Date).ToString('o')
 if ($LASTEXITCODE -ne 0) { throw "Runtime registry update failed." }
 
 Write-Host "Runtime validation succeeded."

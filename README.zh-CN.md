@@ -4,7 +4,7 @@
 
 **方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。**
 
-[![Version](https://img.shields.io/badge/version-v0.3.0-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.3.2-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md)
 
@@ -12,7 +12,7 @@
 
 <br/>
 
- **它是什么？** 它是本地 Markdown 语义搜索软件、本地 RAG 知识库。
+ **它是什么？** 它是本地 Markdown 语义搜索软件、本地 RAG 知识库。（V0.3.2版**已经支持1290种格式的语义检索**）
   **怎么用？** 你只需要打开程序输入你的 Markdown 笔记路径再点建库，就能搭建好你的本地 RAG 知识库，建库后你就可以用它来语义搜索你的笔记，搜索的内容你可以复制发给任意 AI 进行深度研讨，也可以供自己深度研读。 
   **好处是什么？** 无须把你的任何资料上传，也不会被任何软件捆绑，它无须任何复杂的配置，搭建，且它具备热更新能力，新笔记写入会自动进入RAG库！新笔记也可以是你和AI的历史对话整理，这样变相的为AI提供了永久记忆。
 
@@ -100,7 +100,9 @@
 - **桌面 GUI 闭环**：配置、预检、模型预热、建库、查询、热监听、分类清理等完整可视控制流程。
 - **原生双引擎极客解析**：支持普通 Markdown + 深度语法兼容 Logseq （含页面属性、块属性、`id:: UUID`、块引用与块完整树层级潜入嵌入）。
 - **混合检索黑科技**：非普通通配搜索；它使用了重底层的 `SQLite + FTS5 + 结构化多梯次打分 + LanceDB` 进行极速深度联合匹配。
+- **扩展格式强隔离**：Markdown、PDF 与 Tika 扩展格式各自使用独立索引与状态域，再通过统一 Broker 做混合查询与来源标识回传。
 - **多库强物理切分**：多笔记库不仅能通用底模节约算力载荷，其相互独立的数据域、索引与向量库更受严格围栏管控。
+- **Runtime 组件化外挂**：发布版继续保持轻量，但现在已经有独立 Runtime 页、共享 AppData 安装根、legacy runtime 复用、待应用更新与组件级修复/清理闭环。
 - **防崩溃与生命线存证**：全量建库附带主动中断机制；内存降级控制机制自动拦截由超大 Markdown 异常体导致的主进程死锁，还能执行断点续传。
 - **查询防护与防泛泛噪**：包含智能拦截单字匹配机制防止全宇宙关联；并随同搭载多级排错推荐（针对显存给出候选数量），以及集成了 FTS、LIKE 及多维度语义和长句覆盖度评定的严酷工程评分(`0-100`)。
 
@@ -111,15 +113,15 @@
 
 ---
 
-## 🔄 V0.3.0 重点更新视角
+## 🔄 V0.3.2 重点更新
 
-`v0.3.0` 是建立在 `v0.2.4` 之上的源码里程碑版本。这一版真正把“扩展格式隔离子系统”、“Runtime 组件化管理”和“Qt-only 主桌面链路”全部并入主线代码。
+`v0.3.2` 是在 `v0.3.0` 基础上的一次交付闭环版：重点不是再堆新功能，而是把“扩展格式”和“Runtime 组件化”真正修到构建版可长期复用、可解释、可继续演进。
 
-- 🧩 **扩展格式第一次正式入主线**：PDF 走独立解析/索引/查询链，Tika 走独立 sidecar 与白名单格式管理；状态、目录、建库、监听都与 Markdown 主库隔离。
-- 🛠️ **Runtime 不再是一整团黑盒**：现在有独立的 Runtime 页面、组件级修复/清理、待应用更新暂存区，以及官方源/镜像源双路径的自动与手动修复方式。
-- 🧠 **Markdown 主查询终于有了真正的 RCA 骨架**：构建版自检、查询 trace、live/pending/runtime 指纹、以及 Markdown 主查询与 Runtime 稳定性 RCA 计划，已经固化进仓库，不再依赖聊天上下文续命。
-- 🖥️ **旧 Tk 桌面界面已彻底移除**：仓库现在只保留 Qt 主桌面链，后续修复与演进不再被双套 UI 拖慢。
-- ⚠️ **这次 GitHub Release 只发源码不发 EXE**：因为扩展格式与 Runtime 相关的打包体验还在继续收尾，所以这次版本只发布代码、文档与发布说明，不上传 Windows 二进制包。
+- 🧩 **扩展格式主链进一步闭环**：PDF 继续走独立解析/索引/查询链；Tika 则在 sidecar 保持隔离的前提下，补齐了 `已安装 JAR -> 内置后缀清单 -> curated 默认集` 的全量目录回退逻辑。
+- 🛠️ **Runtime 不再默认绑死在当前 EXE 目录**：发布版后续的下载/修复目标现在收口到 `%APPDATA%\\OmniClip RAG\\shared\\runtime`，同时仍会自动复用旧版本目录或手动搬迁过来的健康 runtime。
+- 📦 **Runtime 组件注册可搬迁**：新安装优先写相对路径；旧的绝对路径注册表也会自动回捞。像 `semantic-core-时间戳` 这样的版本化 payload 目录，也能自动识别最新有效版本。
+- 👀 **Runtime 页开始讲清楚“现在在用什么、以后装到哪里”**：界面会区分 active runtime 与默认安装/修复目标，避免继续把 legacy runtime 复用、共享 Runtime 安装和当前使用状态混成一团。
+- 🌐 **Tika 格式选择不再要求用户先安装 Tika 才能看全**：即使本机还没装 Tika JAR，选择窗也能直接展示更大的格式目录；`pdf` 仍永久排除，推荐/未知/未测试/兼容性差的分层提示也继续保留。
 
 ---
 
@@ -142,7 +144,7 @@ flowchart LR
 默认数据主要分配储在用户的 `%APPDATA%\OmniClip RAG` 原生目录下。如果因系统限制或权限不够，则回退保存在 `%LOCALAPPDATA%\OmniClip RAG`。
 —— **它极其厌恶并断绝了一切会在系统安装根目录、甚至是你的知识库内直接抛撒冗余工作日志或建立污染文件的错误行径。**
 
-所有预下载的高体积依赖模组 (如 Torch 流) ，只有在你进行过深度手动接驳（见 [RUNTIME_SETUP.md](RUNTIME_SETUP.md)）时才会通过外挂载体介入；发布版本将终生维持着这层轻量的纯净独立性。
+所有高体积运行时依赖（如 Torch 相关栈）仍旧以外挂方式存在，不会被硬塞进 EXE；现在它们会优先收口到共享的 AppData runtime 根目录中（见 [RUNTIME_SETUP.md](RUNTIME_SETUP.md)），同时继续兼容旧版本 runtime 的跨版本复用，因此发布版既保持轻量，也不再要求版本一更新就整包重下。
 
 ---
 
@@ -178,7 +180,9 @@ flowchart LR
 - [空间预检说明](STORAGE_PRECHECK.md)
 - [运行时安装说明](RUNTIME_SETUP.md)
 - [Markdown 主查询与 Runtime 稳定性 RCA 计划](plans/Markdown主查询与Runtime稳定性RCA计划.md)
+- [GPU Runtime 与扩展建库 UX 收尾计划](plans/GPU Runtime与扩展建库UX收尾计划.md)
 - [扩展格式隔离子系统实施计划](plans/扩展格式隔离子系统实施计划.md)
+- [Runtime 跨版本稳定化与 Tika 全量格式闭环计划](plans/Runtime跨版本稳定化与Tika全量格式闭环计划.md)
 - [检索优化计划](plans/检索优化计划.md) 
 - [建库性能优化计划](plans/建库性能优化计划.md)
 

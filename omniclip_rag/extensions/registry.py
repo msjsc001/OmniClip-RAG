@@ -18,8 +18,8 @@ from .models import (
     TikaFormatSelection,
     TikaFormatSupportTier,
     TikaRuntimeStatus,
-    default_tika_format_selections,
 )
+from .tika_catalog import build_tika_format_catalog, merge_tika_format_selections
 
 
 REGISTRY_FILE_NAME = 'extensions_registry.json'
@@ -59,8 +59,8 @@ class ExtensionRegistry:
             except (OSError, json.JSONDecodeError):
                 payload = {}
             state = self._deserialize(payload)
-        if not state.tika_config.selected_formats:
-            state.tika_config.selected_formats = default_tika_format_selections()
+        catalog = build_tika_format_catalog(paths)
+        state.tika_config.selected_formats = merge_tika_format_selections(state.tika_config.selected_formats, catalog)
         self._state = state
         return state
 
@@ -210,7 +210,6 @@ class ExtensionRegistry:
         return result
 
     def _parse_tika_formats(self, payload: object) -> list[TikaFormatSelection]:
-        defaults = {item.format_id: item for item in default_tika_format_selections()}
         result: list[TikaFormatSelection] = []
         if isinstance(payload, list):
             for item in payload:
@@ -219,35 +218,16 @@ class ExtensionRegistry:
                 format_id = str(item.get('format_id') or '').strip().lower()
                 if not format_id:
                     continue
-                default_item = defaults.get(format_id)
                 result.append(
                     TikaFormatSelection(
                         format_id=format_id,
-                        display_name=str(item.get('display_name') or (default_item.display_name if default_item else format_id)),
-                        tier=self._enum_value(TikaFormatSupportTier, item.get('tier'), default_item.tier if default_item else TikaFormatSupportTier.UNKNOWN),
+                        display_name=str(item.get('display_name') or format_id),
+                        tier=self._enum_value(TikaFormatSupportTier, item.get('tier'), TikaFormatSupportTier.UNKNOWN),
                         enabled=bool(item.get('enabled', False)),
                         visible=bool(item.get('visible', True)),
                     )
                 )
-        if not result:
-            return default_tika_format_selections()
-        merged: list[TikaFormatSelection] = []
-        by_id = {item.format_id: item for item in result}
-        for default_item in default_tika_format_selections():
-            current = by_id.get(default_item.format_id)
-            if current is None:
-                merged.append(default_item)
-                continue
-            merged.append(
-                TikaFormatSelection(
-                    format_id=default_item.format_id,
-                    display_name=default_item.display_name,
-                    tier=default_item.tier,
-                    enabled=current.enabled,
-                    visible=current.visible,
-                )
-            )
-        return merged
+        return result
 
     def _parse_watch_state(self, payload: object) -> ExtensionWatchState:
         if not isinstance(payload, dict):

@@ -15,7 +15,7 @@ from omniclip_rag.retrieval_policy import build_query_profile
 from omniclip_rag.service import OmniClipService
 from omniclip_rag.timing import load_build_history
 ROOT = Path(__file__).resolve().parents[1]
-SAMPLE_ROOT = ROOT / "logseq笔记样本"
+SAMPLE_ROOT = ROOT / "笔记样本"
 TEST_DATA_ROOT = ROOT / ".tmp" / "test_service_data"
 class _StubVectorIndex:
     def __init__(self) -> None:
@@ -240,7 +240,7 @@ class ServiceTests(unittest.TestCase):
             hits, context_pack = service.query("块嵌入", limit=5)
             self.assertTrue(hits)
             self.assertIn("# RAG结果", context_pack)
-            self.assertIn("# 笔记名：Logseq笔记样本", context_pack)
+            self.assertIn("# 笔记名：笔记样本", context_pack)
             self.assertIn("笔记片段1：", context_pack)
             self.assertNotIn("## Usage protocol", context_pack)
             self.assertIn("- 下边是块嵌入（块内嵌）", hits[0].display_text)
@@ -635,10 +635,10 @@ class ServiceTests(unittest.TestCase):
         service = OmniClipService(config, data_paths)
         try:
             service.rebuild_index()
-            target = vault_copy / "pages" / "Logseq笔记样本.md"
+            target = vault_copy / "pages" / "笔记样本.md"
             with target.open("a", encoding="utf-8") as handle:
                 handle.write("\n- 热更新查询验证\n  id:: 22222222-2222-2222-2222-222222222222\n")
-            service.reindex_paths(["pages/Logseq笔记样本.md"], [])
+            service.reindex_paths(["pages/笔记样本.md"], [])
             hits, _ = service.query("热更新查询验证", limit=3)
             self.assertTrue(hits)
             self.assertEqual(hits[0].anchor, "热更新查询验证")

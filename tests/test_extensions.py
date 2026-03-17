@@ -23,7 +23,9 @@ from omniclip_rag.extensions.service import (
     ExtensionTaskCoordinator,
     ExtensionTaskKind,
     ExtensionTaskRequest,
+    TikaExtensionService,
 )
+from omniclip_rag.extensions.tika_catalog import build_tika_format_catalog
 from omniclip_rag.ui_i18n import text
 from omniclip_rag.ui_next_qt.config_workspace import ConfigWorkspace
 from omniclip_rag.ui_next_qt.theme import build_theme
@@ -31,7 +33,7 @@ from omniclip_rag.ui_next_qt.tika_format_dialog import TikaFormatDialog
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_ROOT = ROOT / '.tmp' / 'test_extensions'
-SAMPLE_ROOT = ROOT / 'logseq笔记样本'
+SAMPLE_ROOT = ROOT / '笔记样本'
 
 
 def get_app() -> QtWidgets.QApplication:
@@ -142,7 +144,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
         dialog = TikaFormatDialog(selections=selections, language_code='zh-CN')
         try:
             seen_ids: list[str] = []
-            poor_zip_disabled = False
+            poor_zip_checkable = False
             for parent_index in range(dialog.tree.topLevelItemCount()):
                 parent = dialog.tree.topLevelItem(parent_index)
                 for child_index in range(parent.childCount()):
@@ -150,12 +152,55 @@ class ExtensionSkeletonTests(unittest.TestCase):
                     format_id = str(child.data(0, QtCore.Qt.ItemDataRole.UserRole) or '')
                     seen_ids.append(format_id)
                     if format_id == 'zip':
-                        poor_zip_disabled = not bool(child.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                        poor_zip_checkable = bool(child.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable)
             self.assertNotIn('pdf', seen_ids)
-            self.assertTrue(poor_zip_disabled)
+            self.assertTrue(poor_zip_checkable)
         finally:
             dialog.deleteLater()
             app.processEvents()
+
+    def test_extension_registry_roundtrip_preserves_non_default_tika_formats(self) -> None:
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        registry = ExtensionRegistry()
+        state = ExtensionRegistryState()
+        state.tika_config.enabled = True
+        state.tika_config.selected_formats = default_tika_format_selections() + [
+            TikaFormatSelection(
+                format_id='tar.gz',
+                display_name='TAR.GZ (.tar.gz)',
+                tier=TikaFormatSupportTier.UNTESTED,
+                enabled=True,
+            )
+        ]
+        registry.save(paths, state)
+        reloaded = registry.load(paths)
+        by_id = {item.format_id: item for item in reloaded.tika_config.selected_formats}
+        self.assertIn('tar.gz', by_id)
+        self.assertTrue(by_id['tar.gz'].enabled)
+        self.assertEqual(by_id['tar.gz'].tier, TikaFormatSupportTier.UNTESTED)
+
+    def test_tika_iter_files_matches_composite_suffixes(self) -> None:
+        source_root = TEST_ROOT / 'tika_source'
+        source_root.mkdir(parents=True, exist_ok=True)
+        (source_root / 'a.tar.gz').write_text('hello', encoding='utf-8')
+
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        service = TikaExtensionService(config=config, paths=paths)
+        try:
+            matches = list(service._iter_tika_files([source_root.resolve()], ['tar.gz']))
+            self.assertEqual(len(matches), 1)
+            self.assertEqual(matches[0][2], 'tar.gz')
+        finally:
+            service.close()
+
+    def test_tika_catalog_falls_back_to_packaged_suffix_list_without_jar(self) -> None:
+        catalog = build_tika_format_catalog(jar_path=TEST_ROOT / 'missing-tika-server.jar')
+        format_ids = {item.format_id for item in catalog}
+        self.assertGreater(len(catalog), len(default_tika_format_selections()))
+        self.assertIn('7z', format_ids)
+        self.assertIn('warc.gz', format_ids)
+        self.assertNotIn('pdf', format_ids)
 
     def test_extension_sources_include_all_saved_vaults(self) -> None:
         app = get_app()

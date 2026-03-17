@@ -24,6 +24,7 @@ datas: list[tuple[str, str]] = [
     (str(ROOT / 'resources' / 'app_icon.ico'), 'resources'),
     (str(ROOT / 'resources' / 'app_icon.png'), 'resources'),
     (str(ROOT / 'resources' / 'app_icon_32.png'), 'resources'),
+    (str(ROOT / 'resources' / 'tika_suffixes_3.2.3.txt'), 'resources'),
 ]
 
 binaries: list[tuple[str, str]] = []

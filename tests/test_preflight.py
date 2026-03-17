@@ -9,7 +9,7 @@ from omniclip_rag.preflight import estimate_storage_for_vault
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SAMPLE_ROOT = ROOT / "logseq笔记样本"
+SAMPLE_ROOT = ROOT / "笔记样本"
 TEST_DATA_ROOT = ROOT / ".tmp" / "test_preflight_data"
 
 
@@ -22,7 +22,7 @@ class PreflightTests(unittest.TestCase):
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), ui_language='zh-CN')
         original_parse = parser_module.parse_markdown_file
-        sample_path = SAMPLE_ROOT / "pages" / "Logseq笔记样本.md"
+        sample_path = SAMPLE_ROOT / "pages" / "笔记样本.md"
 
         call_count = {"value": 0}
 

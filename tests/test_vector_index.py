@@ -286,6 +286,49 @@ class VectorIndexTests(unittest.TestCase):
         self.assertTrue(incomplete['runtime_missing_items'])
 
 
+    def test_runtime_guidance_context_passes_through_gpu_probe_and_execution_fields(self) -> None:
+        app_root = TEST_DATA_ROOT / 'gpu_context_passthrough'
+        runtime_dir = app_root / 'runtime'
+        app_root.mkdir(parents=True, exist_ok=True)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        acceleration_payload = {
+            'gpu_present': True,
+            'gpu_name': 'NVIDIA RTX',
+            'cuda_available': True,
+            'torch_available': True,
+            'torch_version': '2.10.0+cu128',
+            'torch_cuda_build': '12.8',
+            'sentence_transformers_available': True,
+            'gpu_probe_state': 'verified',
+            'gpu_probe_verified': True,
+            'gpu_probe_reason': '',
+            'gpu_probe_error_class': '',
+            'gpu_probe_error_message': '',
+            'gpu_probe_actual_device': 'cuda:0',
+            'gpu_probe_elapsed_ms': 42,
+            'gpu_probe_verified_at': '2026-03-17T04:10:00Z',
+            'gpu_probe_runtime_instance_id': 'runtime-instance:abc',
+            'gpu_execution_state': 'verified',
+            'gpu_execution_verified': True,
+            'gpu_execution_reason': '',
+            'gpu_execution_error_class': '',
+            'gpu_execution_error_message': '',
+            'gpu_execution_actual_device': 'cuda:0',
+            'gpu_execution_reranker_actual_device': 'cuda:0',
+            'gpu_execution_elapsed_ms': 314,
+            'gpu_execution_verified_at': '2026-03-17T04:10:02Z',
+            'gpu_execution_runtime_instance_id': 'runtime-instance:abc',
+        }
+        with _runtime_root_patches(app_root), patch('omniclip_rag.vector_index.resolve_vector_device', return_value='cuda'):
+            context = runtime_guidance_context('torch', 'cuda', force_refresh=False, acceleration_payload=acceleration_payload)
+        self.assertEqual(context.get('torch_cuda_build'), '12.8')
+        self.assertEqual(context.get('gpu_probe_state'), 'verified')
+        self.assertTrue(context.get('gpu_probe_verified'))
+        self.assertEqual(context.get('gpu_execution_state'), 'verified')
+        self.assertTrue(context.get('gpu_execution_verified'))
+        self.assertEqual(context.get('gpu_execution_reranker_actual_device'), 'cuda:0')
+
+
     def test_build_runtime_install_command_uses_single_quoted_literals_once(self) -> None:
         expected_root = Path(r'D:/软件编写/OmniClip RAG/dist/OmniClipRAG-v0.2.4')
         with patch('omniclip_rag.vector_index._application_root_dir', return_value=expected_root), \
@@ -712,6 +755,7 @@ class VectorIndexTests(unittest.TestCase):
             vault_path=str(ROOT),
             data_root=str(data_paths.global_root),
             vector_backend="lancedb",
+            vector_device='cpu',
         )
         with patch.dict(sys.modules, _fake_lancedb_modules()):
             index = LanceDbVectorIndex(config, data_paths, embedder_factory=FakeEmbedder)
@@ -803,6 +847,7 @@ class VectorIndexTests(unittest.TestCase):
             vault_path=str(ROOT),
             data_root=str(data_paths.global_root),
             vector_backend='lancedb',
+            vector_device='cpu',
         )
 
         class NumpyLikeEmbedder:
@@ -835,6 +880,7 @@ class VectorIndexTests(unittest.TestCase):
             data_root=str(data_paths.global_root),
             vector_backend="lancedb",
             vector_batch_size=2,
+            vector_device='cpu',
         )
         with patch.dict(sys.modules, _fake_lancedb_modules()):
             index = LanceDbVectorIndex(config, data_paths, embedder_factory=FakeEmbedder)
@@ -861,6 +907,7 @@ class VectorIndexTests(unittest.TestCase):
             data_root=str(data_paths.global_root),
             vector_backend="lancedb",
             vector_batch_size=2,
+            vector_device='cpu',
         )
         documents = [
             {
@@ -914,6 +961,7 @@ class VectorIndexTests(unittest.TestCase):
             data_root=str(data_paths.global_root),
             vector_backend="lancedb",
             vector_batch_size=2,
+            vector_device='cpu',
         )
         documents = [
             {
@@ -949,6 +997,7 @@ class VectorIndexTests(unittest.TestCase):
             vector_backend="lancedb",
             vector_batch_size=64,
             build_resource_profile='peak',
+            vector_device='cpu',
         )
         documents = [
             {
@@ -975,6 +1024,7 @@ class VectorIndexTests(unittest.TestCase):
             vector_backend="lancedb",
             vector_batch_size=64,
             build_resource_profile='peak',
+            vector_device='cpu',
         )
         documents = [
             {
@@ -1071,6 +1121,7 @@ class VectorIndexTests(unittest.TestCase):
             data_root=str(data_paths.global_root),
             vector_backend="lancedb",
             vector_model="BAAI/bge-m3",
+            vector_device='cpu',
         )
         with patch.dict(sys.modules, _fake_lancedb_modules()):
             index = LanceDbVectorIndex(config, data_paths, embedder_factory=FakeEmbedder)
@@ -1296,7 +1347,7 @@ class VectorIndexTests(unittest.TestCase):
         self.assertEqual(roots[0].resolve(), semantic_root.resolve())
         self.assertEqual(roots[1].resolve(), runtime_dir.resolve())
 
-    def test_frozen_runtime_discovery_never_drifts_into_sibling_dist_runtime(self) -> None:
+    def test_frozen_runtime_discovery_reuses_complete_sibling_runtime_when_current_is_empty(self) -> None:
         dist_root = TEST_DATA_ROOT / 'frozen_runtime_drift' / 'dist'
         current_app = dist_root / 'OmniClipRAG-v0.3.0'
         sibling_app = dist_root / 'OmniClipRAG-v0.2.4'
@@ -1313,15 +1364,18 @@ class VectorIndexTests(unittest.TestCase):
         ), patch.object(sys, 'frozen', True, create=True):
             active_runtime = _discover_active_runtime_dir()
 
-        self.assertEqual(active_runtime.resolve(), current_runtime.resolve())
+        self.assertEqual(active_runtime.resolve(), sibling_runtime.resolve())
 
-    def test_frozen_preferred_runtime_root_is_current_app_runtime(self) -> None:
+    def test_frozen_preferred_runtime_root_is_shared_appdata_runtime(self) -> None:
         app_root = TEST_DATA_ROOT / 'preferred_frozen_runtime' / 'OmniClipRAG-v0.3.0'
+        data_root = TEST_DATA_ROOT / 'preferred_frozen_runtime' / 'OmniClip RAG'
         app_root.mkdir(parents=True, exist_ok=True)
+        data_root.mkdir(parents=True, exist_ok=True)
         with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
+             patch('omniclip_rag.vector_index.default_data_root', return_value=data_root), \
              patch.object(sys, 'frozen', True, create=True):
             runtime_root = _preferred_runtime_dir_path()
-        self.assertEqual(runtime_root.resolve(), (app_root / 'runtime').resolve())
+        self.assertEqual(runtime_root.resolve(), (data_root / 'shared' / 'runtime').resolve())
 
 
     def test_runtime_dependency_issue_uses_cached_acceleration_by_default(self) -> None:

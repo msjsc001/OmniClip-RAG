@@ -4,7 +4,7 @@
 
 **A silent gravity field between your private notes and the universe of AI.**
 
-[![Version](https://img.shields.io/badge/version-v0.3.0-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.3.2-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md)
 
@@ -12,7 +12,7 @@
 
 <br/>
 
- **What is it?** It is a local Markdown semantic search software and a local RAG knowledge base.
+ **What is it?** It is a local Markdown semantic search software and a local RAG knowledge base. (V0.3.2 **already supports semantic retrieval for 1290 formats**)
  **How to use it?** Just open the application, input your Markdown notes path, and click "Build Knowledge Base" to set up your local RAG vault. Once built, you can use it to semantically search your notes. The retrieved content can be copied and sent to any AI for in-depth discussion, or used for your own deep reading.
  **What are the benefits?** No need to upload any of your data, and no vendor lock-in. It requires no complex configuration or setup. Moreover, it features hot-reloading—newly written notes automatically enter the RAG vault! New notes can also be an organized collection of your historical conversations with AIs, which in turn implicitly provides a permanent memory for them.
 
@@ -100,7 +100,9 @@ OmniClip was primarily built for personal use. Therefore, instead of indulging i
 - **Desktop GUI**: Clean orchestration of configuration, precheck, model bootstrap, indexing, search, live watch, and selective cleanup.
 - **Geek-Grade Dual Parser Engine**: Deep native structural compatibility with standard Markdown and heavy Logseq syntax (including page attributes, block properties, `id:: UUID`, block refs, and deep tree embed stealth-linking).
 - **Hybrid Retrieval Black Magic**: We didn't build a basic wildcard search. We use heavy base structures like `SQLite + FTS5 + multi-tier structural scoring + LanceDB` for lightning-fast unified deep matching.
+- **Physically Isolated Extension Formats**: Markdown, PDF, and Tika-backed formats now live in isolated extension stores and can be fused back through a broker query path with explicit source labels.
 - **Strict Physical Vault Fencing**: Multiple note vaults share generic deep-model runtimes natively to reduce storage pressure; however, their data domains, indexes, and vector libraries are strictly fenced and kept independent.
+- **Componentized Runtime Sidecar**: the packaged app now manages Runtime as an external component stack, with a shared AppData install root, legacy-runtime reuse, staged updates, and repair / cleanup controls that stay outside the EXE payload.
 - **Crash Prevention & Lifeline Auditing**: Full index builds feature active-abort paradigms. Memory degradation protocols intercept main-thread deadlocks caused by abnormally gargantuan Markdown bodies, and seamlessly execute breakpoint resumption.
 - **Query Armor & Noise Shielding**: Includes intelligent single-character match blocking to prevent fetching the entire universe. Accompanied by multi-tier fallback recommendations (adjusting candidate quotas based on VRAM capacity), alongside a ruthless `0-100` engineering rating system synthesizing FTS, LIKE, multi-dimensional semantic analysis, and long-sentence coverage scoring.
 
@@ -111,15 +113,15 @@ OmniClip was primarily built for personal use. Therefore, instead of indulging i
 
 ---
 
-## 🔄 V0.3.0 Key Updates
+## 🔄 V0.3.2 Key Updates
 
-`v0.3.0` is a source-milestone release built on top of `v0.2.4`. It is the point where the extension-format subsystem, the new runtime manager, and the Qt-only desktop shell are all merged into the main code line together.
+`v0.3.2` is the stabilization release that closes the first real packaged-delivery gaps left after `v0.3.0`: Runtime now survives version drift much more honestly, and the Tika format picker no longer hides the larger catalog behind a missing local JAR.
 
-- 🧩 **Extension formats became a real isolated subsystem**: PDF now runs through its own dedicated parsing / indexing / query path, while Tika sidecar support, format whitelisting, runtime management, and independent watch states all landed under `omniclip_rag/extensions/`.
-- 🛠️ **Runtime management was rebuilt around components instead of one opaque blob**: the packaged app now has a dedicated Runtime page, automatic/manual repair entry points, pending-update staging, and source-aware official vs mirror install commands.
-- 🧠 **Markdown query RCA now has a real diagnostic spine**: packaged self-check modes, query trace hooks, runtime/live-vs-pending fingerprints, and the ongoing Markdown main-query RCA plan are all in-tree so future debugging no longer depends on chat memory.
-- 🖥️ **The legacy Tk desktop path is gone**: the repository is now Qt-only, which removes an entire class of duplicate UI logic and keeps future fixes focused on the real desktop shell.
-- ⚠️ **This GitHub release is intentionally source-only**: the code for the new subsystem is in, but packaged EXE validation is still being polished, so this milestone publishes code and docs without a Windows binary asset.
+- 🧩 **Extension formats are now closed as a real production path**: PDF stays on its own dedicated parse / index / query route, while Tika keeps its isolated sidecar/runtime model and can expose a much larger selectable format universe through a packaged fallback catalog.
+- 🛠️ **Runtime is now a shared sidecar, not a disposable EXE-folder singleton**: packaged builds default future repairs/downloads into `%APPDATA%\\OmniClip RAG\\shared\\runtime`, while still auto-reusing valid legacy runtimes from older version folders or manually moved runtime directories.
+- 📦 **Runtime manifests became relocatable**: new component registrations prefer relative paths, old absolute-path manifests are salvaged, and versioned payload folders such as `semantic-core-<timestamp>` can be rediscovered automatically.
+- 👀 **The Runtime page now tells the truth about ownership**: the UI can surface both the active runtime currently being used and the preferred install target for future repairs, so users can finally see whether the app is reusing an older runtime or converging into the shared AppData root.
+- 🌐 **Tika full-catalog exposure no longer requires preinstalled Tika**: the picker now follows `installed jar -> bundled suffix list -> curated defaults`, keeps PDF excluded, and preserves the tiered messaging of recommended / unknown / untested / poor compatibility.
 
 ---
 
@@ -142,7 +144,7 @@ flowchart LR
 By default, data generation sits securely in `%APPDATA%\OmniClip RAG`. Under prohibitive permissions or system limits, it downgrades gracefully to `%LOCALAPPDATA%\OmniClip RAG`.
 —— **It heavily repudiates creating messy temp logs or intrusive directories inside system installs or directly littering your precious note vaults.**
 
-External heavy model footprints (e.g., native Torch environments) are dynamically linked independently only after user-authorized manual injection (see [RUNTIME_SETUP.md](RUNTIME_SETUP.md)). The release versions will forever maintain this lightweight, pure independence.
+External heavy runtime payloads (e.g., native Torch environments) stay outside the packaged EXE and are now designed to converge into a shared AppData sidecar root after user-authorized installation (see [RUNTIME_SETUP.md](RUNTIME_SETUP.md)). Lean releases remain clean, while healthy legacy runtimes can still be reused across packaged version folders.
 
 ---
 
@@ -178,7 +180,9 @@ Currently, all source code and distribution packages have survived rigorous unit
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
 - [Runtime Setup](RUNTIME_SETUP.md)
 - [Markdown Query & Runtime RCA Plan](plans/Markdown主查询与Runtime稳定性RCA计划.md)
+- [GPU Runtime & Extension Build UX Finish Plan](plans/GPU Runtime与扩展建库UX收尾计划.md)
 - [Extension Format Isolation Plan](plans/扩展格式隔离子系统实施计划.md)
+- [Runtime Cross-Version Stabilization & Tika Full-Catalog Closure Plan](plans/Runtime跨版本稳定化与Tika全量格式闭环计划.md)
 - [Retrieval Optimization Plan](plans/检索优化计划.md)
 - [Build Performance Plan](plans/建库性能优化计划.md)
 

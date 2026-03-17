@@ -42,11 +42,11 @@ from ..extensions.models import (
     ExtensionSourceDirectory,
     TikaFormatSupportTier,
     TikaRuntimeStatus,
-    default_tika_format_selections,
 )
 from ..extensions.registry import ExtensionRegistry, ExtensionRegistryState
 from ..extensions.service import ExtensionService
 from ..extensions.runtimes import TikaSidecarManager, build_manual_install_context, detect_tika_runtime, install_tika_runtime, runtime_layout
+from ..extensions.tika_catalog import build_tika_format_catalog, merge_tika_format_selections
 from .filter_dialogs import PageBlocklistDialog, SensitiveFilterDialog
 from .theme import ThemeState, scaled
 from .runtime_guidance_dialog import RuntimeGuidanceDialog
@@ -1182,6 +1182,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.runtime_root_label.setProperty('role', 'muted')
         self.runtime_root_label.setWordWrap(True)
         layout.addWidget(self.runtime_root_label)
+        self.runtime_install_target_label = QtWidgets.QLabel(card)
+        self.runtime_install_target_label.setProperty('role', 'muted')
+        self.runtime_install_target_label.setWordWrap(True)
+        layout.addWidget(self.runtime_install_target_label)
 
         actions = QtWidgets.QHBoxLayout()
         actions.setSpacing(8)
@@ -1284,7 +1288,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
             semantic_profile = str(base_state.get('profile') or '').strip().lower()
             torch_cuda_build = str(context.get('torch_cuda_build') or '').strip()
             install_state = str(base_state.get('status') or 'missing').strip().lower() or 'missing'
-            install_ok = bool(base_state.get('ready')) and (semantic_profile == 'cuda' or (not semantic_profile and bool(torch_cuda_build)))
+            # Treat the runtime registry "profile" as a hint: the only hard indicator is whether
+            # we have a CUDA build in the live runtime. Otherwise the GPU row can become red even
+            # when CUDA is actually usable (e.g. registry drift or older manifests).
+            install_ok = bool(base_state.get('ready')) and (semantic_profile == 'cuda' or bool(torch_cuda_build))
             missing_items = [str(item).strip() for item in list(base_state.get('missing_items') or []) if str(item).strip()]
             if bool(base_state.get('ready')) and not install_ok:
                 missing_items.append(self._tr('runtime_missing_gpu_semantic_profile_cpu'))
@@ -1609,7 +1616,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 summary = f"{summary}\n{self._tr('runtime_page_summary_extra_failure', detail=str(context.get('sentence_transformers_error') or ''))}"
             self.runtime_status_summary_label.setText(summary)
         if hasattr(self, 'runtime_root_label'):
-            self.runtime_root_label.setText(self._tr('runtime_root_label', path=runtime_dir or self._tr('none_value')))
+            self.runtime_root_label.setText(self._tr('runtime_active_root_label', path=runtime_dir or self._tr('none_value')))
+        if hasattr(self, 'runtime_install_target_label'):
+            install_target = str(context.get('preferred_runtime_dir') or context.get('install_target_dir') or runtime_dir or '')
+            self.runtime_install_target_label.setText(self._tr('runtime_install_target_label', path=install_target or self._tr('none_value')))
         self._populate_runtime_component_table(force_refresh=force_refresh, context=context)
 
     def focus_runtime_management(self) -> None:
@@ -1676,7 +1686,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             'download_usage': str(context.get('download_usage') or ''),
         } if component_id == 'all' else runtime_component_usage(install_component, profile)
         sources = runtime_install_sources()
-        runtime_dir = Path(str(context.get('runtime_dir') or '')).expanduser()
+        runtime_dir = Path(str(context.get('preferred_runtime_dir') or context.get('install_target_dir') or context.get('runtime_dir') or '')).expanduser()
         runtime_dir.mkdir(parents=True, exist_ok=True)
         official_command = build_runtime_install_command(profile, source='official', component=install_component if component_id != 'all' else 'all')
         mirror_command = build_runtime_install_command(profile, source='mirror', component=install_component if component_id != 'all' else 'all')
@@ -2401,16 +2411,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         return state
 
     def _merge_tika_format_catalog(self, current_formats: list) -> list:
-        defaults = default_tika_format_selections()
-        current_by_id = {item.format_id: item for item in current_formats if getattr(item, 'format_id', '') != 'pdf'}
-        merged = []
-        for default_item in defaults:
-            current = current_by_id.get(default_item.format_id)
-            if current is None:
-                merged.append(default_item)
-                continue
-            merged.append(replace(default_item, enabled=current.enabled, visible=current.visible))
-        return merged
+        catalog = build_tika_format_catalog(self._paths)
+        return merge_tika_format_selections(current_formats, catalog)
 
     def _managed_extension_sources(self, active_vault: str) -> list[tuple[str, str]]:
         active_normalized = normalize_vault_path(active_vault)
@@ -2542,7 +2544,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._set_chip_style(self.ext_pdf_chip, ok=pdf_ok, warn=pdf_warn)
         self.ext_tika_chip.setText(self._tr('extensions_tika_chip', status=tika_status))
         self._set_chip_style(self.ext_tika_chip, ok=tika_ok, warn=tika_warn)
-        tika_count = sum(1 for item in self._extension_state.tika_config.selected_formats if item.enabled and item.tier != TikaFormatSupportTier.POOR)
+        tika_count = sum(1 for item in self._extension_state.tika_config.selected_formats if item.enabled)
         self.ext_tika_formats_chip.setText(self._tr('extensions_tika_formats_chip', count=tika_count))
         self._set_chip_style(self.ext_tika_formats_chip, ok=tika_count > 0, warn=self._extension_state.tika_config.enabled and tika_count == 0)
 
@@ -2591,14 +2593,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.ext_tika_runtime_root_label.setText(root_text)
 
     def _refresh_tika_format_summary(self) -> None:
-        count = sum(1 for item in self._extension_state.tika_config.selected_formats if item.enabled and item.tier != TikaFormatSupportTier.POOR)
+        count = sum(1 for item in self._extension_state.tika_config.selected_formats if item.enabled)
         if count:
             self.ext_tika_formats_summary_label.setText(self._tr('extensions_tika_formats_summary_count', count=count))
         else:
             self.ext_tika_formats_summary_label.setText(self._tr('extensions_tika_formats_summary_none'))
 
     def _enabled_tika_format_count(self) -> int:
-        return sum(1 for item in self._extension_state.tika_config.selected_formats if item.enabled and item.tier != TikaFormatSupportTier.POOR)
+        return sum(1 for item in self._extension_state.tika_config.selected_formats if item.enabled)
 
     def _tika_runtime_desired(self) -> bool:
         return self._extension_state.tika_config.enabled and self._enabled_tika_format_count() > 0

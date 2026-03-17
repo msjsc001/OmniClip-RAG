@@ -11,6 +11,8 @@ RUNTIME_COMPONENT_REGISTRY_FILENAME = '_runtime_components.json'
 _RUNTIME_COMPONENT_ALIASES = {
     'compute-core': 'semantic-core',
     'model-stack': 'semantic-core',
+    # GPU acceleration is a capability that rides on the semantic runtime stack.
+    'gpu-acceleration': 'semantic-core',
 }
 _RUNTIME_RESERVED_NAMES = {RUNTIME_PENDING_DIRNAME, RUNTIME_COMPONENTS_DIRNAME, RUNTIME_COMPONENT_REGISTRY_FILENAME}
 _COMPONENTIZED_RUNTIME_CLEANUP_PATTERNS = {
@@ -107,7 +109,70 @@ def runtime_component_registered_root(runtime_dir: Path, component_id: str) -> P
     candidate = candidate.resolve()
     if candidate.exists() and candidate.is_dir():
         return candidate
+    # Portability salvage: older registries stored absolute paths. If the user
+    # moves the onedir folder, the payload may still exist under the new runtime
+    # root with the same directory name.
+    if Path(raw_path).is_absolute():
+        relocated = runtime_components_root(runtime_dir) / Path(raw_path).name
+        try:
+            relocated = relocated.resolve()
+        except OSError:
+            relocated = runtime_components_root(runtime_dir) / Path(raw_path).name
+        if relocated.exists() and relocated.is_dir():
+            return relocated
     return None
+
+
+def _discover_runtime_component_root(runtime_dir: Path, component_name: str) -> Path | None:
+    """Best-effort component discovery for legacy componentized layouts.
+
+    Historically InstallRuntime.ps1 produced versioned component roots like
+    `components/semantic-core-YYYYMMDD...` and registered absolute paths. When
+    the registry becomes stale (e.g. after moving the dist folder), we still
+    want to locate the best available payload.
+    """
+
+    runtime_dir = Path(runtime_dir)
+    components_root = runtime_components_root(runtime_dir)
+    if not components_root.exists() or not components_root.is_dir():
+        return None
+
+    normalized = normalize_runtime_component_id(component_name)
+    canonical = components_root / normalized
+    if canonical.exists() and canonical.is_dir():
+        return canonical.resolve()
+
+    prefix = f'{normalized}-'
+    candidates: list[tuple[int, int, str, Path]] = []
+    try:
+        entries = list(components_root.iterdir())
+    except OSError:
+        return None
+
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        name = entry.name.lower()
+        if not name.startswith(prefix):
+            continue
+        tail = name[len(prefix) :]
+        version_int = int(tail) if tail.isdigit() else -1
+        try:
+            stat = entry.stat()
+            mtime_ns = int(getattr(stat, 'st_mtime_ns', int(stat.st_mtime * 1_000_000_000)))
+        except OSError:
+            mtime_ns = 0
+        candidates.append((version_int, mtime_ns, entry.name, entry))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True)
+    best = candidates[0][3]
+    try:
+        return best.resolve()
+    except OSError:
+        return best
 
 
 def _has_componentized_runtime_layout(runtime_dir: Path) -> bool:
@@ -141,10 +206,14 @@ def _clear_legacy_runtime_entries(runtime_dir: Path, cleanup_patterns: list[str]
 
 def runtime_component_live_root(runtime_dir: Path, component_id: str) -> Path:
     runtime_dir = Path(runtime_dir)
-    registered = runtime_component_registered_root(runtime_dir, component_id)
+    normalized_component = normalize_runtime_component_id(component_id)
+    registered = runtime_component_registered_root(runtime_dir, normalized_component)
     if registered is not None:
         return registered
-    return runtime_components_root(runtime_dir) / normalize_runtime_component_id(component_id)
+    discovered = _discover_runtime_component_root(runtime_dir, normalized_component)
+    if discovered is not None:
+        return discovered
+    return runtime_components_root(runtime_dir) / normalized_component
 
 
 def runtime_component_live_roots(runtime_dir: Path, component_id: str) -> tuple[Path, ...]:

@@ -1303,6 +1303,12 @@ def runtime_component_status(component_id: str) -> dict[str, object]:
         raise KeyError(f'Unknown runtime component: {component_id}')
     layout = inspect_runtime_environment()
     runtime_dir = Path(layout['runtime_dir'])
+    registry = load_runtime_component_registry(runtime_dir)
+    normalized_component = normalize_runtime_component_id(component_id)
+    component_profile = ''
+    registry_payload = registry.get(normalized_component)
+    if isinstance(registry_payload, dict):
+        component_profile = str(registry_payload.get('profile') or '').strip().lower()
     total_count = len(tuple(component.get('markers', ())))
     missing_items = _runtime_component_missing_items(runtime_dir, component_id) if layout['runtime_exists'] else [_RUNTIME_REQUIRED_MARKERS.get(marker, marker) for marker in component.get('markers', ())]
     installed = max(total_count - len(missing_items), 0)
@@ -1320,6 +1326,7 @@ def runtime_component_status(component_id: str) -> dict[str, object]:
         'installed_count': installed,
         'total_count': total_count,
         'cleanup_patterns': tuple(component.get('cleanup_patterns', ())),
+        'profile': component_profile,
     }
 
 
@@ -1486,8 +1493,6 @@ def _preferred_runtime_dir_path() -> Path:
     override = str(os.environ.get('OMNICLIP_RUNTIME_ROOT') or '').strip()
     if override:
         return Path(override).expanduser().resolve()
-    if getattr(sys, 'frozen', False):
-        return _application_root_dir() / 'runtime'
     base_root = default_data_root().resolve()
     config_path = base_root / 'config.json'
     try:
@@ -1510,7 +1515,8 @@ def _preferred_runtime_dir_path() -> Path:
 
 def _runtime_candidate_sort_key(path: Path) -> tuple[int, tuple[int, ...], float]:
     name = path.name.strip()
-    version_match = re.search(r'v(\d+(?:\.\d+)*)', name, re.IGNORECASE)
+    version_label = path.parent.name.strip() if name.lower() == 'runtime' else name
+    version_match = re.search(r'v(\d+(?:\.\d+)*)', version_label, re.IGNORECASE)
     modified_at = path.stat().st_mtime if path.exists() else 0.0
     if version_match:
         parts = tuple(int(part) for part in version_match.group(1).split('.') if part.isdigit())
@@ -1524,6 +1530,25 @@ def _legacy_runtime_candidate_dirs() -> list[Path]:
     current_local = app_dir / 'runtime'
     if current_local.exists():
         candidates.append(current_local)
+    parent_runtime = app_dir.parent / 'runtime'
+    if parent_runtime.exists():
+        candidates.append(parent_runtime)
+    try:
+        sibling_apps = [item for item in app_dir.parent.iterdir() if item.is_dir()]
+    except OSError:
+        sibling_apps = []
+    sibling_runtime_dirs: list[Path] = []
+    for sibling_app in sibling_apps:
+        if sibling_app == app_dir:
+            continue
+        sibling_name = sibling_app.name.strip()
+        if not re.match(r'^OmniClipRAG-v\d+(?:\.\d+)*$', sibling_name, re.IGNORECASE):
+            continue
+        sibling_runtime = sibling_app / 'runtime'
+        if sibling_runtime.exists():
+            sibling_runtime_dirs.append(sibling_runtime)
+    sibling_runtime_dirs.sort(key=_runtime_candidate_sort_key, reverse=True)
+    candidates.extend(sibling_runtime_dirs)
     seen: set[Path] = set()
     ordered: list[Path] = []
     for candidate in candidates:
@@ -2053,24 +2078,33 @@ def inspect_runtime_environment(runtime_dir: Path | None = None) -> dict[str, ob
         **layout,
         'runtime_complete': bool(layout['runtime_exists']) and bool(layout['runtime_has_content']) and not missing_items,
         'runtime_missing_items': missing_items,
+        'active_runtime_dir': runtime_dir,
         'preferred_runtime_dir': _preferred_runtime_dir_path(),
     }
 
 
 def _discover_active_runtime_dir() -> Path:
     preferred_runtime = _preferred_runtime_dir_path()
-    preferred_state = inspect_runtime_environment(preferred_runtime)
-    if preferred_state.get('runtime_complete'):
-        return preferred_runtime
-    for candidate in _legacy_runtime_candidate_dirs():
-        candidate_state = inspect_runtime_environment(candidate)
-        if candidate_state.get('runtime_complete'):
+    candidates = [preferred_runtime, *_legacy_runtime_candidate_dirs()]
+    inspected: list[tuple[Path, dict[str, object]]] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        inspected.append((candidate, inspect_runtime_environment(candidate)))
+    for candidate, state in inspected:
+        if state.get('runtime_complete'):
             return candidate
-    if preferred_state.get('runtime_exists'):
-        return preferred_runtime
-    for candidate in _legacy_runtime_candidate_dirs():
-        candidate_state = inspect_runtime_environment(candidate)
-        if candidate_state.get('runtime_exists'):
+    for candidate, state in inspected:
+        if state.get('runtime_exists') and state.get('runtime_has_content'):
+            return candidate
+    for candidate, state in inspected:
+        if state.get('runtime_exists'):
             return candidate
     return preferred_runtime
 
@@ -2676,6 +2710,9 @@ def runtime_guidance_context(
         'recommended_profile': recommended_profile,
         'app_dir': app_dir,
         'runtime_dir': runtime_dir,
+        'active_runtime_dir': runtime_dir,
+        'preferred_runtime_dir': install_target_dir,
+        'install_target_dir': install_target_dir,
         'install_script': install_script,
         'install_command': command,
         'official_install_command': official_command,
@@ -2690,9 +2727,31 @@ def runtime_guidance_context(
         'cuda_available': bool(acceleration.get('cuda_available')),
         'torch_available': bool(acceleration.get('torch_available')),
         'torch_version': str(acceleration.get('torch_version') or ''),
+        'torch_cuda_build': str(acceleration.get('torch_cuda_build') or ''),
         'torch_error': str(acceleration.get('torch_error') or ''),
         'sentence_transformers_available': bool(acceleration.get('sentence_transformers_available')),
         'sentence_transformers_error': str(acceleration.get('sentence_transformers_error') or ''),
+        # GPU probe/execution states are derived from the runtime capability cache. They are
+        # needed by the Runtime page to avoid "GPU is ready but UI still red" false negatives.
+        'gpu_probe_state': str(acceleration.get('gpu_probe_state') or 'not-run'),
+        'gpu_probe_verified': bool(acceleration.get('gpu_probe_verified')),
+        'gpu_probe_reason': str(acceleration.get('gpu_probe_reason') or ''),
+        'gpu_probe_error_class': str(acceleration.get('gpu_probe_error_class') or ''),
+        'gpu_probe_error_message': str(acceleration.get('gpu_probe_error_message') or ''),
+        'gpu_probe_actual_device': str(acceleration.get('gpu_probe_actual_device') or ''),
+        'gpu_probe_elapsed_ms': int(acceleration.get('gpu_probe_elapsed_ms') or 0),
+        'gpu_probe_verified_at': str(acceleration.get('gpu_probe_verified_at') or ''),
+        'gpu_probe_runtime_instance_id': str(acceleration.get('gpu_probe_runtime_instance_id') or ''),
+        'gpu_execution_state': str(acceleration.get('gpu_execution_state') or 'not-run'),
+        'gpu_execution_verified': bool(acceleration.get('gpu_execution_verified')),
+        'gpu_execution_reason': str(acceleration.get('gpu_execution_reason') or ''),
+        'gpu_execution_error_class': str(acceleration.get('gpu_execution_error_class') or ''),
+        'gpu_execution_error_message': str(acceleration.get('gpu_execution_error_message') or ''),
+        'gpu_execution_actual_device': str(acceleration.get('gpu_execution_actual_device') or ''),
+        'gpu_execution_reranker_actual_device': str(acceleration.get('gpu_execution_reranker_actual_device') or ''),
+        'gpu_execution_elapsed_ms': int(acceleration.get('gpu_execution_elapsed_ms') or 0),
+        'gpu_execution_verified_at': str(acceleration.get('gpu_execution_verified_at') or ''),
+        'gpu_execution_runtime_instance_id': str(acceleration.get('gpu_execution_runtime_instance_id') or ''),
         'runtime_exists': bool(runtime_state['runtime_exists']),
         'runtime_complete': bool(runtime_state['runtime_complete']),
         'runtime_missing_items': missing_items,
