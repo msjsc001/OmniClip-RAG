@@ -128,6 +128,20 @@ Current fault-tolerance rule:
 
 Why: users can accidentally point the app at a home directory, browser profile, or synced workspace that contains Markdown files they do not actually own or cannot read. One bad file must not collapse the whole product.
 
+### 9. Tika extension indexing is compatibility-first, not XHTML-first
+
+Current Tika build/query policy:
+
+- the Tika sidecar is allowed to return different surfaces for different formats,
+- extension indexing now prefers `text/plain` extraction first,
+- if plain text is unavailable or rejected, the system falls back to `rmeta` JSON and extracts body text from metadata,
+- raw XHTML is no longer the default success contract for Tika-backed formats,
+- the success criterion is "extractable body text that can be normalized into chunks", not "an XHTML response exists",
+- empty files, unreadable files, or files with no extracted body text are treated as expected skips rather than product-level failures,
+- transport failures, unsupported responses, or exhausted fallback chains are tracked as true parse failures and surfaced back to the UI.
+
+Why: real Tika 3.x behavior is format-dependent. Binding the whole extension pipeline to `PUT /tika + Accept: application/xhtml+xml` caused valid EPUB/DOCX files to fail with `HTTP 406`, which looked like "all files were skipped" even though the sidecar was healthy. A text-first contract makes newly exposed Tika formats far more likely to index without format-specific branching.
+
 ## Module Boundary
 
 - `omniclip_rag.config`: configuration and data paths
@@ -150,7 +164,9 @@ Current validation includes:
 - successful GUI startup and shutdown,
 - successful Runtime shared-root and legacy-runtime reuse checks,
 - successful Tika packaged fallback-catalog checks,
-- `232` passing automated tests on the current stabilization branch,
+- successful real-world Tika EPUB parsing against local Tika 3.2.3 using the compatibility-first `text/plain -> rmeta/json` fallback chain,
+- visible in-page Tika runtime install progress wiring in the Qt configuration flow,
+- `240` passing automated tests on the current stabilization branch,
 - successful Windows EXE packaging.
 
 ## Intentional Tradeoffs In The Current Mainline
@@ -179,7 +195,7 @@ It does **not** yet try to ship everything at once.
 ## Next Priorities
 
 1. finish the remaining GPU Runtime truthfulness and execution-verification UX,
-2. finish the extension source-directory build UX and stage-aware progress surfacing,
+2. keep improving extension source-directory build UX and richer per-file failure surfacing,
 3. continue tightening packaged startup behavior and footprint,
 4. keep hardening retrieval quality without regressing the now-stabilized packaged flow.
 

@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Iterable
 
 from ...models import ChunkRecord, ParsedFile
-from ..normalizers.tika_output import normalize_tika_xhtml
+from ..normalizers.tika_output import normalize_tika_content
+from ..runtimes.tika_runtime import TikaParsedContent
 
 _FORMAT_SUFFIX_ALIASES: dict[str, tuple[str, ...]] = {
     # Curated aliases that collapse multiple common suffixes into one UI choice.
@@ -74,28 +75,41 @@ def build_tika_suffix_matcher(enabled_formats: Iterable[str]) -> dict[str, list[
     return buckets
 
 
-def parse_tika_file(source_root: Path, absolute_path: Path, xhtml: str, *, format_id: str) -> ParsedFile:
-    """Convert normalized Tika XHTML into ParsedFile + ChunkRecord rows."""
+def parse_tika_file(source_root: Path, absolute_path: Path, parsed_content: TikaParsedContent, *, format_id: str) -> ParsedFile:
+    """Convert normalized Tika output into ParsedFile + ChunkRecord rows."""
 
     resolved_path = absolute_path.resolve()
     stat = resolved_path.stat()
     relative_path = str(resolved_path)
     title = resolved_path.name
-    normalized = normalize_tika_xhtml(xhtml)
-    content_hash = hashlib.sha1(xhtml.encode('utf-8', errors='ignore')).hexdigest()
+    normalized = normalize_tika_content(
+        parsed_content.content,
+        content_type=parsed_content.content_type,
+        metadata=parsed_content.metadata,
+    )
+    hash_payload = '\n'.join(
+        [
+            str(parsed_content.strategy or ''),
+            str(parsed_content.content_type or ''),
+            str(parsed_content.content or ''),
+        ]
+    )
+    content_hash = hashlib.sha1(hash_payload.encode('utf-8', errors='ignore')).hexdigest()
     parsed = ParsedFile(
         vault_root=source_root,
         absolute_path=resolved_path,
         relative_path=relative_path,
         title=title,
         kind='tika',
-        page_properties={'format_id': format_id},
+        page_properties={
+            'format_id': format_id,
+            'tika_strategy': parsed_content.strategy,
+            'tika_content_type': parsed_content.content_type,
+        },
         content_hash=content_hash,
         mtime=float(stat.st_mtime),
         size=int(stat.st_size),
     )
-    if not normalized:
-        normalized = [{'text': title, 'anchor': '', 'tag': 'stub'}]
     for position, row in enumerate(normalized, start=1):
         text = str(row.get('text') or '').strip()
         if not text:
@@ -116,6 +130,8 @@ def parse_tika_file(source_root: Path, absolute_path: Path, xhtml: str, *, forma
                     'format_id': format_id,
                     'source_root': str(source_root),
                     'tag': str(row.get('tag') or ''),
+                    'tika_strategy': parsed_content.strategy,
+                    'tika_content_type': parsed_content.content_type,
                 },
                 position=position,
                 depth=0,

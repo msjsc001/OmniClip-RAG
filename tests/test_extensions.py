@@ -273,6 +273,39 @@ class ExtensionSkeletonTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_extension_source_progress_includes_recent_issue_hint(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            source_path = str(SAMPLE_ROOT)
+            workspace._handle_extension_source_progress(
+                'tika',
+                source_path,
+                {
+                    'stage_status': 'parse_tika',
+                    'current': 1,
+                    'total': 1,
+                    'overall_percent': 86.0,
+                    'current_path': str(Path(source_path) / 'book.epub'),
+                    'processed_files': 1,
+                    'skipped_files': 1,
+                    'error_count': 1,
+                    'close_safe': False,
+                    'recent_issue': 'HTTP 406 · book.epub',
+                },
+            )
+            row = workspace._find_extension_source_row('tika', source_path)
+            self.assertIsNotNone(row)
+            text_value = workspace.ext_tika_source_table.item(int(row), 3).text()
+            self.assertIn(text('zh-CN', 'extensions_progress_recent_issue').split('：', 1)[0], text_value)
+            self.assertIn('HTTP 406 · book.epub', text_value)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_extension_source_rebuild_can_route_to_scan_once_when_index_exists(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)

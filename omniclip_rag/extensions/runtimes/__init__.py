@@ -5,6 +5,8 @@ from __future__ import annotations
 from .tika_runtime import (
     DEFAULT_TIKA_PORT,
     TIKA_VERSION,
+    TikaParseError,
+    TikaParsedContent,
     TikaSidecarManager,
     build_manual_install_context,
     check_tika_health,
@@ -17,6 +19,8 @@ from .tika_runtime import (
 __all__ = [
     'DEFAULT_TIKA_PORT',
     'TIKA_VERSION',
+    'TikaParseError',
+    'TikaParsedContent',
     'TikaSidecarManager',
     'build_manual_install_context',
     'check_tika_health',

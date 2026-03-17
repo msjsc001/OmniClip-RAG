@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 import ctypes.wintypes
+import json
 import logging
 import os
 import shutil
@@ -29,7 +30,41 @@ TIKA_DOWNLOAD_URL = f'https://archive.apache.org/dist/tika/{TIKA_VERSION}/{TIKA_
 JRE_DOWNLOAD_URL = 'https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jre/hotspot/normal/eclipse'
 HEALTHCHECK_PATH = '/tika'
 _PARSE_PATH = '/tika'
+_RMETA_PATH = '/rmeta'
 _HEALTHY_HTTP_CODES = {200, 204, 405, 415}
+
+
+@dataclass(slots=True)
+class TikaParsedContent:
+    """Normalized raw content returned by the local Tika sidecar.
+
+    Why: Tika 3.x does not guarantee that every format accepts the same output
+    surface. Persisting the actual strategy/content-type lets downstream
+    normalizers stay compatibility-first without hard-wiring the whole build
+    pipeline to XHTML.
+    """
+
+    content: str
+    content_type: str
+    strategy: str
+    metadata: object | None = None
+
+
+class TikaParseError(RuntimeError):
+    """Structured parse error used to separate transport failures from skips."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        status_code: int | None = None,
+        response_body: str = '',
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code or 'tika_parse_failed')
+        self.status_code = int(status_code) if status_code is not None else None
+        self.response_body = str(response_body or '')
 
 
 @dataclass(slots=True)
@@ -142,32 +177,63 @@ def check_tika_health(port: int = DEFAULT_TIKA_PORT, timeout: float = 1.0) -> bo
         return False
 
 
-def parse_file_with_tika(file_path: Path, *, port: int = DEFAULT_TIKA_PORT, timeout: float = 60.0) -> str:
-    """Send one file to the local Tika sidecar and request XHTML output."""
+def parse_file_with_tika(file_path: Path, *, port: int = DEFAULT_TIKA_PORT, timeout: float = 60.0) -> TikaParsedContent:
+    """Send one file to the local Tika sidecar using compatibility-first fallbacks."""
 
     path = Path(file_path).resolve()
-    url = f'http://127.0.0.1:{port}{_PARSE_PATH}'
-    headers = {
-        'Accept': 'application/xhtml+xml',
-        'Content-Type': 'application/octet-stream',
-        'Content-Disposition': f'attachment; filename="{quote(path.name)}"',
-    }
     with path.open('rb') as handle:
         payload = handle.read()
-    request = urllib.request.Request(url=url, data=payload, headers=headers, method='PUT')
+
+    errors: list[str] = []
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            charset = response.headers.get_content_charset('utf-8')
-            return response.read().decode(charset, errors='replace')
-    except urllib.error.HTTPError as exc:
-        body = ''
-        try:
-            body = exc.read().decode('utf-8', errors='replace')
-        except Exception:
-            body = ''
-        raise RuntimeError(f'Tika parse failed for {path.name}: HTTP {exc.code} {body.strip()}'.strip()) from exc
-    except OSError as exc:
-        raise RuntimeError(f'Tika parse transport failed for {path.name}: {exc}') from exc
+        text_body = _tika_request(
+            path,
+            payload,
+            port=port,
+            timeout=timeout,
+            request_path=_PARSE_PATH,
+            accept='text/plain',
+        )
+        if text_body.strip():
+            return TikaParsedContent(
+                content=text_body,
+                content_type='text/plain',
+                strategy='text_plain',
+                metadata=None,
+            )
+        errors.append('text/plain: empty_body')
+    except TikaParseError as exc:
+        errors.append(f'text/plain: {exc}')
+
+    try:
+        raw_json = _tika_request(
+            path,
+            payload,
+            port=port,
+            timeout=timeout,
+            request_path=_RMETA_PATH,
+            accept='application/json',
+        )
+        metadata = json.loads(raw_json)
+        extracted = _extract_rmeta_text(metadata)
+        if extracted.strip():
+            return TikaParsedContent(
+                content=raw_json,
+                content_type='application/json',
+                strategy='rmeta_json',
+                metadata=metadata,
+            )
+        errors.append('rmeta/json: empty_content')
+    except TikaParseError as exc:
+        errors.append(f'rmeta/json: {exc}')
+    except json.JSONDecodeError as exc:
+        errors.append(f'rmeta/json: invalid_json ({exc})')
+
+    detail = '; '.join(errors) if errors else 'no_tika_strategy_succeeded'
+    raise TikaParseError(
+        f'Tika parse failed for {path.name}: {detail}',
+        code='tika_parse_all_strategies_failed',
+    )
 
 
 class TikaSidecarManager:
@@ -294,6 +360,66 @@ def _emit_progress(callback, **payload) -> None:
     if callback is None:
         return
     callback(dict(payload))
+
+
+def _tika_request(
+    path: Path,
+    payload: bytes,
+    *,
+    port: int,
+    timeout: float,
+    request_path: str,
+    accept: str,
+) -> str:
+    url = f'http://127.0.0.1:{port}{request_path}'
+    headers = {
+        'Accept': accept,
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': f'attachment; filename="{quote(path.name)}"',
+    }
+    request = urllib.request.Request(url=url, data=payload, headers=headers, method='PUT')
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            charset = response.headers.get_content_charset('utf-8')
+            return response.read().decode(charset, errors='replace')
+    except urllib.error.HTTPError as exc:
+        body = ''
+        try:
+            body = exc.read().decode('utf-8', errors='replace')
+        except Exception:
+            body = ''
+        raise TikaParseError(
+            f'HTTP {exc.code} {body.strip()}'.strip(),
+            code='tika_http_error',
+            status_code=int(getattr(exc, 'code', 0) or 0),
+            response_body=body,
+        ) from exc
+    except OSError as exc:
+        raise TikaParseError(
+            f'transport_error: {exc}',
+            code='tika_transport_error',
+        ) from exc
+
+
+def _extract_rmeta_text(metadata: object) -> str:
+    if isinstance(metadata, dict):
+        return _extract_rmeta_text_from_record(metadata)
+    if isinstance(metadata, list):
+        values = [
+            _extract_rmeta_text_from_record(record)
+            for record in metadata
+            if isinstance(record, dict)
+        ]
+        return '\n\n'.join(item for item in values if item.strip())
+    return ''
+
+
+def _extract_rmeta_text_from_record(record: dict[str, object]) -> str:
+    for key in ('X-TIKA:content', 'content'):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ''
 
 
 def _download_file(url: str, destination: Path, *, progress_callback=None, stage: str = 'download') -> None:
@@ -423,6 +549,8 @@ __all__ = [
     'JRE_DOWNLOAD_URL',
     'TIKA_DOWNLOAD_URL',
     'TIKA_JAR_NAME',
+    'TikaParseError',
+    'TikaParsedContent',
     'TIKA_VERSION',
     'TikaRuntimeLayout',
     'TikaSidecarManager',

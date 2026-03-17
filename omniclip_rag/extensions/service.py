@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-from importlib import import_module
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from importlib import import_module
 from pathlib import Path
 
 from ..config import AppConfig, DataPaths
@@ -15,7 +15,7 @@ from ..vector_index import NullVectorIndex, create_vector_index, runtime_depende
 from .models import ExtensionDirectoryState, ExtensionIndexState, TikaFormatSupportTier
 from .paths import build_extension_data_paths
 from .registry import ExtensionRegistry, ExtensionRegistryState
-from .runtimes import TikaSidecarManager, parse_file_with_tika
+from .runtimes import TikaParseError, TikaSidecarManager, parse_file_with_tika
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,9 +47,9 @@ def _build_tika_suffix_matcher(enabled_formats: set[str]):
     return parser.build_tika_suffix_matcher(enabled_formats)
 
 
-def _parse_tika_file(source_root: Path, absolute_path: Path, xhtml: str, *, format_id: str):
+def _parse_tika_file(source_root: Path, absolute_path: Path, parsed_content, *, format_id: str):
     parser = import_module('omniclip_rag.extensions.parsers.tika')
-    return parser.parse_tika_file(source_root, absolute_path, xhtml, format_id=format_id)
+    return parser.parse_tika_file(source_root, absolute_path, parsed_content, format_id=format_id)
 
 
 class ExtensionTaskKind(str, Enum):
@@ -119,6 +119,7 @@ class TikaPreflightReport:
     enabled_formats: tuple[str, ...]
     skipped_files: int = 0
     missing_directories: tuple[str, ...] = ()
+    recent_issues: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -129,9 +130,32 @@ class TikaBuildReport:
     indexed_chunks: int
     enabled_formats: tuple[str, ...]
     skipped_files: int = 0
+    expected_skips: int = 0
+    failed_files: int = 0
     deleted_files: int = 0
     missing_directories: tuple[str, ...] = ()
+    recent_issues: tuple[str, ...] = ()
     rebuilt: bool = False
+
+
+@dataclass(slots=True)
+class TikaFileOutcome:
+    """One Tika file result after parse/normalize/storage handling."""
+
+    status: str
+    reason: str = ''
+    path: str = ''
+    chunk_count: int = 0
+
+
+@dataclass(slots=True)
+class TikaBuildStats:
+    """Mutable counters shared across Tika build/update loops."""
+
+    skipped_files: int = 0
+    expected_skips: int = 0
+    failed_files: int = 0
+    recent_issues: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -796,12 +820,14 @@ class TikaExtensionService:
         total_files = 0
         total_bytes = 0
         skipped_files = 0
+        recent_issues: list[str] = []
         for _source_root, file_path, _format_id in self._iter_tika_files(source_dirs, enabled_formats):
             try:
                 total_files += 1
                 total_bytes += int(file_path.stat().st_size)
             except Exception as exc:
                 skipped_files += 1
+                _remember_recent_issue(recent_issues, f'{Path(file_path).name} · unreadable_file')
                 LOGGER.warning('Tika preflight skipped unreadable file: %s (%s: %s)', file_path, type(exc).__name__, exc)
         self._persist_state()
         return TikaPreflightReport(
@@ -810,6 +836,7 @@ class TikaExtensionService:
             enabled_formats=tuple(enabled_formats),
             skipped_files=skipped_files,
             missing_directories=tuple(str(item) for item in missing_dirs),
+            recent_issues=tuple(recent_issues),
         )
 
     def full_rebuild(
@@ -876,7 +903,13 @@ class TikaExtensionService:
                     indexed_document_count=int(stats.get('files', 0) or 0),
                     last_error='',
                 )
-                return TikaBuildReport(indexed_files=int(stats.get('files', 0) or 0), indexed_chunks=int(stats.get('chunks', 0) or 0), enabled_formats=tuple(self._enabled_tika_formats()), deleted_files=len(target_paths), rebuilt=False)
+                return TikaBuildReport(
+                    indexed_files=int(stats.get('files', 0) or 0),
+                    indexed_chunks=int(stats.get('chunks', 0) or 0),
+                    enabled_formats=tuple(self._enabled_tika_formats()),
+                    deleted_files=len(target_paths),
+                    rebuilt=False,
+                )
             self.store.reset_all()
             self.vector_index.reset()
             self._update_tika_status(
@@ -985,13 +1018,19 @@ class TikaExtensionService:
                     indexed_document_count=0,
                     last_error='',
                 )
-                return TikaBuildReport(indexed_files=0, indexed_chunks=0, enabled_formats=tuple(enabled_formats), missing_directories=tuple(str(item) for item in missing_dirs))
+                return TikaBuildReport(
+                    indexed_files=0,
+                    indexed_chunks=0,
+                    enabled_formats=tuple(enabled_formats),
+                    missing_directories=tuple(str(item) for item in missing_dirs),
+                )
 
             if incremental:
-                deleted_files, skipped_files = self._scan_once(source_dirs, enabled_formats, on_progress=on_progress)
+                deleted_files, build_stats = self._scan_once(source_dirs, enabled_formats, on_progress=on_progress)
             else:
-                skipped_files = self._full_rebuild(source_dirs, enabled_formats, on_progress=on_progress, targeted=bool(source_paths))
+                build_stats = self._full_rebuild(source_dirs, enabled_formats, on_progress=on_progress, targeted=bool(source_paths))
             stats = self.store.stats()
+            skipped_files = build_stats.skipped_files
             self._update_tika_status(
                 index_state=ExtensionIndexState.READY,
                 build_in_progress=False,
@@ -1003,15 +1042,25 @@ class TikaExtensionService:
                 indexed_chunks=int(stats.get('chunks', 0) or 0),
                 enabled_formats=tuple(enabled_formats),
                 skipped_files=skipped_files,
+                expected_skips=build_stats.expected_skips,
+                failed_files=build_stats.failed_files,
                 deleted_files=deleted_files,
                 missing_directories=tuple(str(item) for item in missing_dirs),
+                recent_issues=tuple(build_stats.recent_issues),
                 rebuilt=not incremental,
             )
         finally:
             self.coordinator.release(request)
             self._persist_state()
 
-    def _full_rebuild(self, source_dirs: list[Path], enabled_formats: list[str], *, on_progress: Callable[[dict[str, object]], None] | None, targeted: bool = False) -> int:
+    def _full_rebuild(
+        self,
+        source_dirs: list[Path],
+        enabled_formats: list[str],
+        *,
+        on_progress: Callable[[dict[str, object]], None] | None,
+        targeted: bool = False,
+    ) -> TikaBuildStats:
         existing_paths: list[str] = []
         if targeted:
             existing_paths = self._indexed_paths_under_roots(source_dirs)
@@ -1020,7 +1069,7 @@ class TikaExtensionService:
         else:
             self.store.reset_all()
             self.vector_index.reset()
-        skipped_files = 0
+        build_stats = TikaBuildStats()
         files = list(self._iter_tika_files(source_dirs, enabled_formats))
         total = len(files)
         indexed_paths: list[str] = []
@@ -1032,6 +1081,7 @@ class TikaExtensionService:
             total=total,
             processed_files=0,
             skipped_files=0,
+            error_count=0,
             deleted_files=len(existing_paths) if targeted else 0,
             overall_percent=0.0,
             close_safe=False,
@@ -1046,14 +1096,32 @@ class TikaExtensionService:
                 current_path=str(file_path),
                 format_id=format_id,
                 processed_files=max(current - 1, 0),
-                skipped_files=skipped_files,
-                error_count=skipped_files,
+                skipped_files=build_stats.skipped_files,
+                error_count=build_stats.failed_files,
                 deleted_files=len(existing_paths) if targeted else 0,
                 overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
                 close_safe=False,
+                recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
             )
-            if not self._replace_one_tika_file(source_root, file_path, format_id):
-                skipped_files += 1
+            outcome = self._replace_one_tika_file(source_root, file_path, format_id)
+            if outcome.status != 'indexed':
+                self._apply_tika_outcome(build_stats, outcome)
+                _emit_extension_stage(
+                    on_progress,
+                    stage='tika_build',
+                    stage_status='parse_tika',
+                    current=current,
+                    total=total,
+                    current_path=str(file_path),
+                    format_id=format_id,
+                    processed_files=current,
+                    skipped_files=build_stats.skipped_files,
+                    error_count=build_stats.failed_files,
+                    deleted_files=len(existing_paths) if targeted else 0,
+                    overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
+                    close_safe=False,
+                    recent_issue=outcome.reason,
+                )
                 continue
             indexed_paths.append(str(file_path.resolve()))
         _emit_extension_stage(
@@ -1063,11 +1131,12 @@ class TikaExtensionService:
             current=len(indexed_paths),
             total=total,
             processed_files=len(indexed_paths),
-            skipped_files=skipped_files,
-            error_count=skipped_files,
+            skipped_files=build_stats.skipped_files,
+            error_count=build_stats.failed_files,
             deleted_files=len(existing_paths) if targeted else 0,
             overall_percent=92.0 if total else 100.0,
             close_safe=False,
+            recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
         )
         if targeted:
             if indexed_paths:
@@ -1081,15 +1150,22 @@ class TikaExtensionService:
             current=len(indexed_paths),
             total=total,
             processed_files=len(indexed_paths),
-            skipped_files=skipped_files,
-            error_count=skipped_files,
+            skipped_files=build_stats.skipped_files,
+            error_count=build_stats.failed_files,
             deleted_files=len(existing_paths) if targeted else 0,
             overall_percent=100.0,
             close_safe=False,
+            recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
         )
-        return skipped_files
+        return build_stats
 
-    def _scan_once(self, source_dirs: list[Path], enabled_formats: list[str], *, on_progress: Callable[[dict[str, object]], None] | None) -> tuple[int, int]:
+    def _scan_once(
+        self,
+        source_dirs: list[Path],
+        enabled_formats: list[str],
+        *,
+        on_progress: Callable[[dict[str, object]], None] | None,
+    ) -> tuple[int, TikaBuildStats]:
         previous_manifest = self.store.fetch_file_manifest()
         current_manifest: dict[str, tuple[float, int]] = {}
         source_by_path: dict[str, tuple[Path, Path, str]] = {}
@@ -1107,7 +1183,7 @@ class TikaExtensionService:
         changed_paths = [path for path, metadata in current_manifest.items() if previous_manifest.get(path) != metadata]
         if deleted_paths:
             self._delete_paths_from_index(deleted_paths)
-        skipped_files = 0
+        build_stats = TikaBuildStats()
         total = len(changed_paths)
         _emit_extension_stage(
             on_progress,
@@ -1117,6 +1193,7 @@ class TikaExtensionService:
             total=total,
             processed_files=0,
             skipped_files=0,
+            error_count=0,
             deleted_files=len(deleted_paths),
             overall_percent=0.0,
             close_safe=False,
@@ -1132,58 +1209,101 @@ class TikaExtensionService:
                 current_path=str(file_path),
                 format_id=format_id,
                 processed_files=max(current - 1, 0),
-                skipped_files=skipped_files,
-                error_count=skipped_files,
+                skipped_files=build_stats.skipped_files,
+                error_count=build_stats.failed_files,
                 deleted_files=len(deleted_paths),
                 overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
                 close_safe=False,
+                recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
             )
             self._delete_paths_from_index([path])
-            if not self._replace_one_tika_file(source_root, file_path, format_id):
-                skipped_files += 1
+            outcome = self._replace_one_tika_file(source_root, file_path, format_id)
+            if outcome.status != 'indexed':
+                self._apply_tika_outcome(build_stats, outcome)
+                _emit_extension_stage(
+                    on_progress,
+                    stage='tika_scan_once',
+                    stage_status='parse_tika',
+                    current=current,
+                    total=total,
+                    current_path=str(file_path),
+                    format_id=format_id,
+                    processed_files=current,
+                    skipped_files=build_stats.skipped_files,
+                    error_count=build_stats.failed_files,
+                    deleted_files=len(deleted_paths),
+                    overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
+                    close_safe=False,
+                    recent_issue=outcome.reason,
+                )
         if changed_paths:
             _emit_extension_stage(
                 on_progress,
                 stage='tika_scan_once',
                 stage_status='write_vector',
-                current=len(changed_paths) - skipped_files,
+                current=len(changed_paths) - build_stats.skipped_files,
                 total=total,
-                processed_files=len(changed_paths) - skipped_files,
-                skipped_files=skipped_files,
-                error_count=skipped_files,
+                processed_files=len(changed_paths) - build_stats.skipped_files,
+                skipped_files=build_stats.skipped_files,
+                error_count=build_stats.failed_files,
                 deleted_files=len(deleted_paths),
                 overall_percent=92.0 if total else 100.0,
                 close_safe=False,
+                recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
             )
             self._upsert_vectors_for_paths(changed_paths)
         _emit_extension_stage(
             on_progress,
             stage='tika_scan_once',
             stage_status='finalizing',
-            current=len(changed_paths) - skipped_files,
+            current=len(changed_paths) - build_stats.skipped_files,
             total=total,
-            processed_files=len(changed_paths) - skipped_files,
-            skipped_files=skipped_files,
-            error_count=skipped_files,
+            processed_files=len(changed_paths) - build_stats.skipped_files,
+            skipped_files=build_stats.skipped_files,
+            error_count=build_stats.failed_files,
             deleted_files=len(deleted_paths),
             overall_percent=100.0,
             close_safe=False,
+            recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
         )
-        return len(deleted_paths), skipped_files
+        return len(deleted_paths), build_stats
 
-    def _replace_one_tika_file(self, source_root: Path, file_path: Path, format_id: str) -> bool:
+    def _replace_one_tika_file(self, source_root: Path, file_path: Path, format_id: str) -> TikaFileOutcome:
+        resolved = file_path.resolve()
+        try:
+            stat = resolved.stat()
+        except OSError as exc:
+            LOGGER.warning('Tika extension skipped unreadable file: %s (%s: %s)', resolved, type(exc).__name__, exc)
+            return TikaFileOutcome(status='expected_skip', reason=f'无法读取文件 · {resolved.name}', path=str(resolved))
+        if int(stat.st_size or 0) <= 0:
+            LOGGER.info('Tika extension skipped empty file: %s', resolved)
+            return TikaFileOutcome(status='expected_skip', reason=f'空文件 · {resolved.name}', path=str(resolved))
         try:
             runtime = self._state.snapshot.tika.runtime
-            xhtml = parse_file_with_tika(file_path, port=runtime.port or 9998)
-            parsed = _parse_tika_file(source_root, file_path, xhtml, format_id=format_id)
+            parsed_content = parse_file_with_tika(resolved, port=runtime.port or 9998)
+            parsed = _parse_tika_file(source_root, resolved, parsed_content, format_id=format_id)
         except Exception as exc:
-            LOGGER.warning('Tika extension skipped poisoned file: %s (%s: %s)', file_path, type(exc).__name__, exc)
-            return False
+            LOGGER.warning('Tika extension failed for file: %s (%s: %s)', resolved, type(exc).__name__, exc)
+            return TikaFileOutcome(status='failed', reason=_format_tika_failure_reason(resolved, exc), path=str(resolved))
+        if not parsed.chunks:
+            LOGGER.info('Tika extension skipped file without extracted text: %s', resolved)
+            return TikaFileOutcome(status='expected_skip', reason=f'未提取到正文 · {resolved.name}', path=str(resolved))
         self.store.replace_file(parsed)
         rendered_payloads = [(chunk.chunk_id, chunk.raw_text) for chunk in parsed.chunks if chunk.raw_text.strip()]
         if rendered_payloads:
             self.store.update_rendered_chunks(rendered_payloads)
-        return True
+        return TikaFileOutcome(status='indexed', path=str(resolved), chunk_count=len(parsed.chunks))
+
+    def _apply_tika_outcome(self, build_stats: TikaBuildStats, outcome: TikaFileOutcome) -> None:
+        if outcome.status == 'indexed':
+            return
+        build_stats.skipped_files += 1
+        if outcome.status == 'failed':
+            build_stats.failed_files += 1
+        else:
+            build_stats.expected_skips += 1
+        if outcome.reason:
+            _remember_recent_issue(build_stats.recent_issues, outcome.reason)
 
     def _rebuild_vectors(self) -> None:
         if not self._vector_enabled:
@@ -1540,6 +1660,7 @@ def _emit_extension_stage(
     deleted_files: int = 0,
     overall_percent: float | None = None,
     close_safe: bool = False,
+    recent_issue: str = '',
 ) -> None:
     percent = overall_percent
     if percent is None:
@@ -1559,6 +1680,8 @@ def _emit_extension_stage(
     }
     if format_id:
         payload['format_id'] = format_id
+    if recent_issue:
+        payload['recent_issue'] = str(recent_issue)
     _emit_progress(on_progress, payload)
 
 
@@ -1566,3 +1689,23 @@ def _emit_progress(on_progress: Callable[[dict[str, object]], None] | None, payl
     if on_progress is None:
         return
     on_progress(payload)
+
+
+def _remember_recent_issue(issues: list[str], message: str, *, limit: int = 3) -> None:
+    normalized = str(message or '').strip()
+    if not normalized:
+        return
+    if normalized in issues:
+        return
+    issues.append(normalized)
+    if len(issues) > limit:
+        del issues[:-limit]
+
+
+def _format_tika_failure_reason(file_path: Path, exc: Exception) -> str:
+    name = file_path.name
+    if isinstance(exc, TikaParseError):
+        if exc.status_code is not None:
+            return f'HTTP {exc.status_code} · {name}'
+        return f'Tika 解析失败 · {name}'
+    return f'{type(exc).__name__} · {name}'

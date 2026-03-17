@@ -4,7 +4,7 @@
 
 **方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。**
 
-[![Version](https://img.shields.io/badge/version-v0.3.2-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.3.3-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md)
 
@@ -12,7 +12,7 @@
 
 <br/>
 
- **它是什么？** 它是本地 Markdown 语义搜索软件、本地 RAG 知识库。（V0.3.2版**已经支持1290种格式的语义检索**）
+ **它是什么？** 它是本地 Markdown 语义搜索软件、本地 RAG 知识库。（V0.3.3版**已经支持1290种格式的语义检索**）
   **怎么用？** 你只需要打开程序输入你的 Markdown 笔记路径再点建库，就能搭建好你的本地 RAG 知识库，建库后你就可以用它来语义搜索你的笔记，搜索的内容你可以复制发给任意 AI 进行深度研讨，也可以供自己深度研读。 
   **好处是什么？** 无须把你的任何资料上传，也不会被任何软件捆绑，它无须任何复杂的配置，搭建，且它具备热更新能力，新笔记写入会自动进入RAG库！新笔记也可以是你和AI的历史对话整理，这样变相的为AI提供了永久记忆。
 
@@ -93,18 +93,19 @@
 
 ---
 
-## ✨ 当前能力与防弹基建
+## ✨ 核心特性
 
-方寸引基本是写来自己用的工具，因此并没有在交互上弄复杂的炫技花活，而是把功夫全都砸向了底层“检索引擎的穿透力与稳定性”：
+方寸引不靠花哨界面取胜，它真正下功夫的地方是：让你的本地资料在**不上传、不锁定、不折腾环境**的前提下，仍然能获得靠谱、可解释、可长期维护的语义检索能力。
 
-- **桌面 GUI 闭环**：配置、预检、模型预热、建库、查询、热监听、分类清理等完整可视控制流程。
-- **原生双引擎极客解析**：支持普通 Markdown + 深度语法兼容 Logseq （含页面属性、块属性、`id:: UUID`、块引用与块完整树层级潜入嵌入）。
-- **混合检索黑科技**：非普通通配搜索；它使用了重底层的 `SQLite + FTS5 + 结构化多梯次打分 + LanceDB` 进行极速深度联合匹配。
-- **扩展格式强隔离**：Markdown、PDF 与 Tika 扩展格式各自使用独立索引与状态域，再通过统一 Broker 做混合查询与来源标识回传。
-- **多库强物理切分**：多笔记库不仅能通用底模节约算力载荷，其相互独立的数据域、索引与向量库更受严格围栏管控。
-- **Runtime 组件化外挂**：发布版继续保持轻量，但现在已经有独立 Runtime 页、共享 AppData 安装根、legacy runtime 复用、待应用更新与组件级修复/清理闭环。
-- **防崩溃与生命线存证**：全量建库附带主动中断机制；内存降级控制机制自动拦截由超大 Markdown 异常体导致的主进程死锁，还能执行断点续传。
-- **查询防护与防泛泛噪**：包含智能拦截单字匹配机制防止全宇宙关联；并随同搭载多级排错推荐（针对显存给出候选数量），以及集成了 FTS、LIKE 及多维度语义和长句覆盖度评定的严酷工程评分(`0-100`)。
+- **本地优先，资料不出门**：默认把索引、日志、缓存和运行时都放在 `%APPDATA%\\OmniClip RAG` 一侧管理，不污染你的笔记库原文件，也不要求把资料上传到云端。
+- **Markdown / Logseq 深度理解**：不仅能读普通 Markdown，还能理解 Logseq 风格的页面属性、块属性、块引用、嵌入和层级结构，因此检索结果更贴近你真实写作时的上下文。
+- **真正可用的混合检索**：不是简单关键字搜索，而是把 `SQLite + FTS5 + 结构得分 + LanceDB 向量检索` 组合起来，既能抓住原词，也能抓住语义相近的内容。
+- **扩展格式物理隔离**：Markdown、PDF、Tika 扩展格式各自用独立索引和状态域运行，互不污染，再由统一查询层把结果融合回来并明确标注来源。
+- **Tika 全格式大目录暴露**：当前已经可选择 `1290` 种扩展格式；推荐、未知、未测试、兼容性差会分层提示，方便你按风险逐步启用。
+- **发布版保持轻量，Runtime 独立管理**：EXE 包不强塞大体积本地 AI 运行栈；需要时再下载 Runtime 组件，而且现在支持共享 AppData 安装根、旧版本 Runtime 复用、组件级修复与清理。
+- **建库能跑得稳，也能讲清楚自己在做什么**：预检、全量建库、增量监听、扩展格式建库、Tika 自动安装都尽量给出阶段、进度和异常原因，而不是让用户盲等。
+- **查询结果可解释、可追踪**：结果会带来源标签、页码/格式身份、相关性评分和最近状态提示，方便你判断“为什么命中它”，而不只是得到一堆黑盒片段。
+- **出错时优先降级，不优先崩溃**：对坏文件、空文件、临时离线目录、极端大文件、Runtime 缺项、显存不足等情况都有隔离、跳过、重试或降级策略，尽量保证主程序继续可用。
 
 <div align="center">
   <img alt="配置与状态" src="https://github.com/user-attachments/assets/d75af49d-54c2-403b-ba9a-476b6f637fcb" width="400" />
@@ -113,15 +114,14 @@
 
 ---
 
-## 🔄 V0.3.2 重点更新
+## 🔄 V0.3.3 重点更新
 
-`v0.3.2` 是在 `v0.3.0` 基础上的一次交付闭环版：重点不是再堆新功能，而是把“扩展格式”和“Runtime 组件化”真正修到构建版可长期复用、可解释、可继续演进。
+`v0.3.3` 是 `0.3.x` 线上可用性的一次继续收口：重点是把 Tika 路线从“看起来支持很多格式”修到“你勾选后真的更容易建得进去”，同时把自动安装过程做成真正可观察的状态流。
 
-- 🧩 **扩展格式主链进一步闭环**：PDF 继续走独立解析/索引/查询链；Tika 则在 sidecar 保持隔离的前提下，补齐了 `已安装 JAR -> 内置后缀清单 -> curated 默认集` 的全量目录回退逻辑。
-- 🛠️ **Runtime 不再默认绑死在当前 EXE 目录**：发布版后续的下载/修复目标现在收口到 `%APPDATA%\\OmniClip RAG\\shared\\runtime`，同时仍会自动复用旧版本目录或手动搬迁过来的健康 runtime。
-- 📦 **Runtime 组件注册可搬迁**：新安装优先写相对路径；旧的绝对路径注册表也会自动回捞。像 `semantic-core-时间戳` 这样的版本化 payload 目录，也能自动识别最新有效版本。
-- 👀 **Runtime 页开始讲清楚“现在在用什么、以后装到哪里”**：界面会区分 active runtime 与默认安装/修复目标，避免继续把 legacy runtime 复用、共享 Runtime 安装和当前使用状态混成一团。
-- 🌐 **Tika 格式选择不再要求用户先安装 Tika 才能看全**：即使本机还没装 Tika JAR，选择窗也能直接展示更大的格式目录；`pdf` 仍永久排除，推荐/未知/未测试/兼容性差的分层提示也继续保留。
+- 🧩 **Tika 建库改成兼容优先**：不再把 `XHTML` 当成唯一成功条件，而是优先尝试 `text/plain`，失败后再回退 `rmeta/json`，像 EPUB 这类格式不再因为 `HTTP 406` 被整批误判成跳过。
+- 🧾 **Tika 建库结果更可解释**：现在会区分“正常跳过”和“真实解析失败”。比如 `0` 字节文件会明确显示为空文件跳过，而不是让人误以为 Tika 不支持该格式。
+- ⏳ **Tika 自动安装终于有页内进度**：当前阶段、当前下载项、百分比、字节数和安装目标都会直接显示在页面里，用户不再需要靠猜测判断程序有没有开始工作。
+- 📚 **文档同步更新为 `v0.3.3`**：中英文 README、更新日志、架构说明和计划文档都补上了这轮 Tika 稳定性决策，后续继续开发时不必再依赖聊天记录。
 
 ---
 
@@ -183,12 +183,36 @@ flowchart LR
 - [GPU Runtime 与扩展建库 UX 收尾计划](plans/GPU Runtime与扩展建库UX收尾计划.md)
 - [扩展格式隔离子系统实施计划](plans/扩展格式隔离子系统实施计划.md)
 - [Runtime 跨版本稳定化与 Tika 全量格式闭环计划](plans/Runtime跨版本稳定化与Tika全量格式闭环计划.md)
+- [Tika 建库稳定性与安装进度闭环计划](plans/Tika建库稳定性与安装进度闭环计划.md)
 - [检索优化计划](plans/检索优化计划.md) 
 - [建库性能优化计划](plans/建库性能优化计划.md)
 
 *(点击 Release 可查看自 V0.1.0 到新版本的详细特性演进历程)*
 
 ---
+
+## 🙏 开源致谢
+
+方寸引今天能走到这里，离不开这些开源项目打下的地基。我们当前直接集成、明确依赖或用于构建/测试的核心开源项目包括：
+
+- **Python**：整个桌面程序与工具链的基础运行环境。
+- **Qt / PySide6 / Shiboken6**：当前桌面 GUI 的主要界面框架。
+- **SQLite**：本地元数据、FTS、状态与索引权威存储。
+- **LanceDB**：本地向量检索存储层。
+- **Apache Arrow / PyArrow**：向量与表结构数据的底层支撑。
+- **PyTorch**：本地语义模型与 CUDA/CPU 推理基础。
+- **sentence-transformers**：本地嵌入与交叉编码能力的主桥接层。
+- **Transformers / Hugging Face Hub**：模型加载、缓存与本地化管理能力来源。
+- **BAAI/bge-m3**：当前主语义嵌入模型路线。
+- **BAAI/bge-reranker-v2-m3**：当前可选 reranker 路线。
+- **PyPDF**：PDF 独立解析链的基础组件。
+- **Apache Tika**：扩展格式统一解析 sidecar 路线。
+- **Eclipse Temurin / Adoptium**：Tika 运行时所需的 JRE 分发来源。
+- **watchdog**：文件监听能力基础。
+- **PyInstaller**：Windows 绿色版打包链。
+- **pytest**：自动化测试主框架。
+
+感谢这些项目及其维护者长期的开放协作与工程投入。
 
 ## 📜 许可证
 

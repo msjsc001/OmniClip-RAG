@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## V0.3.3 - 2026-03-17
+
+### Added
+
+- Added [RELEASE_NOTES_v0.3.3](releases/RELEASE_NOTES_v0.3.3.md) for the Tika compatibility-first indexing and installer-progress release.
+- Added an in-repo execution record [Tika建库稳定性与安装进度闭环计划](plans/Tika建库稳定性与安装进度闭环计划.md) so this Tika stabilization work can be resumed without chat history.
+- Added inline Tika runtime installation progress in the Qt configuration page, including visible stage, current item, byte progress, and install target.
+
+### Changed
+
+- Changed Tika parsing from an XHTML-only contract to a compatibility-first chain of `text/plain -> rmeta/json`, so valid Tika-supported files no longer depend on one fragile response surface.
+- Changed Tika normalization so extension indexing now succeeds whenever extractable body text is available, instead of treating missing XHTML as a hard failure.
+- Changed README / README.zh-CN to `v0.3.3`, renamed the capability section to `Core Features / 核心特性`, and added an explicit open-source acknowledgements section before the license block.
+
+### Fixed
+
+- Fixed the Tika build regression where matched EPUB / DOCX files could all end up as "skipped" because the old `Accept: application/xhtml+xml` request path returned `HTTP 406` against Tika 3.2.3.
+- Fixed Tika build reporting so expected skips (for example zero-byte files) are now separated from real parse failures, with recent issue summaries surfaced back to the UI.
+- Fixed the Tika Runtime auto-install UX black box by wiring backend progress events into the page instead of leaving users with only start/end feedback.
+
 ## V0.3.2 - 2026-03-17
 
 ### Added

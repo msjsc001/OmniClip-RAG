@@ -1,15 +1,19 @@
 import shutil
 import time
 import unittest
+import json
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import omniclip_rag  # noqa: F401
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.extensions.models import ExtensionDirectoryState, ExtensionIndexState, ExtensionSourceDirectory, TikaRuntimeStatus
-from omniclip_rag.extensions.normalizers.tika_output import normalize_tika_xhtml
+from omniclip_rag.extensions.normalizers.tika_output import normalize_tika_content, normalize_tika_xhtml
 from omniclip_rag.extensions.registry import ExtensionRegistry, ExtensionRegistryState
+from omniclip_rag.extensions.runtimes import TikaParsedContent, parse_file_with_tika
 from omniclip_rag.extensions.service import TikaExtensionService
 from omniclip_rag.service import OmniClipService
 from omniclip_rag.extensions.watch import ExtensionWatchService
@@ -55,6 +59,89 @@ class TikaExtensionTests(unittest.TestCase):
         self.assertEqual([row['text'] for row in rows], ['First paragraph.', 'Second paragraph.', 'Loose block text.'])
         self.assertEqual(rows[0]['anchor'], 'Guide')
 
+    def test_normalize_tika_content_accepts_plain_text(self) -> None:
+        rows = normalize_tika_content('First paragraph.\n\nSecond paragraph.', content_type='text/plain')
+        self.assertEqual([row['text'] for row in rows], ['First paragraph.', 'Second paragraph.'])
+
+    def test_normalize_tika_content_accepts_rmeta_json(self) -> None:
+        payload = [{'X-TIKA:content': 'Doc body line 1.\n\nDoc body line 2.'}]
+        rows = normalize_tika_content(json.dumps(payload), content_type='application/json', metadata=payload)
+        self.assertEqual([row['text'] for row in rows], ['Doc body line 1.', 'Doc body line 2.'])
+
+    def test_parse_file_with_tika_prefers_plain_text(self) -> None:
+        source = TEST_ROOT / 'plain.txt'
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text('hello', encoding='utf-8')
+
+        class _FakeHeaders:
+            def get_content_charset(self, default='utf-8'):
+                return default
+
+        class _FakeResponse:
+            def __init__(self, body: str) -> None:
+                self._body = body.encode('utf-8')
+                self.headers = _FakeHeaders()
+                self.status = 200
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with patch('omniclip_rag.extensions.runtimes.tika_runtime.urllib.request.urlopen', return_value=_FakeResponse('Primary text body.')):
+            result = parse_file_with_tika(source)
+
+        self.assertEqual(result.strategy, 'text_plain')
+        self.assertEqual(result.content_type, 'text/plain')
+        self.assertIn('Primary text body.', result.content)
+
+    def test_parse_file_with_tika_falls_back_to_rmeta_json(self) -> None:
+        source = TEST_ROOT / 'fallback.epub'
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text('hello', encoding='utf-8')
+
+        class _FakeHeaders:
+            def get_content_charset(self, default='utf-8'):
+                return default
+
+        class _FakeResponse:
+            def __init__(self, body: str) -> None:
+                self._body = body.encode('utf-8')
+                self.headers = _FakeHeaders()
+                self.status = 200
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        http_406 = HTTPError(
+            url='http://127.0.0.1:9998/tika',
+            code=406,
+            msg='Not Acceptable',
+            hdrs={},
+            fp=BytesIO(b'no xhtml here'),
+        )
+        json_payload = json.dumps([{'X-TIKA:content': 'Recovered from rmeta.'}])
+        with patch(
+            'omniclip_rag.extensions.runtimes.tika_runtime.urllib.request.urlopen',
+            side_effect=[http_406, _FakeResponse(json_payload)],
+        ):
+            result = parse_file_with_tika(source)
+
+        self.assertEqual(result.strategy, 'rmeta_json')
+        self.assertEqual(result.content_type, 'application/json')
+        self.assertIsInstance(result.metadata, list)
+        self.assertEqual(result.metadata[0]['X-TIKA:content'], 'Recovered from rmeta.')
+
     def test_tika_full_rebuild_uses_isolated_storage_and_skips_poisoned_files(self) -> None:
         vault = TEST_ROOT / 'vault'
         vault.mkdir(parents=True, exist_ok=True)
@@ -84,6 +171,9 @@ class TikaExtensionTests(unittest.TestCase):
 
         self.assertEqual(report.indexed_files, 2)
         self.assertEqual(report.skipped_files, 1)
+        self.assertEqual(report.expected_skips, 0)
+        self.assertEqual(report.failed_files, 1)
+        self.assertTrue(any('poisoned.html' in item for item in report.recent_issues))
         self.assertEqual(set(report.enabled_formats), {'html', 'docx'})
         isolated_paths = build_extension_data_paths(paths, 'tika')
         self.assertTrue(isolated_paths.sqlite_file.exists())
@@ -242,14 +332,62 @@ class TikaExtensionTests(unittest.TestCase):
         self.assertTrue(bool(state.snapshot.tika.watch_state.last_scan_at))
         self.assertFalse(state.snapshot.tika.watch_running)
 
-    def _fake_tika_parse(self, file_path: Path, *, port: int = 9998, timeout: float = 60.0) -> str:
+    def test_tika_build_treats_empty_file_as_expected_skip(self) -> None:
+        vault = TEST_ROOT / 'vault_empty'
+        vault.mkdir(parents=True, exist_ok=True)
+        source_root = TEST_ROOT / 'tika_empty_source'
+        source_root.mkdir(parents=True, exist_ok=True)
+        (source_root / 'book.epub').write_text('epub marker', encoding='utf-8')
+        (source_root / 'empty.docx').write_bytes(b'')
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_empty'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.tika_config.enabled = True
+        state.tika_config.source_directories = [ExtensionSourceDirectory(path=str(source_root), selected=True, state=ExtensionDirectoryState.ENABLED)]
+        for item in state.tika_config.selected_formats:
+            item.enabled = item.format_id in {'epub', 'docx'}
+        ExtensionRegistry().save(paths, state)
+
+        runtime_manager = _FakeTikaRuntimeManager()
+        service = TikaExtensionService(config, paths, runtime_manager=runtime_manager)
+        try:
+            with patch('omniclip_rag.extensions.service.parse_file_with_tika', side_effect=self._fake_tika_parse):
+                report = service.full_rebuild()
+        finally:
+            service.close()
+
+        self.assertEqual(report.indexed_files, 1)
+        self.assertEqual(report.skipped_files, 1)
+        self.assertEqual(report.expected_skips, 1)
+        self.assertEqual(report.failed_files, 0)
+        self.assertTrue(any('empty.docx' in item for item in report.recent_issues))
+
+    def _fake_tika_parse(self, file_path: Path, *, port: int = 9998, timeout: float = 60.0) -> TikaParsedContent:
         del port, timeout
         name = Path(file_path).name.lower()
         if name == 'poisoned.html':
             raise RuntimeError('poisoned_document')
         if name.endswith('.docx'):
-            return '<html xmlns="http://www.w3.org/1999/xhtml"><body><div><p>Docx Magic Paragraph.</p></div></body></html>'
-        return '<html xmlns="http://www.w3.org/1999/xhtml"><body><div><h1>Guide</h1><p>HTML Magic Paragraph.</p></div></body></html>'
+            return TikaParsedContent(
+                content=json.dumps([{'X-TIKA:content': 'Docx Magic Paragraph.'}]),
+                content_type='application/json',
+                strategy='rmeta_json',
+                metadata=[{'X-TIKA:content': 'Docx Magic Paragraph.'}],
+            )
+        if name.endswith('.epub'):
+            return TikaParsedContent(
+                content='EPUB Magic Paragraph.\n\nAnother EPUB paragraph.',
+                content_type='text/plain',
+                strategy='text_plain',
+                metadata=None,
+            )
+        return TikaParsedContent(
+            content='HTML Magic Paragraph.',
+            content_type='text/plain',
+            strategy='text_plain',
+            metadata=None,
+        )
 
 
 if __name__ == '__main__':

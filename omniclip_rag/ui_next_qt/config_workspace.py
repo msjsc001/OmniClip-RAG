@@ -82,7 +82,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._extension_state_loaded = False
         self._extension_ui_sync = False
         self._tika_runtime_manager = TikaSidecarManager()
-        self._tika_runtime_worker: FunctionWorker | None = None
+        self._tika_runtime_worker: QtCore.QObject | None = None
+        self._tika_runtime_worker_mode: str | None = None
+        self._tika_runtime_install_progress: dict[str, object] | None = None
         self._extension_task_worker: QtCore.QObject | None = None
         self._extension_task_key: str | None = None
         self._extension_active_source_key: tuple[str, str] | None = None
@@ -1124,6 +1126,19 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.ext_tika_runtime_root_label.setProperty('role', 'muted')
         self.ext_tika_runtime_root_label.setWordWrap(True)
         runtime_layout.addWidget(self.ext_tika_runtime_root_label)
+        self.ext_tika_runtime_progress_label = QtWidgets.QLabel(runtime_card)
+        self.ext_tika_runtime_progress_label.setProperty('role', 'guide')
+        self.ext_tika_runtime_progress_label.setWordWrap(True)
+        runtime_layout.addWidget(self.ext_tika_runtime_progress_label)
+        self.ext_tika_runtime_progress_bar = QtWidgets.QProgressBar(runtime_card)
+        self.ext_tika_runtime_progress_bar.setTextVisible(True)
+        self.ext_tika_runtime_progress_bar.setMinimum(0)
+        self.ext_tika_runtime_progress_bar.setMaximum(100)
+        runtime_layout.addWidget(self.ext_tika_runtime_progress_bar)
+        self.ext_tika_runtime_progress_detail_label = QtWidgets.QLabel(runtime_card)
+        self.ext_tika_runtime_progress_detail_label.setProperty('role', 'muted')
+        self.ext_tika_runtime_progress_detail_label.setWordWrap(True)
+        runtime_layout.addWidget(self.ext_tika_runtime_progress_detail_label)
         runtime_actions = QtWidgets.QHBoxLayout()
         runtime_layout.addLayout(runtime_actions)
         self.ext_tika_auto_button = QtWidgets.QPushButton(self._tr('extensions_tika_auto_install'), runtime_card)
@@ -2167,6 +2182,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 skipped=int(getattr(report, 'skipped_files', 0) or 0),
             )
             missing_dirs = tuple(str(item) for item in (getattr(report, 'missing_directories', ()) or ()))
+        message = self._append_extension_recent_issues(message, report)
         self.statusMessageChanged.emit(message)
         self._append_log(message)
         if missing_dirs:
@@ -2196,13 +2212,22 @@ class ConfigWorkspace(QtWidgets.QWidget):
         report = payload.get('report')
         self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
         if pipeline == 'tika':
-            message = self._tr(
-                'extensions_tika_rebuild_done',
-                files=int(getattr(report, 'indexed_files', 0) or 0),
-                chunks=int(getattr(report, 'indexed_chunks', 0) or 0),
-                deleted=int(getattr(report, 'deleted_files', 0) or 0),
-                skipped=int(getattr(report, 'skipped_files', 0) or 0),
-            )
+            indexed_files = int(getattr(report, 'indexed_files', 0) or 0)
+            skipped_files = int(getattr(report, 'skipped_files', 0) or 0)
+            failed_files = int(getattr(report, 'failed_files', 0) or 0)
+            if indexed_files == 0 and skipped_files > 0:
+                message = self._tr(
+                    'extensions_row_rebuild_all_failed' if failed_files > 0 else 'extensions_row_rebuild_all_skipped',
+                    skipped=skipped_files,
+                )
+            else:
+                message = self._tr(
+                    'extensions_tika_rebuild_done',
+                    files=indexed_files,
+                    chunks=int(getattr(report, 'indexed_chunks', 0) or 0),
+                    deleted=int(getattr(report, 'deleted_files', 0) or 0),
+                    skipped=skipped_files,
+                )
             missing_dirs = tuple(str(item) for item in (getattr(report, 'missing_directories', ()) or ()))
         else:
             message = self._tr(
@@ -2213,6 +2238,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 skipped=int(getattr(report, 'skipped_files', 0) or 0),
             )
             missing_dirs = tuple(str(item) for item in (getattr(report, 'missing_directories', ()) or ()))
+        message = self._append_extension_recent_issues(message, report)
         self.statusMessageChanged.emit(message)
         self._append_log(message)
         if missing_dirs:
@@ -2249,6 +2275,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         deleted_files = int(payload.get('deleted_files') or 0)
         current_path = str(payload.get('current_path') or '').strip()
         current_name = Path(current_path).name if current_path else ''
+        recent_issue = str(payload.get('recent_issue') or '').strip()
         if total > 0:
             message = self._tr(
                 'extensions_progress_stage_counts',
@@ -2267,6 +2294,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             detail_lines.append(self._tr('extensions_progress_current_file', name=current_name))
         if deleted_files:
             detail_lines.append(self._tr('extensions_progress_deleted_count', count=deleted_files))
+        if recent_issue:
+            detail_lines.append(self._tr('extensions_progress_recent_issue', reason=recent_issue))
         detail_lines.append(
             self._tr('extensions_progress_close_safe' if bool(payload.get('close_safe')) else 'extensions_progress_close_busy')
         )
@@ -2365,7 +2394,22 @@ class ConfigWorkspace(QtWidgets.QWidget):
         elif action == 'delete':
             message = self._tr('extensions_row_delete_done', deleted=int(getattr(report, 'deleted_files', 0) or 0), files=int(getattr(report, 'indexed_files', 0) or 0))
         else:
-            message = self._tr('extensions_row_rebuild_done', files=int(getattr(report, 'indexed_files', 0) or 0), chunks=int(getattr(report, 'indexed_chunks', 0) or 0), skipped=int(getattr(report, 'skipped_files', 0) or 0))
+            indexed_files = int(getattr(report, 'indexed_files', 0) or 0)
+            skipped_files = int(getattr(report, 'skipped_files', 0) or 0)
+            failed_files = int(getattr(report, 'failed_files', 0) or 0)
+            if indexed_files == 0 and skipped_files > 0:
+                message = self._tr(
+                    'extensions_row_rebuild_all_failed' if failed_files > 0 else 'extensions_row_rebuild_all_skipped',
+                    skipped=skipped_files,
+                )
+            else:
+                message = self._tr(
+                    'extensions_row_rebuild_done',
+                    files=indexed_files,
+                    chunks=int(getattr(report, 'indexed_chunks', 0) or 0),
+                    skipped=skipped_files,
+                )
+        message = self._append_extension_recent_issues(message, report)
         self._set_extension_source_progress(pipeline, source_path, message)
         self.statusMessageChanged.emit(message)
         self._append_log(message)
@@ -2568,6 +2612,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
 
     def _refresh_tika_runtime_status(self) -> None:
         runtime = self._extension_state.snapshot.tika.runtime
+        busy = self._tika_runtime_worker is not None
         if runtime.installing:
             status_text = self._tr('extensions_tika_runtime_installing')
         elif runtime.starting:
@@ -2591,6 +2636,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if runtime.last_error:
             root_text = f"{root_text}\n{self._tr('extensions_tika_runtime_error_value', error=runtime.last_error)}"
         self.ext_tika_runtime_root_label.setText(root_text)
+        self.ext_tika_auto_button.setEnabled(not busy)
+        self.ext_tika_redetect_button.setEnabled(not busy and not runtime.installing)
+        self.ext_tika_manual_button.setToolTip(self._tr('extensions_tika_runtime_busy') if runtime.installing else '')
+        self._refresh_tika_runtime_progress_ui(runtime)
 
     def _refresh_tika_format_summary(self) -> None:
         count = sum(1 for item in self._extension_state.tika_config.selected_formats if item.enabled)
@@ -2620,12 +2669,124 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_extension_overview()
         self._refresh_tika_runtime_status()
 
+    def _append_extension_recent_issues(self, message: str, report: object) -> str:
+        recent_issues = tuple(str(item) for item in (getattr(report, 'recent_issues', ()) or ()) if str(item).strip())
+        if not recent_issues:
+            return message
+        summary = ' / '.join(recent_issues[:3])
+        return f"{message}\n{self._tr('extensions_progress_recent_issue', reason=summary)}"
+
+    def _refresh_tika_runtime_progress_ui(self, runtime: TikaRuntimeStatus) -> None:
+        payload = self._tika_runtime_install_progress
+        visible = bool(runtime.installing or payload)
+        self.ext_tika_runtime_progress_label.setVisible(visible)
+        self.ext_tika_runtime_progress_bar.setVisible(visible)
+        self.ext_tika_runtime_progress_detail_label.setVisible(visible)
+        if not visible:
+            self.ext_tika_runtime_progress_label.clear()
+            self.ext_tika_runtime_progress_detail_label.clear()
+            self.ext_tika_runtime_progress_bar.setRange(0, 100)
+            self.ext_tika_runtime_progress_bar.setValue(0)
+            return
+        self.ext_tika_runtime_progress_label.setText(self._tika_runtime_progress_summary(payload, runtime))
+        self.ext_tika_runtime_progress_detail_label.setText(self._tika_runtime_progress_detail(payload, runtime))
+        self._apply_tika_runtime_progress_bar(payload)
+
+    def _tika_runtime_progress_summary(self, payload: dict[str, object] | None, runtime: TikaRuntimeStatus) -> str:
+        stage_key = self._tika_runtime_progress_stage_key(str((payload or {}).get('stage') or ''))
+        stage_text = self._tr(stage_key)
+        if runtime.installing:
+            return self._tr('extensions_tika_runtime_progress_stage_value', stage=stage_text)
+        if payload and str(payload.get('stage') or '') == 'done':
+            return self._tr('extensions_tika_runtime_progress_stage_value', stage=self._tr('extensions_tika_runtime_progress_complete'))
+        if payload and str(payload.get('stage') or '') == 'failed':
+            return self._tr('extensions_tika_runtime_progress_stage_value', stage=self._tr('extensions_tika_runtime_progress_failed'))
+        return self._tr('extensions_tika_runtime_progress_stage_value', stage=stage_text)
+
+    def _tika_runtime_progress_detail(self, payload: dict[str, object] | None, runtime: TikaRuntimeStatus) -> str:
+        payload = payload or {}
+        detail_lines: list[str] = []
+        item_name = self._tika_runtime_progress_item_name(str(payload.get('stage') or ''))
+        if item_name:
+            detail_lines.append(self._tr('extensions_tika_runtime_progress_item_value', name=item_name))
+        downloaded = int(payload.get('downloaded') or 0)
+        total = int(payload.get('total') or 0)
+        if total > 0:
+            detail_lines.append(
+                self._tr(
+                    'extensions_tika_runtime_progress_bytes_value',
+                    downloaded=format_bytes(downloaded),
+                    total=format_bytes(total),
+                )
+            )
+        detail = str(payload.get('detail') or '').strip()
+        if detail:
+            detail_lines.append(detail)
+        install_target = runtime.install_root or str(runtime_layout(self._paths).root)
+        detail_lines.append(self._tr('extensions_tika_runtime_progress_target_value', path=install_target))
+        return '\n'.join(detail_lines)
+
+    def _apply_tika_runtime_progress_bar(self, payload: dict[str, object] | None) -> None:
+        payload = payload or {}
+        total = int(payload.get('total') or 0)
+        downloaded = int(payload.get('downloaded') or 0)
+        stage = str(payload.get('stage') or '')
+        if stage in {'done'}:
+            self.ext_tika_runtime_progress_bar.setRange(0, 100)
+            self.ext_tika_runtime_progress_bar.setValue(100)
+            return
+        if stage in {'failed'}:
+            self.ext_tika_runtime_progress_bar.setRange(0, 100)
+            self.ext_tika_runtime_progress_bar.setValue(0)
+            return
+        if total > 0:
+            percent = max(0, min(int(round((downloaded / total) * 100.0)), 100))
+            self.ext_tika_runtime_progress_bar.setRange(0, 100)
+            self.ext_tika_runtime_progress_bar.setValue(percent)
+            return
+        self.ext_tika_runtime_progress_bar.setRange(0, 0)
+
+    def _tika_runtime_progress_stage_key(self, stage: str) -> str:
+        normalized = str(stage or '').strip().lower()
+        mapping = {
+            'prepare': 'extensions_tika_runtime_progress_prepare',
+            'download_jar': 'extensions_tika_runtime_progress_download_jar',
+            'download_jre': 'extensions_tika_runtime_progress_download_jre',
+            'extract_jre': 'extensions_tika_runtime_progress_extract_jre',
+            'done': 'extensions_tika_runtime_progress_complete',
+            'failed': 'extensions_tika_runtime_progress_failed',
+        }
+        return mapping.get(normalized, 'extensions_tika_runtime_progress_prepare')
+
+    def _tika_runtime_progress_item_name(self, stage: str) -> str:
+        normalized = str(stage or '').strip().lower()
+        if normalized == 'download_jar':
+            return 'tika-server-standard-3.2.3.jar'
+        if normalized == 'download_jre':
+            return 'jre.zip'
+        return ''
+
     def _start_tika_runtime_worker(self, *, fn, on_success, on_failure_message_key: str) -> bool:
         if self._tika_runtime_worker is not None:
             self.statusMessageChanged.emit(self._tr('extensions_tika_runtime_busy'))
             return False
         worker = FunctionWorker(fn=fn)
         self._tika_runtime_worker = worker
+        self._tika_runtime_worker_mode = 'task'
+        worker.succeeded.connect(on_success)
+        worker.failed.connect(lambda message, tb, key=on_failure_message_key: self._handle_tika_runtime_worker_failure(key, message, tb))
+        worker.finished.connect(self._on_tika_runtime_worker_finished)
+        worker.start()
+        return True
+
+    def _start_tika_runtime_progress_worker(self, *, fn, on_success, on_failure_message_key: str) -> bool:
+        if self._tika_runtime_worker is not None:
+            self.statusMessageChanged.emit(self._tr('extensions_tika_runtime_busy'))
+            return False
+        worker = ProgressFunctionWorker(fn=fn)
+        self._tika_runtime_worker = worker
+        self._tika_runtime_worker_mode = 'install'
+        worker.progress.connect(self._handle_tika_runtime_install_progress)
         worker.succeeded.connect(on_success)
         worker.failed.connect(lambda message, tb, key=on_failure_message_key: self._handle_tika_runtime_worker_failure(key, message, tb))
         worker.finished.connect(self._on_tika_runtime_worker_finished)
@@ -2634,13 +2795,23 @@ class ConfigWorkspace(QtWidgets.QWidget):
 
     def _on_tika_runtime_worker_finished(self) -> None:
         self._tika_runtime_worker = None
+        self._tika_runtime_worker_mode = None
+        self._refresh_tika_runtime_status()
 
     def _handle_tika_runtime_worker_failure(self, message_key: str, message: str, traceback_text: str) -> None:
         LOGGER.error('Tika runtime worker failed: %s\n%s', message, traceback_text)
         detected = detect_tika_runtime(self._paths)
         runtime = replace(detected, last_error=message)
+        if self._tika_runtime_worker_mode == 'install':
+            self._tika_runtime_install_progress = {'stage': 'failed', 'detail': message}
         self._update_tika_runtime_snapshot(runtime, persist=True, sync_tika_sidecar=False)
         self.statusMessageChanged.emit(self._tr(message_key, error=message))
+
+    def _handle_tika_runtime_install_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        self._tika_runtime_install_progress = dict(payload)
+        self._refresh_tika_runtime_status()
 
     def _schedule_tika_runtime_refresh(self, _checked: bool = False, *, start_if_desired: bool = True) -> None:
         if self._tika_runtime_worker is not None:
@@ -2662,9 +2833,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
 
     def _install_tika_runtime_requested(self, _checked: bool = False) -> None:
         runtime = replace(self._extension_state.snapshot.tika.runtime, installing=True, starting=False, running=False, healthy=False, last_error='')
+        self._tika_runtime_install_progress = {'stage': 'prepare', 'detail': self._tr('extensions_tika_runtime_install_started')}
         self._update_tika_runtime_snapshot(runtime, persist=True, sync_tika_sidecar=False)
-        started = self._start_tika_runtime_worker(
-            fn=lambda: install_tika_runtime(self._paths),
+        started = self._start_tika_runtime_progress_worker(
+            fn=lambda emit_progress: install_tika_runtime(self._paths, progress_callback=emit_progress),
             on_success=self._handle_tika_runtime_install_success,
             on_failure_message_key='extensions_tika_runtime_install_failed',
         )
@@ -2675,6 +2847,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._update_tika_runtime_snapshot(refreshed, persist=True, sync_tika_sidecar=False)
 
     def _handle_tika_runtime_install_success(self, runtime: TikaRuntimeStatus) -> None:
+        self._tika_runtime_install_progress = {'stage': 'done', 'detail': self._tr('extensions_tika_runtime_install_ready')}
         runtime = replace(runtime, installing=False, last_error='')
         self._update_tika_runtime_snapshot(runtime, persist=True, announce_key='extensions_tika_runtime_install_ready', sync_tika_sidecar=False)
         self._sync_tika_sidecar_desired_state()

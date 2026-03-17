@@ -10,7 +10,7 @@ Why:
 - CPU / CUDA choices should remain explicit and repairable;
 - a new packaged version should **reuse** an existing healthy Runtime instead of forcing a full redownload.
 
-## Runtime Layout In `v0.3.2`
+## Runtime Layout In `v0.3.3`
 
 Starting with the current packaged design, OmniClip distinguishes two Runtime paths:
 

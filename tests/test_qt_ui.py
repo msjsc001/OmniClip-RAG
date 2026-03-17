@@ -807,6 +807,48 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_config_workspace_tika_runtime_install_progress_updates_inline_widgets(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._handle_tika_runtime_install_progress(
+                {
+                    'stage': 'download_jar',
+                    'downloaded': 50,
+                    'total': 100,
+                    'detail': 'Downloading tika-server-standard-3.2.3.jar',
+                }
+            )
+            runtime = workspace._extension_state.snapshot.tika.runtime
+            workspace._refresh_tika_runtime_progress_ui(runtime)
+            self.assertFalse(workspace.ext_tika_runtime_progress_label.isHidden())
+            self.assertIn('下载 Tika Server', workspace.ext_tika_runtime_progress_label.text())
+            self.assertEqual(workspace.ext_tika_runtime_progress_bar.maximum(), 100)
+            self.assertEqual(workspace.ext_tika_runtime_progress_bar.value(), 50)
+            self.assertIn('tika-server-standard-3.2.3.jar', workspace.ext_tika_runtime_progress_detail_label.text())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_install_tika_runtime_requested_uses_progress_worker_path(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_start_tika_runtime_progress_worker', return_value=True) as progress_mock, \
+                 patch.object(workspace, '_start_tika_runtime_worker') as basic_mock:
+                workspace._install_tika_runtime_requested()
+            progress_mock.assert_called_once()
+            basic_mock.assert_not_called()
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_config_workspace_gpu_runtime_row_requires_execution_verification(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
