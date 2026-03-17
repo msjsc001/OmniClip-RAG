@@ -21,6 +21,7 @@ class MetadataStore:
         self.connection = sqlite3.connect(self.db_path)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL;")
+        self.connection.execute("PRAGMA busy_timeout=5000;")
         self.connection.execute("PRAGMA foreign_keys=ON;")
         self._variable_limit = self._resolve_variable_limit()
         self._initialize_schema()

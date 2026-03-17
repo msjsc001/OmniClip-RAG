@@ -1121,6 +1121,7 @@ class OmniClipService:
         query_text: str,
         limit: int | None = None,
         copy_result: bool = False,
+        export_result: bool = True,
         score_threshold: float | None = None,
         allowed_families: list[str] | tuple[str, ...] | set[str] | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
@@ -1376,8 +1377,9 @@ class OmniClipService:
         if copy_result:
             _emit_query_progress(on_progress, 'copy', percent=98, hits=len(finalized_hits), limit=limit)
             copy_text(context_pack)
-        export_name = f"context_{int(time.time())}.md"
-        (self.paths.exports_dir / export_name).write_text(context_pack, encoding='utf-8')
+        if export_result:
+            export_name = f"context_{int(time.time())}.md"
+            (self.paths.exports_dir / export_name).write_text(context_pack, encoding='utf-8')
         return QueryResult(hits=finalized_hits, context_text=context_pack, insights=insights)
 
     def _merge_candidate_rows(self, storage_candidates, vector_candidates: dict[str, float]):
@@ -1518,12 +1520,15 @@ class OmniClipService:
         available_query_families = [family for family, enabled in (('markdown', index_ready), ('pdf', pdf_ready), ('tika', tika_ready)) if enabled]
         resolved_vault = str(self.config.vault_dir) if self.config.vault_path else ''
         query_recommendation = asdict(self._query_runtime_advisor.current_recommendation(resolve_vector_device(self.config.vector_device), getattr(self.config, 'reranker_enabled', False)))
+        runtime_state = inspect_runtime_environment()
+        index_meta = self._index_trace_metadata()
         return {
             'vault_path': resolved_vault,
             'data_root': str(self.paths.global_root),
             'shared_root': str(self.paths.shared_root),
             'workspace_root': str(self.paths.root),
             'workspace_id': self.paths.root.name,
+            'snapshot_id': str(index_meta.get('index_generation_id') or ''),
             'vector_backend': self.config.vector_backend,
             'reranker_enabled': getattr(self.config, 'reranker_enabled', False),
             'reranker_model': getattr(self.config, 'reranker_model', ''),
@@ -1539,6 +1544,8 @@ class OmniClipService:
             'query_available_families': available_query_families,
             'index_completed_at': str((index_status or {}).get('completed_at') or ''),
             'query_limit_recommendation': query_recommendation,
+            'runtime_root': str(runtime_state.get('active_runtime_dir') or ''),
+            'runtime_preferred_root': str(runtime_state.get('preferred_runtime_dir') or ''),
         }
 
     def pending_rebuild(self) -> dict[str, object] | None:

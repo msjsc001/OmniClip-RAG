@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## V0.4.0 - 2026-03-17
+
+### Added
+
+- Added the first MCP server line for OmniClip RAG, including a shared headless bootstrap, a dedicated `OmniClipRAG-MCP.exe` shell, and the two V1 read-only tools `omniclip.status` plus `omniclip.search`.
+- Added [MCP_SETUP.md](MCP_SETUP.md) and client example configs under `examples/mcp/` for Claude Desktop, Cursor, and Cline-style MCP integrations.
+- Added plain-language MCP onboarding in both READMEs, including a tested Jan.ai `stdio` setup example and natural-language prompt examples for AI-side use.
+- Added [RELEASE_NOTES_v0.4.0](releases/RELEASE_NOTES_v0.4.0.md) and the persistent in-repo execution record [OmniClip RAG MCP接入实施计划](plans/OmniClip%20RAG%20MCP接入实施计划.md).
+
+### Changed
+
+- Changed the product from a single-shell desktop app into a dual-shell architecture: `OmniClipRAG.exe` remains the windowed GUI while `OmniClipRAG-MCP.exe` becomes the console/headless stdio MCP server over the same retrieval core.
+- Changed shared startup so GUI and MCP now align on one bootstrap path for RuntimeContext, DataPaths, QueryService initialization, and packaged Runtime discovery.
+- Changed query execution so the MCP route can reuse the existing broker/query core without exporting context packs, keeping MCP effectively read-only.
+- Changed the visible app/package metadata to `v0.4.0`.
+
+### Fixed
+
+- Fixed the architectural risk of trying to hang stdio MCP off the windowed GUI executable by introducing a separate headless packaging target instead of overloading the desktop EXE.
+- Fixed MCP query transparency by making degraded lexical fallback explicit through `effective_mode`, `degraded`, and `warnings` rather than silently pretending full semantic retrieval is always active.
+- Fixed read/write side effects for headless tool calls by allowing query execution without automatic export-file generation.
+
 ## V0.3.3 - 2026-03-17
 
 ### Added

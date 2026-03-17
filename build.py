@@ -7,18 +7,15 @@ import shutil
 import site
 import sys
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
 DIST_ROOT = ROOT / 'dist'
 VERSION_FILE = ROOT / 'omniclip_rag' / '__init__.py'
-EXE_BASENAME = 'OmniClipRAG'
-STAGING_OUTPUT_NAME = EXE_BASENAME
-LEGACY_OUTPUT_DIR = DIST_ROOT / 'OmniClipRAG_App'
 STAGING_DIST_ROOT = ROOT / 'build' / 'pyinstaller-dist'
 WORK_DIR = ROOT / 'build' / 'pyinstaller-work'
-SPEC_PATH = ROOT / 'OmniClipRAG.spec'
 BLACKLIST_FRAGMENTS = (
     'workspaces/',
     'shared/cache/',
@@ -55,24 +52,59 @@ def _read_app_version() -> str:
 
 
 APP_VERSION = _read_app_version()
-OUTPUT_NAME = f'{EXE_BASENAME}-v{APP_VERSION}'
-OUTPUT_DIR = DIST_ROOT / OUTPUT_NAME
-PROTECTED_RUNTIME_DIR = OUTPUT_DIR / 'runtime'
-STAGING_OUTPUT_DIR = STAGING_DIST_ROOT / STAGING_OUTPUT_NAME
-RELEASE_ZIP_PATH = DIST_ROOT / f'{OUTPUT_NAME}-win64.zip'
-RUNTIME_SUPPORT_FILES = {
-    ROOT / 'scripts' / 'install_runtime.ps1': OUTPUT_DIR / 'InstallRuntime.ps1',
-    ROOT / 'RUNTIME_SETUP.md': OUTPUT_DIR / 'RUNTIME_SETUP.md',
-}
+
+
+@dataclass(frozen=True)
+class BuildTarget:
+    exe_basename: str
+    spec_path: Path
+    output_name: str
+    output_dir: Path
+    release_zip_path: Path
+    support_files: dict[Path, Path]
+    protected_runtime_dir: Path | None = None
+
+    @property
+    def staging_output_dir(self) -> Path:
+        return STAGING_DIST_ROOT / self.exe_basename
+
+
+GUI_TARGET = BuildTarget(
+    exe_basename='OmniClipRAG',
+    spec_path=ROOT / 'OmniClipRAG.spec',
+    output_name=f'OmniClipRAG-v{APP_VERSION}',
+    output_dir=DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}',
+    release_zip_path=DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}-win64.zip',
+    support_files={
+        ROOT / 'scripts' / 'install_runtime.ps1': DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'InstallRuntime.ps1',
+        ROOT / 'RUNTIME_SETUP.md': DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'RUNTIME_SETUP.md',
+    },
+    protected_runtime_dir=DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'runtime',
+)
+MCP_TARGET = BuildTarget(
+    exe_basename='OmniClipRAG-MCP',
+    spec_path=ROOT / 'OmniClipRAG-MCP.spec',
+    output_name=f'OmniClipRAG-MCP-v{APP_VERSION}',
+    output_dir=DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}',
+    release_zip_path=DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}-win64.zip',
+    support_files={
+        ROOT / 'MCP_SETUP.md': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'MCP_SETUP.md',
+        ROOT / 'examples' / 'mcp' / 'claude_desktop.json': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'claude_desktop.json',
+        ROOT / 'examples' / 'mcp' / 'cursor.json': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'cursor.json',
+        ROOT / 'examples' / 'mcp' / 'cline.json': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'cline.json',
+    },
+)
+LEGACY_OUTPUT_DIR = DIST_ROOT / 'OmniClipRAG_App'
+TARGETS = (GUI_TARGET, MCP_TARGET)
 
 
 def _normalize(path: Path) -> Path:
     return path.expanduser().resolve()
 
 
-def _bundle_payload_root() -> Path:
-    internal_root = OUTPUT_DIR / '_internal'
-    return internal_root if internal_root.exists() else OUTPUT_DIR
+def _bundle_payload_root(output_dir: Path) -> Path:
+    internal_root = output_dir / '_internal'
+    return internal_root if internal_root.exists() else output_dir
 
 
 def _prepare_import_path() -> None:
@@ -93,21 +125,18 @@ def _prepare_import_path() -> None:
 def _remove_path(path: Path) -> None:
     if not path.exists():
         return
-    normalized = _normalize(path)
-    protected = _normalize(PROTECTED_RUNTIME_DIR)
-    if normalized == protected or protected in normalized.parents:
-        raise RuntimeError(f'Refusing to remove protected runtime path: {normalized}')
     if path.is_dir():
         shutil.rmtree(path)
     else:
         path.unlink()
 
 
-def _clean_output_dir_preserving_runtime() -> None:
-    if not OUTPUT_DIR.exists():
+def _clean_output_dir(target: BuildTarget) -> None:
+    if not target.output_dir.exists():
         return
-    for child in OUTPUT_DIR.iterdir():
-        if _normalize(child) == _normalize(PROTECTED_RUNTIME_DIR):
+    protected = target.protected_runtime_dir
+    for child in target.output_dir.iterdir():
+        if protected is not None and _normalize(child) == _normalize(protected):
             continue
         _remove_path(child)
 
@@ -119,14 +148,16 @@ def _clean_previous_outputs(clean: bool) -> None:
         _remove_path(WORK_DIR)
     if STAGING_DIST_ROOT.exists():
         _remove_path(STAGING_DIST_ROOT)
-    _clean_output_dir_preserving_runtime()
+    for target in TARGETS:
+        _clean_output_dir(target)
     if LEGACY_OUTPUT_DIR.exists():
         _remove_path(LEGACY_OUTPUT_DIR)
-    if RELEASE_ZIP_PATH.exists():
-        _remove_path(RELEASE_ZIP_PATH)
+    for target in TARGETS:
+        if target.release_zip_path.exists():
+            _remove_path(target.release_zip_path)
 
 
-def _run_pyinstaller() -> None:
+def _run_pyinstaller(target: BuildTarget) -> None:
     from PyInstaller.__main__ import run as pyinstaller_run
 
     pyinstaller_run(
@@ -137,7 +168,7 @@ def _run_pyinstaller() -> None:
             str(STAGING_DIST_ROOT),
             '--workpath',
             str(WORK_DIR),
-            str(SPEC_PATH),
+            str(target.spec_path),
         ]
     )
 
@@ -153,19 +184,20 @@ def _copy_tree_contents(source: Path, target: Path) -> None:
             shutil.copy2(item, destination)
 
 
-def _install_staged_bundle() -> None:
-    if not STAGING_OUTPUT_DIR.exists():
-        raise RuntimeError(f'Staged build output is missing: {STAGING_OUTPUT_DIR}')
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    _copy_tree_contents(STAGING_OUTPUT_DIR, OUTPUT_DIR)
+def _install_staged_bundle(target: BuildTarget) -> None:
+    if not target.staging_output_dir.exists():
+        raise RuntimeError(f'Staged build output is missing: {target.staging_output_dir}')
+    target.output_dir.mkdir(parents=True, exist_ok=True)
+    _copy_tree_contents(target.staging_output_dir, target.output_dir)
 
 
-def _copy_runtime_support_files() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    for source, target in RUNTIME_SUPPORT_FILES.items():
+def _copy_support_files(target: BuildTarget) -> None:
+    target.output_dir.mkdir(parents=True, exist_ok=True)
+    for source, destination in target.support_files.items():
         if not source.exists():
             raise RuntimeError(f'Missing release support file: {source}')
-        shutil.copy2(source, target)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
 
 
 def _is_forbidden_bundle_package(part: str) -> bool:
@@ -179,25 +211,27 @@ def _is_forbidden_bundle_package(part: str) -> bool:
     return False
 
 
-def _audit_bundle() -> None:
-    app_exe = OUTPUT_DIR / f'{EXE_BASENAME}.exe'
+def _audit_bundle(target: BuildTarget) -> None:
+    app_exe = target.output_dir / f'{target.exe_basename}.exe'
     if not app_exe.exists():
-        raise RuntimeError(f'Build output is missing {EXE_BASENAME}.exe: {app_exe}')
-    for required in (
-        OUTPUT_DIR / 'InstallRuntime.ps1',
-        OUTPUT_DIR / 'RUNTIME_SETUP.md',
-    ):
+        raise RuntimeError(f'Build output is missing {target.exe_basename}.exe: {app_exe}')
+    for required in target.support_files.values():
         if not required.exists():
-            raise RuntimeError(f'Missing runtime support file: {required}')
-    payload_root = _bundle_payload_root()
-    for required in (
-        payload_root / 'resources' / 'app_icon.ico',
-        payload_root / 'resources' / 'app_icon.png',
-    ):
+            raise RuntimeError(f'Missing release support file: {required}')
+    payload_root = _bundle_payload_root(target.output_dir)
+    required_resources = [payload_root / 'resources' / 'tika_suffixes_3.2.3.txt']
+    if target.exe_basename == 'OmniClipRAG':
+        required_resources.extend(
+            (
+                payload_root / 'resources' / 'app_icon.ico',
+                payload_root / 'resources' / 'app_icon.png',
+            )
+        )
+    for required in required_resources:
         if not required.exists():
             raise RuntimeError(f'Missing required resource: {required}')
     for path in payload_root.rglob('*'):
-        relative = path.relative_to(OUTPUT_DIR).as_posix().lower()
+        relative = path.relative_to(target.output_dir).as_posix().lower()
         if any(fragment in relative for fragment in BLACKLIST_FRAGMENTS):
             raise RuntimeError(f'Bundle purity audit failed, forbidden runtime payload detected: {relative}')
         relative_parts = path.relative_to(payload_root).parts
@@ -216,37 +250,39 @@ def _directory_size(path: Path) -> int:
 
 def _core_bundle_size() -> int:
     total = 0
-    if not OUTPUT_DIR.exists():
-        return total
-    for child in OUTPUT_DIR.iterdir():
-        if _normalize(child) == _normalize(PROTECTED_RUNTIME_DIR):
+    for target in TARGETS:
+        if not target.output_dir.exists():
             continue
-        if child.is_file():
-            total += child.stat().st_size
-        elif child.is_dir():
-            total += _directory_size(child)
+        for child in target.output_dir.iterdir():
+            if target.protected_runtime_dir is not None and _normalize(child) == _normalize(target.protected_runtime_dir):
+                continue
+            if child.is_file():
+                total += child.stat().st_size
+            elif child.is_dir():
+                total += _directory_size(child)
     return total
 
 
-def _build_release_zip() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(RELEASE_ZIP_PATH, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-        for path in sorted(OUTPUT_DIR.rglob('*')):
+def _build_release_zip(target: BuildTarget) -> None:
+    target.output_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(target.release_zip_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in sorted(target.output_dir.rglob('*')):
             if path.is_dir():
                 continue
-            relative = path.relative_to(OUTPUT_DIR)
+            relative = path.relative_to(target.output_dir)
             if relative.parts and relative.parts[0].lower() == 'runtime':
                 continue
-            archive.write(path, arcname=(Path(OUTPUT_NAME) / relative).as_posix())
+            archive.write(path, arcname=(Path(target.output_name) / relative).as_posix())
 
 
 def _summarize() -> None:
     size_mb = _core_bundle_size() / (1024 * 1024)
-    print(f'Build succeeded: {OUTPUT_DIR}')
-    print(f'Executable: {OUTPUT_DIR / f"{EXE_BASENAME}.exe"}')
-    if PROTECTED_RUNTIME_DIR.exists():
-        print(f'Preserved runtime: {PROTECTED_RUNTIME_DIR}')
-    print(f'Release zip: {RELEASE_ZIP_PATH}')
+    for target in TARGETS:
+        print(f'Build succeeded: {target.output_dir}')
+        print(f'Executable: {target.output_dir / f"{target.exe_basename}.exe"}')
+        if target.protected_runtime_dir is not None and target.protected_runtime_dir.exists():
+            print(f'Preserved runtime: {target.protected_runtime_dir}')
+        print(f'Release zip: {target.release_zip_path}')
     print(f'Approx app bundle size (excluding runtime): {size_mb:.1f} MB')
 
 
@@ -261,12 +297,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     _prepare_import_path()
     _clean_previous_outputs(clean=not args.no_clean)
-    _run_pyinstaller()
-    _install_staged_bundle()
-    _copy_runtime_support_files()
-    if not args.skip_audit:
-        _audit_bundle()
-    _build_release_zip()
+    for target in TARGETS:
+        _run_pyinstaller(target)
+        _install_staged_bundle(target)
+        _copy_support_files(target)
+        if not args.skip_audit:
+            _audit_bundle(target)
+        _build_release_zip(target)
     _summarize()
     return 0
 

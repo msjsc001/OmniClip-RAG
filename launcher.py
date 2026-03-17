@@ -1,128 +1,45 @@
 from __future__ import annotations
 
-import json
-import os
 import sys
 from pathlib import Path
 
-from omniclip_rag.config import default_data_root
-from omniclip_rag.runtime_layout import ensure_runtime_layout
+import launcher_support as _support
 
 
-_DLL_HANDLES: list[object] = []
+__all__ = [
+    '_apply_pending_runtime_updates',
+    '_bootstrap_local_packages',
+    '_collect_bundle_dll_dirs',
+    '_register_dll_directories',
+    '_runtime_bootstrap_paths',
+]
 
 
-def _preferred_runtime_dir() -> Path:
-    override = str(os.environ.get('OMNICLIP_RUNTIME_ROOT') or '').strip()
-    if override:
-        return Path(override).expanduser().resolve()
-    default_root = default_data_root().resolve()
-    config_path = default_root / 'config.json'
-    if config_path.exists():
-        try:
-            payload = json.loads(config_path.read_text(encoding='utf-8'))
-        except Exception:
-            payload = {}
-        configured_root = str(payload.get('data_root') or '').strip()
-        if configured_root:
-            return Path(configured_root).expanduser().resolve() / 'shared' / 'runtime'
-    return default_root / 'shared' / 'runtime'
+def _runtime_bootstrap_paths(runtime_dir: Path):
+    return _support._runtime_bootstrap_paths(runtime_dir)
 
 
-def _runtime_bootstrap_paths(runtime_dir: Path) -> tuple[list[Path], list[Path]]:
-    marker = runtime_dir / '_runtime_bootstrap.json'
-    if not marker.exists():
-        return [], []
-    try:
-        payload = json.loads(marker.read_text(encoding='utf-8'))
-    except Exception:
-        return [], []
-
-    # Why: the frozen app must keep using its own bundled stdlib. Pulling
-    # stdlib/platstdlib from an external Python installation poisons imports
-    # (for example asyncio/base_events) and makes runtime health checks lie.
-    sys_paths: list[Path] = []
-    dll_paths: list[Path] = []
-    dll_value = str(payload.get('dll_dir') or '').strip()
-    if dll_value:
-        candidate = Path(dll_value)
-        if candidate.exists():
-            dll_paths.append(candidate)
-    return sys_paths, dll_paths
+def _register_dll_directories(paths):
+    return _support._register_dll_directories(paths)
 
 
-def _register_dll_directories(paths: list[Path]) -> None:
-    existing = [str(path) for path in paths if path.exists()]
-    if not existing:
-        return
-    current = os.environ.get('PATH', '')
-    os.environ['PATH'] = os.pathsep.join(existing + ([current] if current else []))
-    if hasattr(os, 'add_dll_directory'):
-        for item in existing:
-            try:
-                _DLL_HANDLES.append(os.add_dll_directory(item))
-            except OSError:
-                continue
+def _collect_bundle_dll_dirs(*, bundle_root: Path, payload_root: Path, runtime_dir: Path | None = None, extra_dll_paths=None):
+    return _support._collect_bundle_dll_dirs(
+        bundle_root=bundle_root,
+        payload_root=payload_root,
+        runtime_dir=runtime_dir,
+        extra_dll_paths=extra_dll_paths,
+    )
 
 
-def _collect_bundle_dll_dirs(
-    *,
-    bundle_root: Path,
-    payload_root: Path,
-    runtime_dir: Path | None = None,
-    extra_dll_paths: list[Path] | None = None,
-) -> list[Path]:
-    """Return DLL search directories needed by the lean packaged build.
+def _apply_pending_runtime_updates(runtime_dir: Path):
+    return _support._apply_pending_runtime_updates(runtime_dir)
 
-    Why: PyInstaller stages vendored Qt/Shiboken DLLs under ``_internal/.vendor``
-    while the importable extension modules live under ``_internal/PySide6`` and
-    ``_internal/shiboken6``. Runtime packages stay isolated and are mounted only
-    when semantic features actually need them.
-    """
-
-    extra_dll_paths = list(extra_dll_paths or [])
-    return [
-        payload_root,
-        payload_root / 'PySide6',
-        payload_root / 'PySide6' / 'plugins',
-        payload_root / 'shiboken6',
-        payload_root / '.vendor',
-        payload_root / '.vendor' / 'PySide6',
-        payload_root / '.vendor' / 'PySide6' / 'plugins',
-        payload_root / '.vendor' / 'shiboken6',
-        payload_root / '.packages',
-        payload_root / '.packages' / 'PySide6',
-        payload_root / '.packages' / 'PySide6' / 'plugins',
-        payload_root / '.packages' / 'shiboken6',
-        payload_root / '.packages' / 'pyarrow.libs',
-        payload_root / '.packages' / 'numpy.libs',
-        payload_root / '.packages' / 'scipy.libs',
-        payload_root / '.packages' / 'torch' / 'lib',
-        *extra_dll_paths,
-        bundle_root / '.vendor',
-        bundle_root / '.vendor' / 'PySide6',
-        bundle_root / '.vendor' / 'PySide6' / 'plugins',
-        bundle_root / '.vendor' / 'shiboken6',
-        bundle_root / '.packages',
-        bundle_root / '.packages' / 'PySide6',
-        bundle_root / '.packages' / 'PySide6' / 'plugins',
-        bundle_root / '.packages' / 'shiboken6',
-        bundle_root / '.packages' / 'pyarrow.libs',
-        bundle_root / '.packages' / 'numpy.libs',
-        bundle_root / '.packages' / 'scipy.libs',
-        bundle_root / '.packages' / 'torch' / 'lib',
-    ]
-
-
-
-
-def _apply_pending_runtime_updates(runtime_dir: Path) -> list[str]:
-    return ensure_runtime_layout(runtime_dir)
 
 def _bootstrap_local_packages() -> None:
     bundle_root = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
     payload_root = Path(getattr(sys, '_MEIPASS', bundle_root)).resolve()
-    runtime_dir = _preferred_runtime_dir()
+    runtime_dir = _support._preferred_runtime_dir()
     extra_sys_paths, extra_dll_paths = _runtime_bootstrap_paths(runtime_dir)
 
     package_dirs = [

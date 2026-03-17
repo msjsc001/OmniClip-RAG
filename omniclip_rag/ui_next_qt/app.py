@@ -7,7 +7,6 @@ import os
 import sys
 import threading
 import traceback
-from dataclasses import dataclass
 from pathlib import Path
 
 from typing import TYPE_CHECKING, Any
@@ -17,10 +16,8 @@ if TYPE_CHECKING:
 
 from .. import __version__
 from ..app_logging import configure_file_logging, install_exception_logging
-from ..config import AppConfig, ensure_data_paths, load_config, normalize_ui_scale_percent, normalize_ui_theme, normalize_vault_path
+from ..headless.bootstrap import RuntimeBundle, apply_runtime_layout_if_needed, load_runtime_bundle
 from ..runtime_recovery import mark_session_clean_exit, mark_session_running, mark_session_started, prepare_startup_recovery
-from ..runtime_layout import apply_pending_runtime_updates
-from ..ui_i18n import normalize_language
 
 APP_USER_MODEL_ID = 'msjsc001.OmniClipRAG'
 APP_LOGGER = logging.getLogger(__name__)
@@ -132,16 +129,6 @@ def __getattr__(name: str):
         return value
     raise AttributeError(name)
 
-
-@dataclass(slots=True)
-class RuntimeBundle:
-    config: AppConfig
-    paths: object
-    language_code: str
-    theme_code: str
-    scale_percent: int
-
-
 def _stderr(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
@@ -174,9 +161,8 @@ def _startup_runtime_dir() -> Path:
 
 def _prepare_startup_bundle() -> tuple[RuntimeBundle, list[str]]:
     applied_components: list[str] = []
-    runtime_dir = _startup_runtime_dir()
     try:
-        applied_components = apply_pending_runtime_updates(runtime_dir)
+        applied_components = list(apply_runtime_layout_if_needed())
     except OSError as exc:
         _stderr(f'Pending runtime update could not be applied during startup: {exc}')
     bundle = load_runtime_bundle()
@@ -292,29 +278,6 @@ def _set_windows_app_user_model_id() -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
     except Exception:
         pass
-
-
-def load_runtime_bundle() -> RuntimeBundle:
-    global_paths = ensure_data_paths()
-    config = load_config(global_paths)
-    if config is None:
-        config = AppConfig(vault_path='', data_root=str(global_paths.global_root))
-    active_vault = normalize_vault_path(config.vault_path)
-    paths = ensure_data_paths(config.data_root or str(global_paths.global_root), active_vault or None)
-    config.data_root = str(paths.global_root)
-    if active_vault and active_vault not in config.vault_paths:
-        config.vault_paths.insert(0, active_vault)
-    language_code = normalize_language(config.ui_language)
-    theme_code = normalize_ui_theme(config.ui_theme)
-    scale_percent = normalize_ui_scale_percent(config.ui_scale_percent, 100)
-    return RuntimeBundle(
-        config=config,
-        paths=paths,
-        language_code=language_code,
-        theme_code=theme_code,
-        scale_percent=scale_percent,
-    )
-
 
 def _load_app_icon() -> 'QtGui.QIcon | None':
     _QtCore, QtGui, _QtWidgets = _ensure_qt()

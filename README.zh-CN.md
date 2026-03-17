@@ -3,16 +3,16 @@
 # 🌌 方寸引 · OmniClip RAG
 
 **方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。**
+（V0.3.3版后支持1290种格式，V0.4.0版支持MCP）
 
-[![Version](https://img.shields.io/badge/version-v0.3.3-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.0-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md)
 
 </div>
-
 <br/>
 
- **它是什么？** 它是本地 Markdown 语义搜索软件、本地 RAG 知识库。（V0.3.3版**已经支持1290种格式的语义检索**）
+ **它是什么？** 它是本地 Markdown 语义搜索软件、本地 RAG 知识库，并且现在具备只读的 MCP 检索接口。
   **怎么用？** 你只需要打开程序输入你的 Markdown 笔记路径再点建库，就能搭建好你的本地 RAG 知识库，建库后你就可以用它来语义搜索你的笔记，搜索的内容你可以复制发给任意 AI 进行深度研讨，也可以供自己深度研读。 
   **好处是什么？** 无须把你的任何资料上传，也不会被任何软件捆绑，它无须任何复杂的配置，搭建，且它具备热更新能力，新笔记写入会自动进入RAG库！新笔记也可以是你和AI的历史对话整理，这样变相的为AI提供了永久记忆。
 
@@ -106,6 +106,7 @@
 - **建库能跑得稳，也能讲清楚自己在做什么**：预检、全量建库、增量监听、扩展格式建库、Tika 自动安装都尽量给出阶段、进度和异常原因，而不是让用户盲等。
 - **查询结果可解释、可追踪**：结果会带来源标签、页码/格式身份、相关性评分和最近状态提示，方便你判断“为什么命中它”，而不只是得到一堆黑盒片段。
 - **出错时优先降级，不优先崩溃**：对坏文件、空文件、临时离线目录、极端大文件、Runtime 缺项、显存不足等情况都有隔离、跳过、重试或降级策略，尽量保证主程序继续可用。
+- **同一检索内核的标准 MCP 接口**：`OmniClipRAG-MCP.exe` 把现有本地检索能力以只读 MCP Server 的方式暴露出来，让支持 MCP 的 AI 客户端也能安全使用你的本地知识库，而不是只能依赖桌面界面。
 
 <div align="center">
   <img alt="配置与状态" src="https://github.com/user-attachments/assets/d75af49d-54c2-403b-ba9a-476b6f637fcb" width="400" />
@@ -114,14 +115,82 @@
 
 ---
 
-## 🔄 V0.3.3 重点更新
+## 🔄 V0.4.0 重点更新
 
-`v0.3.3` 是 `0.3.x` 线上可用性的一次继续收口：重点是把 Tika 路线从“看起来支持很多格式”修到“你勾选后真的更容易建得进去”，同时把自动安装过程做成真正可观察的状态流。
+`v0.4.0` 在已经稳定下来的本地检索内核之上，正式打开了 MCP 这一条新产品线：方寸引不再只是桌面软件，也可以作为标准的只读 MCP Server 被外部 AI 客户端调用。
 
-- 🧩 **Tika 建库改成兼容优先**：不再把 `XHTML` 当成唯一成功条件，而是优先尝试 `text/plain`，失败后再回退 `rmeta/json`，像 EPUB 这类格式不再因为 `HTTP 406` 被整批误判成跳过。
-- 🧾 **Tika 建库结果更可解释**：现在会区分“正常跳过”和“真实解析失败”。比如 `0` 字节文件会明确显示为空文件跳过，而不是让人误以为 Tika 不支持该格式。
-- ⏳ **Tika 自动安装终于有页内进度**：当前阶段、当前下载项、百分比、字节数和安装目标都会直接显示在页面里，用户不再需要靠猜测判断程序有没有开始工作。
-- 📚 **文档同步更新为 `v0.3.3`**：中英文 README、更新日志、架构说明和计划文档都补上了这轮 Tika 稳定性决策，后续继续开发时不必再依赖聊天记录。
+- 🔌 **新增独立 MCP 壳，而不是污染 GUI EXE**：现在有单独的 `OmniClipRAG-MCP.exe` 用于 headless/stdio 的 MCP 场景，桌面 GUI 继续保持 windowed 形态。
+- 🧠 **GUI 与 MCP 共用同一检索内核**：两者在 bootstrap、Runtime 上下文、DataPaths、QueryService 和来源标签语义上保持一致，不再为 MCP 另造一套后端。
+- 📖 **第一版 MCP 极度克制但可长期用**：V1 只暴露两个只读工具 `omniclip.status` 与 `omniclip.search`，并把降级状态、来源标签和结果摘要以稳定结构返回。
+- 📚 **文档与样例配置补齐了 MCP 接入**：仓库现在附带 `MCP_SETUP.md`、客户端示例配置、架构说明与落地计划，后续继续推进不再依赖聊天记录。
+
+---
+
+## 🔌 MCP 怎么用
+
+`OmniClip RAG MCP Server` 的作用，是把方寸引现有的本地检索能力，通过标准 MCP 协议提供给支持 MCP 的 AI 客户端使用。
+
+你可以把它理解成：
+
+- 桌面版 `OmniClipRAG.exe` 负责正常建库、维护和可视化使用
+- `OmniClipRAG-MCP.exe` 负责安静地在后台给 AI 提供“只读搜索接口”
+
+### 使用前要先做什么
+
+1. 先用桌面版把你的知识库建好。
+2. 平时建库、重建、维护索引，还是用桌面版完成。
+3. MCP 版只是给 AI 调用的无头接口，不负责建库。
+
+如果知识库还没建好，MCP 不会假装可用，而是会明确返回类似 `index_not_ready` 的提示。
+
+### Jan.ai 已实测可用
+
+我已经在 Jan.ai 中实测通过。配置时按下面填即可：
+
+- `服务器名称`：`OmniClip RAG`
+- `Transport Type`：选择 `STDIO`
+- `命令`：填 `OmniClipRAG-MCP.exe` 的完整路径
+- `参数`：留空
+- `环境变量`：默认留空
+
+命令路径示例：
+
+```text
+D:\软件编写\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.0\OmniClipRAG-MCP.exe
+```
+
+大多数用户不需要额外填写环境变量。只有你把 Runtime 或数据目录手动改到了别处，才需要进一步自定义。
+
+### 接上后 AI 能做什么
+
+MCP 第一版故意做得很克制，只开放两个只读工具：
+
+- `omniclip.status`
+  - 查看当前本地知识库是否就绪
+  - 告诉 AI 当前是在完整 `hybrid` 模式，还是降级成了 `lexical_only`
+- `omniclip.search`
+  - 搜索你的本地知识库
+  - 返回带来源标签的结果，比如 `Markdown · xxx.md`、`PDF · xxx.pdf · 第 N 页`
+
+### 你可以怎么和 AI 说
+
+接入 MCP 后，不需要你自己手动调工具，通常直接自然语言说就行，例如：
+
+- `请用 OmniClip 搜索我本地知识库里关于“项目路线图”的内容，并整理成要点。`
+- `先调用 omniclip.status，告诉我我的本地知识库现在是否就绪。`
+- `请只搜索 OmniClip 里的 PDF 结果，关键词是“attention mechanism”。`
+- `请在 OmniClip 里找和“我的思维模型”相关的内容，并给我最相关的 5 条切片和来源。`
+
+### 实用建议
+
+如果你希望 AI 搜得更准，最好直接告诉它这些信息：
+
+- 你要找的主题词
+- 笔记标题片段
+- 只想搜 `markdown`、`pdf` 还是 `tika`
+- 你想要“简短总结”还是“带来源的原文切片”
+
+更详细的说明和示例配置，请看 [MCP_SETUP.md](MCP_SETUP.md)。
 
 ---
 
@@ -164,6 +233,11 @@ flowchart LR
 .\scripts\build_exe.ps1
 ```
 
+**从源码运行 MCP 自检：**
+```powershell
+python launcher_mcp.py --mcp-selfcheck
+```
+
 **对于自动化命令和开发端，本程序原生的 CLI 接口仍在积极服役：**
 ```powershell
 .\scripts\run.ps1 status
@@ -177,8 +251,10 @@ flowchart LR
 - [English README](README.md) 
 - [架构说明](ARCHITECTURE.md)
 - [更新日志](CHANGELOG.md)
+- [MCP 接入说明](MCP_SETUP.md)
 - [空间预检说明](STORAGE_PRECHECK.md)
 - [运行时安装说明](RUNTIME_SETUP.md)
+- [OmniClip RAG MCP 接入实施计划](plans/OmniClip RAG MCP接入实施计划.md)
 - [Markdown 主查询与 Runtime 稳定性 RCA 计划](plans/Markdown主查询与Runtime稳定性RCA计划.md)
 - [GPU Runtime 与扩展建库 UX 收尾计划](plans/GPU Runtime与扩展建库UX收尾计划.md)
 - [扩展格式隔离子系统实施计划](plans/扩展格式隔离子系统实施计划.md)

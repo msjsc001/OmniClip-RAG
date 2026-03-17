@@ -3,8 +3,9 @@
 # 🌌 OmniClip RAG
 
 **A silent gravity field between your private notes and the universe of AI.**
+*(Supports 1290 formats since V0.3.3, and supports MCP since V0.4.0)*
 
-[![Version](https://img.shields.io/badge/version-v0.3.3-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.0-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md)
 
@@ -12,7 +13,7 @@
 
 <br/>
 
- **What is it?** It is a local Markdown semantic search software and a local RAG knowledge base. (V0.3.3 **already supports semantic retrieval for 1290 formats**)
+ **What is it?** It is a local Markdown semantic search software, a local RAG knowledge base, and now a read-only MCP retrieval server. (V0.4.0 **already supports semantic retrieval for 1290 formats and a standard MCP interface**)
  **How to use it?** Just open the application, input your Markdown notes path, and click "Build Knowledge Base" to set up your local RAG vault. Once built, you can use it to semantically search your notes. The retrieved content can be copied and sent to any AI for in-depth discussion, or used for your own deep reading.
  **What are the benefits?** No need to upload any of your data, and no vendor lock-in. It requires no complex configuration or setup. Moreover, it features hot-reloading—newly written notes automatically enter the RAG vault! New notes can also be an organized collection of your historical conversations with AIs, which in turn implicitly provides a permanent memory for them.
 
@@ -106,6 +107,7 @@ OmniClip is intentionally not trying to win with flashy UI tricks. The real work
 - **Build flows that explain themselves**: preflight, rebuild, incremental watch, extension indexing, and Tika auto-install are designed to surface stage, progress, and failure reasons instead of leaving users staring at a frozen screen.
 - **Traceable query results**: results carry source labels, page/format identity, score hints, and state messaging so users can understand why something was returned instead of trusting a black box.
 - **Degrade before crashing**: damaged files, empty files, offline paths, extreme document size, missing runtime pieces, and GPU pressure are all handled with skip/isolation/retry/fallback strategies wherever possible.
+- **A standard MCP interface over the same retrieval core**: `OmniClipRAG-MCP.exe` exposes the same local search kernel through a read-only MCP server, so MCP-capable AI clients can query your private knowledge base without the desktop GUI being the only entry point.
 
 <div align="center">
   <img alt="Configuration and Indexing UI" src="https://github.com/user-attachments/assets/b622c336-73b8-4324-95eb-f9c8011c25c6" width="400" />
@@ -114,14 +116,79 @@ OmniClip is intentionally not trying to win with flashy UI tricks. The real work
 
 ---
 
-## 🔄 V0.3.3 Key Updates
+## 🔄 V0.4.0 Key Updates
 
-`v0.3.3` continues the `0.3.x` stabilization line by turning the Tika route from "it exposes many formats" into "the formats you select are much more likely to index successfully", while also making Tika installation observable from the page itself.
+`v0.4.0` opens a new product line on top of the now-stabilized retrieval core: OmniClip is no longer only a desktop app, but also a read-only local MCP server that can be consumed by external AI clients through a standard interface.
 
-- 🧩 **Tika indexing is now compatibility-first**: instead of requiring XHTML as the only valid success surface, the app now prefers `text/plain` and falls back to `rmeta/json`, which makes EPUB-style formats far less likely to fail with opaque `HTTP 406` errors.
-- 🧾 **Tika build results are now easier to interpret**: the app distinguishes expected skips from real parser failures. A zero-byte file is reported as an empty-file skip instead of making users think Tika cannot handle that format.
-- ⏳ **Tika auto-install finally shows inline progress**: the page now surfaces stage, current item, percentage, byte progress, and install target instead of giving users only a start/end black box.
-- 📚 **Docs now match the current product shape**: README, changelog, architecture notes, and the new Tika closure plan all record the current compatibility-first direction, so future work no longer depends on chat history.
+- 🔌 **A dedicated MCP shell now exists**: instead of trying to overload the windowed GUI executable, OmniClip now has a separate `OmniClipRAG-MCP.exe` for clean stdio MCP usage.
+- 🧠 **GUI and MCP now share one real retrieval core**: both shells align on the same bootstrap, Runtime context, DataPaths, QueryService, and source-label semantics rather than drifting into separate backends.
+- 📖 **The first MCP surface is intentionally small and durable**: V1 only exposes two read-only tools, `omniclip.status` and `omniclip.search`, with explicit degradation reporting and source-aware output.
+- 📚 **Docs and examples now include MCP onboarding**: the repo now ships `MCP_SETUP.md`, example configs, architecture notes, and an execution plan for the MCP line.
+
+---
+
+## 🔌 MCP Usage
+
+`OmniClip RAG MCP Server` lets MCP-capable AI clients search your local knowledge base through the same read-only retrieval core that powers the desktop app.
+
+### What You Need First
+
+1. Build or install your knowledge base from the desktop app first.
+2. Keep using the normal desktop app for indexing and maintenance.
+3. Use `OmniClipRAG-MCP.exe` only as the headless read-only bridge for AI clients.
+
+If your index has not been built yet, the MCP side will return an explicit `index_not_ready` style error instead of silently pretending everything is fine.
+
+### Jan.ai Example
+
+Jan.ai has already been tested successfully with the packaged MCP build.
+
+In Jan.ai, create a new MCP server with:
+
+- `Server Name`: `OmniClip RAG`
+- `Transport Type`: `STDIO`
+- `Command`: the full path to `OmniClipRAG-MCP.exe`
+- `Arguments`: leave empty
+- `Environment Variables`: leave empty by default
+
+Example command path:
+
+```text
+D:\software\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.0\OmniClipRAG-MCP.exe
+```
+
+If you moved your Runtime or data root to a custom location, you may optionally add environment variables later, but most users do not need this.
+
+### What The AI Can Do Through MCP
+
+V1 intentionally keeps the MCP surface very small and stable:
+
+- `omniclip.status`
+  - checks whether your local search environment is ready
+  - tells the AI whether it is running in `hybrid` mode or a degraded `lexical_only` mode
+- `omniclip.search`
+  - searches your local knowledge base
+  - returns explicit source labels such as `Markdown · xxx.md` or `PDF · xxx.pdf · Page N`
+
+### How To Ask The AI
+
+Once the MCP server is connected, you can simply speak to the AI in natural language. These prompts work well:
+
+- `Use OmniClip to search my local knowledge base for "project roadmap" and summarize the most useful points.`
+- `First call omniclip.status, then tell me whether my local knowledge base is ready.`
+- `Search only PDF results in OmniClip for "attention mechanism".`
+- `Find notes related to "my thinking model" in OmniClip and show me the most relevant 5 snippets with sources.`
+
+### Practical Tip
+
+OmniClip works best when you tell the AI exactly what kind of material you want:
+
+- topic words
+- note title fragments
+- whether you want `markdown`, `pdf`, or `tika`
+- whether you want a short answer or quoted source-backed snippets
+
+For more details and JSON examples, see [MCP_SETUP.md](MCP_SETUP.md).
 
 ---
 
@@ -164,6 +231,11 @@ Currently, all source code and distribution packages have survived rigorous unit
 .\scripts\build_exe.ps1
 ```
 
+**Run the headless MCP self-check from source:**
+```powershell
+python launcher_mcp.py --mcp-selfcheck
+```
+
 **For Automation and Terminal Devs, the native CLI is still on active duty:**
 ```powershell
 .\scripts\run.ps1 status
@@ -177,8 +249,10 @@ Currently, all source code and distribution packages have survived rigorous unit
 - [Chinese README](README.zh-CN.md)
 - [Architecture Notes](ARCHITECTURE.md)
 - [Changelog](CHANGELOG.md)
+- [MCP Setup](MCP_SETUP.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
 - [Runtime Setup](RUNTIME_SETUP.md)
+- [OmniClip RAG MCP Plan](plans/OmniClip RAG MCP接入实施计划.md)
 - [Markdown Query & Runtime RCA Plan](plans/Markdown主查询与Runtime稳定性RCA计划.md)
 - [GPU Runtime & Extension Build UX Finish Plan](plans/GPU Runtime与扩展建库UX收尾计划.md)
 - [Extension Format Isolation Plan](plans/扩展格式隔离子系统实施计划.md)

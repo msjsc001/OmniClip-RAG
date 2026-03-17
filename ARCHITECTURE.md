@@ -21,6 +21,8 @@ The project already includes:
 - `LanceDB + bge-m3` vector retrieval,
 - an isolated extension-format subsystem for PDF and Tika-backed formats,
 - a componentized Runtime sidecar manager for packaged builds,
+- a shared headless bootstrap for non-GUI shells,
+- a read-only MCP server line over the same retrieval core,
 - a desktop GUI workflow,
 - a CLI workflow for debugging,
 - local model bootstrap,
@@ -142,6 +144,20 @@ Current Tika build/query policy:
 
 Why: real Tika 3.x behavior is format-dependent. Binding the whole extension pipeline to `PUT /tika + Accept: application/xhtml+xml` caused valid EPUB/DOCX files to fail with `HTTP 406`, which looked like "all files were skipped" even though the sidecar was healthy. A text-first contract makes newly exposed Tika formats far more likely to index without format-specific branching.
 
+### 10. MCP is a standard interface layer, not a second backend
+
+Current MCP policy:
+
+- GUI and MCP share one bootstrap path for Runtime discovery, DataPaths, and QueryService creation,
+- the GUI remains a `windowed` shell,
+- MCP is delivered as a separate `console/headless` shell,
+- MCP V1 is `tools-only`,
+- MCP V1 is strictly read-only,
+- MCP search returns both machine-friendly structured output and model-friendly readable text,
+- MCP may degrade to lexical-only, but must say so explicitly.
+
+Why: trying to bolt stdio MCP onto the existing windowed GUI executable would make transport behavior fragile on Windows and would tempt the codebase into a split-brain state where GUI and MCP silently diverge. The durable design is dual-shell / same-core.
+
 ## Module Boundary
 
 - `omniclip_rag.config`: configuration and data paths
@@ -150,6 +166,8 @@ Why: real Tika 3.x behavior is format-dependent. Binding the whole extension pip
 - `omniclip_rag.preflight`: disk estimation
 - `omniclip_rag.vector_index`: embeddings and LanceDB
 - `omniclip_rag.service`: indexing, querying, watching, cleanup
+- `omniclip_rag.headless`: shared non-GUI bootstrap and Runtime/DataPath wiring
+- `omniclip_rag.mcp`: read-only MCP tool layer and protocol adapter
 - `omniclip_rag.extensions`: isolated extension-format runtimes, registries, parsers, and build/query services
 - `omniclip_rag.gui`: desktop interaction layer
 - `omniclip_rag.clipboard`: clipboard handoff
@@ -166,7 +184,9 @@ Current validation includes:
 - successful Tika packaged fallback-catalog checks,
 - successful real-world Tika EPUB parsing against local Tika 3.2.3 using the compatibility-first `text/plain -> rmeta/json` fallback chain,
 - visible in-page Tika runtime install progress wiring in the Qt configuration flow,
-- `240` passing automated tests on the current stabilization branch,
+- successful MCP tool-schema and headless-import regression coverage,
+- successful MCP self-check persistence into the shared AppData area,
+- `248` passing automated tests on the current MCP-enabled stabilization branch,
 - successful Windows EXE packaging.
 
 ## Intentional Tradeoffs In The Current Mainline
@@ -194,10 +214,11 @@ It does **not** yet try to ship everything at once.
 
 ## Next Priorities
 
-1. finish the remaining GPU Runtime truthfulness and execution-verification UX,
+1. finish dual-shell packaging validation for the new MCP line and keep the MCP schema stable,
 2. keep improving extension source-directory build UX and richer per-file failure surfacing,
 3. continue tightening packaged startup behavior and footprint,
-4. keep hardening retrieval quality without regressing the now-stabilized packaged flow.
+4. keep hardening retrieval quality without regressing the now-stabilized packaged flow,
+5. reserve a later line for `Streamable HTTP` after stdio MCP is fully stable.
 
 ### 9. Desktop UX must be newcomer-first
 

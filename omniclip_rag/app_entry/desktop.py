@@ -13,14 +13,12 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from ..runtime_canary import run_gpu_query_canary
+from ..headless.bootstrap import apply_runtime_layout_if_needed as _shared_apply_runtime_layout_if_needed
 
 
 def _apply_runtime_layout_if_needed() -> None:
-    if not getattr(sys, 'frozen', False):
-        return
     try:
-        from ..runtime_layout import ensure_runtime_layout
-        ensure_runtime_layout(Path(sys.executable).resolve().parent / 'runtime')
+        _shared_apply_runtime_layout_if_needed()
     except Exception:
         # Why: desktop startup must keep working even when runtime layout cleanup
         # hits a damaged installation. The query trace will capture the real cause.
