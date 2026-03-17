@@ -159,6 +159,32 @@ D:\software\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.0\OmniClipRAG-MCP.exe
 
 If you moved your Runtime or data root to a custom location, you may optionally add environment variables later, but most users do not need this.
 
+### OpenClaw Example
+
+OpenClaw is configured differently from Jan.ai. Instead of a visual MCP form, you usually register MCP servers in OpenClaw's config file:
+
+```text
+%USERPROFILE%\.openclaw\openclaw.json
+```
+
+Add an `mcpServers` entry like this:
+
+```json
+{
+  "mcpServers": {
+    "omniclip-rag": {
+      "transport": "stdio",
+      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.0\\OmniClipRAG-MCP.exe",
+      "args": []
+    }
+  }
+}
+```
+
+Then restart OpenClaw or its gateway process so it reloads the config.
+
+If your `openclaw.json` already contains other settings, only merge the `mcpServers.omniclip-rag` block into the existing file instead of replacing the whole config.
+
 ### What The AI Can Do Through MCP
 
 V1 intentionally keeps the MCP surface very small and stable:

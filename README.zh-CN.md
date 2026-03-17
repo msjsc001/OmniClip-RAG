@@ -161,6 +161,32 @@ D:\软件编写\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.0\OmniClipRAG-MCP.exe
 
 大多数用户不需要额外填写环境变量。只有你把 Runtime 或数据目录手动改到了别处，才需要进一步自定义。
 
+### OpenClaw 配置方式
+
+OpenClaw 的接法和 Jan.ai 不太一样。它通常不是在图形界面里逐项填写，而是直接在配置文件里登记 MCP Server：
+
+```text
+%USERPROFILE%\.openclaw\openclaw.json
+```
+
+在这个文件里加入类似下面的 `mcpServers` 配置即可：
+
+```json
+{
+  "mcpServers": {
+    "omniclip-rag": {
+      "transport": "stdio",
+      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.0\\OmniClipRAG-MCP.exe",
+      "args": []
+    }
+  }
+}
+```
+
+保存后，重启 OpenClaw 或它的 gateway 进程，让配置重新加载。
+
+如果你的 `openclaw.json` 里原本已经有别的配置，不要整份覆盖，只需要把 `mcpServers.omniclip-rag` 这一段合并进去即可。
+
 ### 接上后 AI 能做什么
 
 MCP 第一版故意做得很克制，只开放两个只读工具：

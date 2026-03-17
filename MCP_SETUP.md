@@ -130,6 +130,7 @@ Example config files live under:
 - `examples/mcp/claude_desktop.json`
 - `examples/mcp/cursor.json`
 - `examples/mcp/cline.json`
+- `examples/mcp/openclaw.json`
 
 Replace the executable path with the actual location of `OmniClipRAG-MCP.exe` on your machine.
 
@@ -150,6 +151,38 @@ Example:
 ```text
 D:\software\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.0\OmniClipRAG-MCP.exe
 ```
+
+## OpenClaw Quick Setup
+
+OpenClaw usually reads MCP server definitions from its config file instead of a visual form.
+
+Typical config location:
+
+```text
+%USERPROFILE%\.openclaw\openclaw.json
+```
+
+Add or merge an `mcpServers` block like this:
+
+```json
+{
+  "mcpServers": {
+    "omniclip-rag": {
+      "transport": "stdio",
+      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.0\\OmniClipRAG-MCP.exe",
+      "args": []
+    }
+  }
+}
+```
+
+Important notes:
+
+- do not replace your whole config if OpenClaw already has other settings
+- only merge the `mcpServers.omniclip-rag` entry into the existing file
+- restart OpenClaw or its gateway/runtime process after saving
+
+If you use a custom data root or runtime root, add the required environment variables in the same MCP server block according to your local layout.
 
 ## How To Ask Your AI
 
