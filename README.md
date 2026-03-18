@@ -139,11 +139,9 @@ OmniClip is intentionally not trying to win with flashy UI tricks. The real work
 
 If your index has not been built yet, the MCP side will return an explicit `index_not_ready` style error instead of silently pretending everything is fine.
 
-### Jan.ai Example
+### Jan.ai Reference Setup
 
-Jan.ai has already been tested successfully with the packaged MCP build.
-
-In Jan.ai, create a new MCP server with:
+In Jan.ai, create a new MCP server with the following values:
 
 - `Server Name`: `OmniClip RAG`
 - `Transport Type`: `STDIO`

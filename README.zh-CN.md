@@ -143,9 +143,9 @@
 
 如果知识库还没建好，MCP 不会假装可用，而是会明确返回类似 `index_not_ready` 的提示。
 
-### Jan.ai 已实测可用
+### Jan.ai 配置参考
 
-我已经在 Jan.ai 中实测通过。配置时按下面填即可：
+在 Jan.ai 中，你可以按下面这样配置：
 
 - `服务器名称`：`OmniClip RAG`
 - `Transport Type`：选择 `STDIO`
