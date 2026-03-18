@@ -57,6 +57,32 @@ It exclusively performs one highly refined task: it semantic-searches tens of th
 
 ---
 
+## 💡 High-Leverage Mental Models & Workflows
+
+> **Core Philosophy**: Stop thinking of OmniClip RAG as "just another AI software". Instead, treat it as the ultimate **"Local Knowledge Router & Context Dispenser"** sitting between you and any state-of-the-art AI. The AI is no longer just chatting with you out of thin air; it is **reasoning based on your lifetime of accumulated insights**.
+
+From an architecture and knowledge-management perspective, we highly recommend the following high-leverage workflows to unlock emergent abilities:
+
+### 1. Cross-Model Cognitive Arbitrage
+Use OmniClip as your "Single Source of Truth (SSOT)". Since the frontend is physically decoupled from any specific AI, you can take a single highly-dense Context Pack retrieved locally and **feed it in parallel** to different engines:
+Have Claude 3.5 Sonnet write core refactoring code based on the snippet, forward the exact same context to O1 for boundary security reviews, and use another model for a localized report. You are leveraging your stable local index to "arbitrage" the strengths of different cloud LLMs, mitigating the blind spots of any single model.
+
+### 2. Passive Intelligence Hub & Evidence-Layer Isolation
+Fully exploit the support for PDF and Tika (`1290` formats). Treat your Markdown vault as your **"Cognitive Mainchain" (where your judgments and thoughts live)**, and treat PDFs/DOCXs/EMLs as your **"Raw Evidence Silo"**.
+Dump unstructured industry reports and reference books into local folders without manually organizing them. When researching, intentionally isolate your queries: search Markdown for "what I thought", and search PDF/Tika for "what the raw evidence says". Over the MCP protocol, you can simply ask an AI: *"Search my recent PDF reports on attention mechanisms and cross-reference them with my markdown reflections."* Your PC instantly becomes an offline, private intelligence war room.
+
+### 3. Project Context Compressor & Shadow Brainstorming
+For long-running, complex projects containing requirements, deprecated drafts, and meeting notes, never manually dig through folders when you are stuck. Instead, perform fuzzy searches using sentences or conflicting pairs (e.g., `Why did we make this architectural decision back then?` or `Privacy vs Convenience`).
+By abusing the "fuzzy semantic association" of the vector engine, OmniClip might suddenly connect a psychology note you wrote two years ago with your current architecture hurdle, triggering true "Serendipity". It prevents the friction of "re-thinking what you have already thought through". 
+
+### 4. The "Permanent Memory Hippocampus" & Absolute Privacy Firewall
+Whenever an AI helps you solve a profound issue or draft an ingenious architecture, immediately summarize it into a clean Markdown file and drop it into your Vault. OmniClip's millisecond hot-reload mechanism instantly pulls it into the LanceDB and FTS5 retrieval pool.
+Over time, you physically mount a continuously-growing, strictly supervised "past-life memory" onto any AI you use. Your vault stays entirely local. You are only handing the AI the **"Minimum Viable Context"**—never uploading the gold mine itself. This guarantees absolute data sovereignty and privacy.
+
+> 🌟 **The Golden Rule**: Before writing a massive document, making a complex decision, or starting a deep chat with an AI — **Search first, chat later**. OmniClip's true power isn't doing the thinking for you; it's handing back exactly what you've already thought, read, and accumulated, right when you and your AI need it most.
+
+---
+
 ## 🚀 Quick Start & Workflow
 
 OmniClip perfectly integrates smoothly into your workflow:
