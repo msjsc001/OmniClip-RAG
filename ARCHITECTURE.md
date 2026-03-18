@@ -158,6 +158,19 @@ Current MCP policy:
 
 Why: trying to bolt stdio MCP onto the existing windowed GUI executable would make transport behavior fragile on Windows and would tempt the codebase into a split-brain state where GUI and MCP silently diverge. The durable design is dual-shell / same-core.
 
+### 11. MCP discovery and distribution now target the official Registry, not the deprecated servers README
+
+Current MCP publishing policy:
+
+- third-party discoverability is now aligned to the official MCP Registry rather than the old `modelcontextprotocol/servers` README list,
+- the MCP release line now has a dedicated Registry metadata file (`server.json`),
+- the Registry-facing artifact is a Windows MCPB binary bundle, not only a raw ZIP,
+- ZIP delivery is still preserved for manual local users,
+- the first Registry-facing version is intentionally `v0.4.1`,
+- the first Registry publish is intentionally manual instead of CI-driven.
+
+Why: the official ecosystem has already moved third-party discovery to the Registry, and Registry metadata becomes effectively immutable once published. That makes packaging discipline, SHA tracking, and version hygiene more important than chasing a legacy README mention.
+
 ## Module Boundary
 
 - `omniclip_rag.config`: configuration and data paths
@@ -186,7 +199,8 @@ Current validation includes:
 - visible in-page Tika runtime install progress wiring in the Qt configuration flow,
 - successful MCP tool-schema and headless-import regression coverage,
 - successful MCP self-check persistence into the shared AppData area,
-- `248` passing automated tests on the current MCP-enabled stabilization branch,
+- successful MCPB pack/validate/unpack verification for the Windows binary MCP shell,
+- `252` passing automated tests on the current MCP-enabled stabilization branch,
 - successful Windows EXE packaging.
 
 ## Intentional Tradeoffs In The Current Mainline

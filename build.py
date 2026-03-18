@@ -92,6 +92,7 @@ MCP_TARGET = BuildTarget(
         ROOT / 'examples' / 'mcp' / 'claude_desktop.json': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'claude_desktop.json',
         ROOT / 'examples' / 'mcp' / 'cursor.json': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'cursor.json',
         ROOT / 'examples' / 'mcp' / 'cline.json': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'cline.json',
+        ROOT / 'examples' / 'mcp' / 'openclaw.json': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'openclaw.json',
     },
 )
 LEGACY_OUTPUT_DIR = DIST_ROOT / 'OmniClipRAG_App'

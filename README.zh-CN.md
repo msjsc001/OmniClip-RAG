@@ -3,14 +3,19 @@
 # 🌌 方寸引 · OmniClip RAG
 
 **方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。**
-（V0.3.3版后支持1290种格式，V0.4.0版支持MCP）
+（V0.3.3版后支持1290种格式，V0.4.1版开始提供 MCP Registry / MCPB 发布线）
 
-[![Version](https://img.shields.io/badge/version-v0.4.0-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.1-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
-[English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md)
+[English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md)
 
 </div>
 <br/>
+
+> **MCP 快速入口**
+>
+> 如果你想把方寸引接到 Jan.ai、OpenClaw、Claude Desktop、Cursor 或其他支持 MCP 的客户端，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
+> 从 `v0.4.1` 起，MCP 线除了继续提供手动 ZIP 外，也开始提供面向官方 MCP Registry / MCPB 客户端的标准发布物。
 
  **它是什么？** 它是本地 Markdown 语义搜索软件、本地 RAG 知识库，并且现在具备只读的 MCP 检索接口。
   **怎么用？** 你只需要打开程序输入你的 Markdown 笔记路径再点建库，就能搭建好你的本地 RAG 知识库，建库后你就可以用它来语义搜索你的笔记，搜索的内容你可以复制发给任意 AI 进行深度研讨，也可以供自己深度研读。 
@@ -115,6 +120,17 @@
 
 ---
 
+## 🔄 V0.4.1 重点更新
+
+`v0.4.1` 的重点，不是再造新的查询后端，而是把已经落地的 MCP 线真正收口成可被官方 MCP Registry 消费的标准发布物。
+
+- 🚀 **MCP 官方发现路径正式转向 Registry**：仓库现在补上了正式 `server.json`，不再把已停止维护的 `modelcontextprotocol/servers` README 当成主战线。
+- 📦 **新增标准 `.mcpb` 发布资产**：在原有手动 ZIP 之外，`omniclip-rag-mcp-win-x64-v0.4.1.mcpb` 成为面向 Registry 与 MCPB 客户端的标准分发形态。
+- 🧭 **文档门面按“陌生开发者 30 秒看懂”收口**：英文 README 顶部补了 MCP Quickstart，中文 README 只做轻量引导而不打散原有叙事，`MCP_SETUP.md` 也明确解释了 `ZIP` 与 `.mcpb` 的区别。
+- 🛠 **首次 Registry 发布刻意保持手动**：`0.4.1` 被保留为第一发 Registry 版本，用来验证 Release、哈希、元数据与 Registry 发布链路，后续再考虑自动化。
+
+---
+
 ## 🔄 V0.4.0 重点更新
 
 `v0.4.0` 在已经稳定下来的本地检索内核之上，正式打开了 MCP 这一条新产品线：方寸引不再只是桌面软件，也可以作为标准的只读 MCP Server 被外部 AI 客户端调用。
@@ -129,6 +145,11 @@
 ## 🔌 MCP 怎么用
 
 `OmniClip RAG MCP Server` 的作用，是把方寸引现有的本地检索能力，通过标准 MCP 协议提供给支持 MCP 的 AI 客户端使用。
+
+从 `v0.4.1` 开始，MCP 这条线会同时提供两种分发形态：
+
+- `OmniClipRAG-MCP-v0.4.1-win64.zip`：给手动配置 `stdio` 的用户
+- `omniclip-rag-mcp-win-x64-v0.4.1.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
 
 你可以把它理解成：
 
@@ -156,7 +177,7 @@
 命令路径示例：
 
 ```text
-D:\软件编写\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.0\OmniClipRAG-MCP.exe
+D:\软件编写\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.1\OmniClipRAG-MCP.exe
 ```
 
 大多数用户不需要额外填写环境变量。只有你把 Runtime 或数据目录手动改到了别处，才需要进一步自定义。
@@ -176,7 +197,7 @@ OpenClaw 的接法和 Jan.ai 不太一样。它通常不是在图形界面里逐
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.0\\OmniClipRAG-MCP.exe",
+      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.1\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -278,6 +299,7 @@ python launcher_mcp.py --mcp-selfcheck
 - [架构说明](ARCHITECTURE.md)
 - [更新日志](CHANGELOG.md)
 - [MCP 接入说明](MCP_SETUP.md)
+- [OmniClip RAG 官方 MCP Registry 登月计划](plans/OmniClip%20RAG%20官方MCP%20Registry登月计划.md)
 - [空间预检说明](STORAGE_PRECHECK.md)
 - [运行时安装说明](RUNTIME_SETUP.md)
 - [OmniClip RAG MCP 接入实施计划](plans/OmniClip RAG MCP接入实施计划.md)

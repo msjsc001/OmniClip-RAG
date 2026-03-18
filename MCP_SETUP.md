@@ -4,7 +4,7 @@
 
 `OmniClip RAG MCP Server` is the read-only, headless MCP interface for OmniClip's local retrieval core.
 
-V1 deliberately keeps the surface small and stable:
+V1 deliberately keeps the surface small and durable:
 
 - transport: `stdio`
 - tools only: `omniclip.status`, `omniclip.search`
@@ -16,16 +16,27 @@ The MCP server is a second shell over the same retrieval core. It is not a secon
 
 ## Delivery Shape
 
-Packaged builds now ship in two separate forms:
+Packaged releases now come in three distinct forms:
 
-- `OmniClipRAG.exe`
-  - desktop GUI
-  - windowed
-- `OmniClipRAG-MCP.exe`
-  - headless MCP server
-  - console / stdio
+- `OmniClipRAG-vX.Y.Z-win64.zip`
+  - desktop GUI package
+  - use this when you want the full desktop app for indexing, Runtime management, and normal daily use
+- `OmniClipRAG-MCP-vX.Y.Z-win64.zip`
+  - manual MCP package
+  - use this when you want to point a local MCP client directly at `OmniClipRAG-MCP.exe`
+- `omniclip-rag-mcp-win-x64-vX.Y.Z.mcpb`
+  - MCPB package for the official MCP Registry and MCPB-aware clients
+  - use this when you want a standard Registry-friendly distribution artifact instead of a raw ZIP
 
-Both share the same local data roots, Runtime context, and QueryService behavior.
+## Which Package Should You Download?
+
+Use this rule of thumb:
+
+- want the desktop app: download the GUI ZIP
+- want to manually configure Jan.ai / OpenClaw / Claude Desktop / Cursor / Cline: download the MCP ZIP
+- want the Registry/MCPB route: use the `.mcpb` package
+
+The ZIP packages stay useful for users who prefer manual file-based setup. The `.mcpb` package is the standard publishable asset for the MCP Registry line.
 
 ## Tools
 
@@ -123,6 +134,40 @@ For stdio MCP compatibility:
 
 Do not add plain `print()` diagnostics to MCP request handling.
 
+## Official MCP Registry / MCPB
+
+OmniClip RAG now keeps a first-class Registry publishing line.
+
+The Registry metadata lives in the repository root as:
+
+- `server.json`
+
+The standard publishable artifact is:
+
+- `omniclip-rag-mcp-win-x64-vX.Y.Z.mcpb`
+
+Important difference:
+
+- the ZIP package is for people who manually point a client at `OmniClipRAG-MCP.exe`
+- the `.mcpb` package is for Registry publishing and MCPB-aware distribution flows
+
+### Maintainer Publish Order
+
+If you maintain releases for the project, keep this exact order:
+
+1. build the GUI ZIP, MCP ZIP, and `.mcpb`
+2. calculate the `.mcpb` SHA256
+3. upload all assets to a GitHub Release
+4. make sure the Release is **public**, not Draft
+5. confirm `server.json` points to the final public `.mcpb` URL and SHA256
+6. publish to the MCP Registry
+
+Do **not** try to publish the Registry entry against a Draft Release URL. The Registry validator will see a public `404` and reject the publish attempt.
+
+### Publisher Note
+
+The Registry publish tool should follow the official MCP Registry quickstart. Treat `mcp-publisher` as the official publisher binary/tooling line from the Registry docs instead of assuming it is an npm package name.
+
 ## Example Client Configurations
 
 Example config files live under:
@@ -134,9 +179,7 @@ Example config files live under:
 
 Replace the executable path with the actual location of `OmniClipRAG-MCP.exe` on your machine.
 
-## Jan.ai Quick Setup
-
-Jan.ai has already been tested successfully with OmniClip's packaged MCP build.
+## Jan.ai Reference Setup
 
 Use these values when adding a new MCP server in Jan.ai:
 
@@ -149,10 +192,10 @@ Use these values when adding a new MCP server in Jan.ai:
 Example:
 
 ```text
-D:\software\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.0\OmniClipRAG-MCP.exe
+D:\software\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.1\OmniClipRAG-MCP.exe
 ```
 
-## OpenClaw Quick Setup
+## OpenClaw Reference Setup
 
 OpenClaw usually reads MCP server definitions from its config file instead of a visual form.
 
@@ -169,7 +212,7 @@ Add or merge an `mcpServers` block like this:
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.0\\OmniClipRAG-MCP.exe",
+      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.1\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }

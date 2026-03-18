@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## V0.4.1 - 2026-03-18
+
+### Added
+
+- Added the first Registry publishing line for OmniClip MCP, including a formal root [server.json](server.json), a dedicated MCPB bundle flow, and a release-time SHA256 handoff path for the official MCP Registry.
+- Added [scripts/build_mcpb.ps1](scripts/build_mcpb.ps1) to package `OmniClipRAG-MCP.exe` into a Windows binary MCPB bundle, validate the manifest, unpack the artifact again, and regenerate Registry metadata from the same source of truth.
+- Added [RELEASE_NOTES_v0.4.1](releases/RELEASE_NOTES_v0.4.1.md), Registry-oriented MCP guidance in [MCP_SETUP.md](MCP_SETUP.md), and a persistent in-repo execution record for the Registry publishing line.
+
+### Changed
+
+- Changed the MCP release strategy away from the deprecated `modelcontextprotocol/servers` README path and toward the official MCP Registry / MCPB route.
+- Changed the English README first screen to expose a `TL;DR: MCP Quickstart`, while the Chinese README keeps the existing product voice and adds only a lightweight MCP entry point near the top.
+- Changed MCP example configs and packaged support files to `v0.4.1`, including the OpenClaw example in the shipped MCP bundle.
+- Changed the visible app/package version metadata to `v0.4.1`.
+
+### Fixed
+
+- Fixed the future Registry publication risk of trying to reuse `v0.4.0` for an immutable first metadata publish by reserving `v0.4.1` as the first Registry-facing version.
+- Fixed potential packaging drift between README copy, Registry metadata, MCPB file names, and release URLs by centralizing MCP Registry naming/description rules in one Python metadata layer.
+
 ## V0.4.0 - 2026-03-17
 
 ### Added
