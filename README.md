@@ -5,7 +5,7 @@
 **A silent gravity field between your private notes and the universe of AI.**
 *(Supports 1290 formats since V0.3.3, and ships an MCP Registry / MCPB line since V0.4.1)*
 
-[![Version](https://img.shields.io/badge/version-v0.4.1-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.1-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md) | [MCP Setup](MCP_SETUP.md)
 
@@ -135,12 +135,7 @@ OmniClip is intentionally not trying to win with flashy UI tricks. The real work
 
 ## 🔄 V0.4.0 Key Updates
 
-`v0.4.0` opens a new product line on top of the now-stabilized retrieval core: OmniClip is no longer only a desktop app, but also a read-only local MCP server that can be consumed by external AI clients through a standard interface.
-
-- 🔌 **A dedicated MCP shell now exists**: instead of trying to overload the windowed GUI executable, OmniClip now has a separate `OmniClipRAG-MCP.exe` for clean stdio MCP usage.
-- 🧠 **GUI and MCP now share one real retrieval core**: both shells align on the same bootstrap, Runtime context, DataPaths, QueryService, and source-label semantics rather than drifting into separate backends.
-- 📖 **The first MCP surface is intentionally small and durable**: V1 only exposes two read-only tools, `omniclip.status` and `omniclip.search`, with explicit degradation reporting and source-aware output.
-- 📚 **Docs and examples now include MCP onboarding**: the repo now ships `MCP_SETUP.md`, example configs, architecture notes, and an execution plan for the MCP line.
+`v0.4.0` introduced the first dedicated read-only MCP shell on top of the existing retrieval core, turning OmniClip from a desktop-only app into a standard MCP-capable local search engine.
 
 ---
 
@@ -160,6 +155,20 @@ From `v0.4.1`, the MCP line is packaged in two parallel distribution forms:
 3. Use `OmniClipRAG-MCP.exe` only as the headless read-only bridge for AI clients.
 
 If your index has not been built yet, the MCP side will return an explicit `index_not_ready` style error instead of silently pretending everything is fine.
+
+### Official Route (Registry / MCPB)
+
+Since `v0.4.1`, OmniClip RAG is published through the official MCP Registry, so clients that support Registry discovery or MCPB installation can use that path first.
+
+- If your client supports Registry discovery, look for:
+  - `io.github.msjsc001/omniclip-rag-mcp`
+- If your client supports MCPB installation, prefer the Release asset:
+  - `omniclip-rag-mcp-win-x64-v0.4.1.mcpb`
+- For the full Registry/MCPB explanation and client-specific setup notes, see [MCP_SETUP.md](MCP_SETUP.md).
+
+### Traditional Manual Route (Jan.ai / OpenClaw)
+
+If you downloaded the ZIP package manually, or your client does not support the official MCPB format yet, use the traditional absolute-path `stdio` setup below.
 
 ### Jan.ai Reference Setup
 

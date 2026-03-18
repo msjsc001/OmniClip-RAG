@@ -5,7 +5,7 @@
 **方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。**
 （V0.3.3版后支持1290种格式，V0.4.1版开始提供 MCP Registry / MCPB 发布线）
 
-[![Version](https://img.shields.io/badge/version-v0.4.1-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.1-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md)
 
@@ -133,12 +133,7 @@
 
 ## 🔄 V0.4.0 重点更新
 
-`v0.4.0` 在已经稳定下来的本地检索内核之上，正式打开了 MCP 这一条新产品线：方寸引不再只是桌面软件，也可以作为标准的只读 MCP Server 被外部 AI 客户端调用。
-
-- 🔌 **新增独立 MCP 壳，而不是污染 GUI EXE**：现在有单独的 `OmniClipRAG-MCP.exe` 用于 headless/stdio 的 MCP 场景，桌面 GUI 继续保持 windowed 形态。
-- 🧠 **GUI 与 MCP 共用同一检索内核**：两者在 bootstrap、Runtime 上下文、DataPaths、QueryService 和来源标签语义上保持一致，不再为 MCP 另造一套后端。
-- 📖 **第一版 MCP 极度克制但可长期用**：V1 只暴露两个只读工具 `omniclip.status` 与 `omniclip.search`，并把降级状态、来源标签和结果摘要以稳定结构返回。
-- 📚 **文档与样例配置补齐了 MCP 接入**：仓库现在附带 `MCP_SETUP.md`、客户端示例配置、架构说明与落地计划，后续继续推进不再依赖聊天记录。
+`v0.4.0` 首次引入了独立的只读 MCP 壳与同一检索内核下的无头发布线：方寸引不再只是桌面软件，也开始具备可被外部 AI 客户端调用的标准 MCP Server 形态。
 
 ---
 
@@ -163,6 +158,20 @@
 3. MCP 版只是给 AI 调用的无头接口，不负责建库。
 
 如果知识库还没建好，MCP 不会假装可用，而是会明确返回类似 `index_not_ready` 的提示。
+
+### 官方生态路线（Registry / MCPB）
+
+既然 `v0.4.1` 已经上架官方 MCP Registry，后续支持官方 Registry / MCPB 安装流的标准客户端，可以优先走这条更贴近官方生态的接入方式。
+
+- 如果客户端已经支持从 Registry 发现 MCP Server，请直接搜索或添加：
+  - `io.github.msjsc001/omniclip-rag-mcp`
+- 如果客户端支持官方 MCPB 安装流，请优先使用 Release 中的：
+  - `omniclip-rag-mcp-win-x64-v0.4.1.mcpb`
+- 更详细的官方发布线、MCPB 与 ZIP 的区别、以及不同客户端的接入说明，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
+
+### 传统手动路线（Jan.ai / OpenClaw）
+
+如果你下载的是 ZIP 手动包，或者客户端尚不支持官方 MCPB 格式，请使用下面这种传统的“绝对路径 + stdio”配置法。
 
 ### Jan.ai 配置参考
 

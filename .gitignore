@@ -47,4 +47,5 @@ Thumbs.db
 /runtime/
 /appdata/
 /.tmp_dist_runtime_diag*.json
+.mcpregistry_*
 
