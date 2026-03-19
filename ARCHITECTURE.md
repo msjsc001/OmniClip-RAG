@@ -188,6 +188,62 @@ Current website policy:
 
 Why: this repository needs a durable public-facing trust surface for GitHub, Registry, and community traffic, but it does not need a second app-shaped frontend subsystem with its own toolchain, dependency drift, and maintenance tax.
 
+### 13. The website now follows a single-exhibit visual grammar
+
+Current website composition policy:
+
+- the public site is no longer treated as a stack of equally-designed product sections,
+- the page is organized as one exhibit built around a single mother theme,
+- the theme is expressed as `core / orbit / fragment / boundary`,
+- the page only uses three visual grammars:
+  - `Canvas` for manifesto and stance,
+  - `Sheet` for steps and evidence,
+  - `Plate` for abstract diagrams and seals,
+- Chinese remains the cover-language anchor,
+- English is allowed to condense and transcreate instead of tracking Chinese sentence length literally,
+- the `Screens` section is the single evidence climax rather than three equal product cards,
+- abstract illustrations are staged through a shared `art-stage` layer instead of being solved only through blend-mode tricks.
+
+Why: the website had already passed the “competent project landing page” stage, but it still read as multiple polished sections rather than one coherent work. Compressing the page into a smaller set of visual species is the highest-leverage way to raise artistic quality without abandoning the static low-cost stack.
+
+### 14. Website polishing now follows deletion-first rules, not completion-first rules
+
+Current finishing policy:
+
+- the website should no longer chase “every section feels equally complete,”
+- Hero remains the only manifesto-scale black anchor,
+- Screens remains the only evidence climax and must preserve a clear primary / secondary / tertiary hierarchy,
+- Trust is treated as a seal / inscription rather than a final feature list,
+- Summary is treated as a wall of laws rather than a summary card row,
+- Workflow is treated as note sheets rather than polished feature cards,
+- explanatory copy should be shortened whenever it exists mainly to reassure the author instead of strengthening the work.
+
+Why: once the site enters exhibit territory, the biggest risk is not lack of polish but softness. The most valuable late-stage changes are usually subtractive: fewer containers, fewer sentences, fewer equal-weight peaks, and a clearer visual chain of command.
+
+### 15. The website now treats peak hierarchy as more important than completeness
+
+Current peak-order policy:
+
+- Hero is the manifesto peak and must remain the single darkest anchor on the page,
+- Screens is the evidence peak and must give the first control plate clear central authority over the later supporting plates,
+- Trust is the sealing peak and should read as a final inscription rather than a final feature section,
+- Summary must feel like three laws pinned beneath the manifesto rather than a helpful summary row,
+- Workflow must feel lighter and colder than Screens so the page keeps one evidence climax,
+- late-stage edits should prefer deleting explanatory copy over improving section completeness.
+
+Why: the page is no longer trying to behave like a balanced product site. Its quality ceiling now depends on whether the three main peaks dominate the reading order and whether everything else is willing to retreat.
+
+### 16. Final website polish now optimizes for authority gaps, not local prettiness
+
+Current late-stage polishing policy:
+
+- the first control plate in `Screens` is allowed to be slightly unfair if that strengthens its role as the central evidence object,
+- later control plates must retreat not only in size but also in caption formality, spacing, and plate-label stability,
+- `Workflow` may be cooled further, but only if it still reads as a sequence of cold nodes rather than weakened UI scraps,
+- `Core Logic` and `MCP` should get harder by deleting explanatory shell text while preserving the judgment-bearing skeleton.
+
+Why: once the site is already coherent, the remaining gains no longer come from prettier local components. They come from widening authority gaps between peaks and retreating anything that softens those power relationships.
+
 ## Module Boundary
 
 - `omniclip_rag.config`: configuration and data paths

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OmniClip RAG | Local-first Private Knowledge Retrieval</title>
   <meta name="description" content="OmniClip RAG is a local-first desktop knowledge retrieval app and read-only MCP server for private Markdown, PDF, and Tika-backed search on Windows.">
-  <meta name="theme-color" content="#F4F1EB">
+  <meta name="theme-color" content="#FCFCFA">
   <meta property="og:title" content="OmniClip RAG | Local-first Private Knowledge Retrieval">
   <meta property="og:description" content="Search private Markdown, PDF, and Tika-backed documents locally. Use the desktop app yourself or connect the read-only MCP server to MCP-capable AI clients.">
   <meta property="og:type" content="website">
@@ -33,7 +33,7 @@
         <a href="#features" data-zh="系统架构">Architecture</a>
         <a href="#workflow" data-zh="工作流">Workflow</a>
         <a href="#mcp" data-zh="MCP 协议">MCP</a>
-        <a href="#screens" data-zh="系统实况">Engine</a>
+        <a href="#screens" data-zh="系统实况">Screens</a>
       </nav>
       <div class="lang-switch" role="group" aria-label="Language switch">
         <button type="button" class="lang-button is-active" data-lang-switch="en" aria-pressed="true">EN</button>
@@ -47,12 +47,12 @@
       <div class="container hero-grid">
         <div class="hero-copy">
           <p class="eyebrow" data-zh="本地优先 · 物理隔离 · 只读协议">Local-first · Air-gapped isolation · Read-only protocol</p>
-          <h1 data-zh="绝对的知识主权。">Absolute knowledge sovereignty.</h1>
-          <p class="hero-subtitle" data-zh="划定清晰边界：让 AI 仅读取你允许的片段，而非接管你的第二大脑。">
-            Draw a strict boundary: Let AI read only the snippets you explicitly permit, without surrendering your second brain.
+          <h1 data-zh="绝对的知识主权。">Knowledge sovereignty, absolute.</h1>
+          <p class="hero-subtitle" data-zh="让 AI 只读取被你放行的片段，不接管背后的第二大脑。">
+            Release the fragment. Keep the mind.
           </p>
-          <p class="hero-description" data-zh="方寸引（OmniClip）在你的本地设备上构建了一道静默的知识防火墙。它不仅是强悍的 Markdown 与 PDF 语义检索工具，更是一个原生只读的 MCP 服务器。掌控资料本体，自由切换 AI。">
-            OmniClip creates a silent knowledge firewall on your machine. Beyond a powerful semantic search engine for Markdown and PDFs, it operates natively as a read-only MCP server. Keep your corpus private, and route your context to any AI.
+          <p class="hero-description" data-zh="方寸引把语料留在本地，在需要时只把精准证据经由只读 MCP 线路送出。">
+            Keep the corpus local. Send out only the evidence line when context must travel.
           </p>
           <div class="hero-actions">
             <a class="button button-primary" href="https://github.com/msjsc001/OmniClip-RAG/releases/latest" target="_blank" rel="noreferrer" data-zh="下载最新版">Download</a>
@@ -60,13 +60,13 @@
             <a class="button button-link" href="https://github.com/msjsc001/OmniClip-RAG/blob/main/MCP_SETUP.md" target="_blank" rel="noreferrer" data-zh="MCP 接入指南">MCP Setup</a>
           </div>
           <ul class="hero-meta" aria-label="Project highlights">
-            <li data-zh="桌面 GUI 与只读 MCP 共享同一极速内核">Desktop GUI and read-only MCP sharing one high-speed core</li>
-            <li data-zh="Markdown / PDF / Tika 扩展格式独立索引管线">Isolated indexing pipelines for Markdown, PDF, and Tika formats</li>
-            <li data-zh="全面接入官方 MCP Registry 标准发布线">Fully integrated with the official MCP Registry delivery line</li>
+            <li data-zh="桌面 GUI 与只读 MCP 共享同一检索内核">Desktop GUI and read-only MCP sharing one retrieval core</li>
           </ul>
         </div>
         <div class="hero-visual">
-          <img class="illustration-blend" src="./assets/hero-illustration.png" alt="Conceptual illustration showing scattered knowledge being stabilized into a local knowledge core">
+          <div class="art-stage art-stage-hero">
+            <img class="illustration-blend" src="./assets/hero-illustration.png" alt="Conceptual illustration showing scattered knowledge being stabilized into a local knowledge core">
+          </div>
         </div>
       </div>
     </section>
@@ -75,21 +75,21 @@
       <div class="container">
         <div class="summary-grid">
           <article class="summary-card">
-            <p class="summary-label" data-zh="核心形态">The Engine</p>
-            <p data-zh="一个物理隔离的本地检索应用，与一个标准只读 MCP 协议接口的完美结合。">
-              A physically isolated local search application flawlessly integrated with a standard read-only MCP interface.
+            <p class="summary-label" data-zh="核心形态">Law I</p>
+            <p data-zh="一个本地核心，一条只读线路。">
+              One local core. One read-only line.
             </p>
           </article>
           <article class="summary-card">
-            <p class="summary-label" data-zh="安全边界">The Boundary</p>
-            <p data-zh="拒绝全库上传，拒绝平台锁定。你只需将最精准的证据切片投递给当前最聪明的模型。">
-              No cloud uploads. No vendor lock-in. Deliver only the most precise evidence fragments to the smartest models available today.
+            <p class="summary-label" data-zh="安全边界">Law II</p>
+            <p data-zh="原库不出场，离开的只有片段。">
+              The archive never leaves. Only the fragment does.
             </p>
           </article>
           <article class="summary-card">
-            <p class="summary-label" data-zh="为谁设计">Built For</p>
-            <p data-zh="专为高度关注数据隐私、拥有大量长文本沉淀，且渴望自由驾驭大模型的独立思考者而生。">
-              Engineered for independent thinkers who demand absolute data privacy and the freedom to leverage any LLM without compromise.
+            <p class="summary-label" data-zh="为谁设计">Law III</p>
+            <p data-zh="为跨模型工作的长笔记者而生。">
+              For long-note minds crossing models.
             </p>
           </article>
         </div>
@@ -101,32 +101,34 @@
         <div class="section-head section-head-split">
           <div class="section-intro">
             <p class="section-kicker" data-zh="底层逻辑">Core Logic</p>
-            <h2 data-zh="不是又一个聊天壳，而是纯粹的知识引擎。">Not another chat UI. A pure knowledge engine.</h2>
-            <p data-zh="抛弃浮华的过度包装，方寸引专注于一件事：在极低的资源占用下，精准、克制地提取你的思想切片。">
-              Stripped of unnecessary complexity, OmniClip rigorously focuses on a single mission: extracting your thought snippets with extreme precision and minimal overhead.
+            <h2 data-zh="不是又一个聊天壳，而是纯粹的知识引擎。">Not a chat shell. A knowledge engine.</h2>
+            <p data-zh="它不是陪聊界面，而是把你的知识切片精准、克制地提取出来。">
+              Retrieve. Cite. Release with restraint.
             </p>
           </div>
           <figure class="section-art section-art-logic">
-            <img class="illustration-blend" src="./assets/core-logic-illustration.png" alt="Abstract illustration for OmniClip RAG core logic">
+            <div class="art-stage art-stage-diagram art-stage-logic">
+              <img class="illustration-blend" src="./assets/core-logic-illustration.png" alt="Abstract illustration for OmniClip RAG core logic">
+            </div>
           </figure>
         </div>
         <div class="feature-grid">
           <article class="feature-card">
             <h3 data-zh="本地数据自治">Local Data Autonomy</h3>
-            <p data-zh="从解析、向量化到结构索引，一切运算皆在本地沙盒完成。你的知识库永远属于你，外部工具只能看到你递出的纸条。">
-              From parsing and embeddings to structural indexing, every calculation happens in your local sandbox. External tools only see the precise notes you hand them.
+            <p data-zh="解析、索引与检索全留在本地；离开的只有被选中的纸条。">
+              The field stays local. Only the chosen slip leaves.
             </p>
           </article>
           <article class="feature-card">
             <h3 data-zh="GUI 与 MCP 双引擎">Dual-Drive: GUI & MCP</h3>
-            <p data-zh="在干净的桌面端沉浸式穿梭于笔记之间；或开启 MCP 服务，让大模型客户端在你的监管下直接调用本地算力。">
-              Navigate your notes immersively via the clean desktop interface, or spin up the MCP server to let AI clients securely query your local compute under your supervision.
+            <p data-zh="自己在桌面控制台里工作，或让 MCP 客户端调用同一只读内核。">
+              One read-only core, whether touched by desktop or MCP.
             </p>
           </article>
           <article class="feature-card">
             <h3 data-zh="跨模型认知套利">Cross-Model Arbitrage</h3>
-            <p data-zh="今天用 Claude 写代码，明天用 GPT-5 盘逻辑。知识中枢稳固不变，让铁打的本地语料去压榨流水的 AI 能力。">
-              Use Claude for coding today, and the next flagship LLM tomorrow. Your knowledge hub remains the constant foundation, allowing you to arbitrage the strengths of any AI.
+            <p data-zh="保持一个语料中枢，自由切换模型。">
+              One corpus. Different minds at will.
             </p>
           </article>
         </div>
@@ -138,35 +140,37 @@
         <div class="section-head section-head-split">
           <div class="section-intro">
             <p class="section-kicker" data-zh="工作流">Workflow</p>
-            <h2 data-zh="先检索，再推演。">Retrieve first, reason later.</h2>
-            <p data-zh="不要让 AI 凭空捏造。先用你既有的智慧资产建立上下文基石，再展开具备深度的智力博弈。">
-              Don't let AI hallucinate in a vacuum. Ground the conversation in your own accumulated wisdom before engaging in deep logical reasoning.
+            <h2 data-zh="先检索，再推演。">Retrieve first. Reason after.</h2>
+            <p data-zh="先用既有语料建立上下文，再把推演交给模型。">
+              Build context from evidence first. Reason later.
             </p>
           </div>
           <figure class="section-art section-art-workflow">
-            <img class="illustration-blend" src="./assets/mcp-diagram.png" alt="Abstract illustration for the OmniClip RAG workflow">
+            <div class="art-stage art-stage-diagram art-stage-workflow">
+              <img class="illustration-blend" src="./assets/mcp-diagram.png" alt="Abstract illustration for the OmniClip RAG workflow">
+            </div>
           </figure>
         </div>
         <div class="workflow-grid">
           <article class="workflow-step">
             <span class="step-index">01</span>
             <h3 data-zh="静默建库">Silent Indexing</h3>
-            <p data-zh="指向你的文件夹。系统在后台无缝构建融合词法与向量的混合检索图谱，不污染任何原始文件。">
-              Point to your folders. The system seamlessly builds a hybrid lexical and vector retrieval graph in the background, leaving your original files untouched.
+            <p data-zh="指向知识库，静默成场。">
+              Point the vault. The field forms quietly.
             </p>
           </article>
           <article class="workflow-step">
             <span class="step-index">02</span>
             <h3 data-zh="碎片提取">Fragment Extraction</h3>
-            <p data-zh="输入模糊的灵感或明确的关键词。引擎瞬间剥离出带有精确页码与来源追踪的高价值碎片。">
-              Input vague concepts or exact keywords. The engine instantly isolates high-value fragments complete with precise page numbers and source attribution.
+            <p data-zh="提问一次，回收证据。">
+              Ask once. Receive cited fragments.
             </p>
           </article>
           <article class="workflow-step">
             <span class="step-index">03</span>
             <h3 data-zh="向外赋能">Context Delivery</h3>
-            <p data-zh="将打包好的上下文直接粘贴给任意网页大模型，或通过标准协议让客户端自动提取，完成知识闭环。">
-              Paste the tightly packed context directly to any web LLM, or let standard protocols fetch it automatically, completing the knowledge loop.
+            <p data-zh="送出片段，把原库留在本地。">
+              Send the fragment. Keep the archive home.
             </p>
           </article>
         </div>
@@ -177,33 +181,35 @@
       <div class="container mcp-layout">
         <div class="mcp-copy">
           <div class="section-intro section-intro-left">
-            <p class="section-kicker" data-zh="MCP 协议接入">MCP Delivery Line</p>
-            <h2 data-zh="化作任意 AI 的外挂海马体。">Become the external hippocampus for any AI.</h2>
+            <p class="section-kicker" data-zh="MCP 协议接入">MCP Orbit</p>
+            <h2 data-zh="化作任意 AI 的外挂海马体。">The external hippocampus for any AI.</h2>
           </div>
-          <p data-zh="通过 OmniClipRAG-MCP.exe，以最高级别的安全标准（原生只读、stdio 传输）向外部暴露你的本地引力场。">
-            Expose your local gravity field to external clients under the highest security standards (native read-only, stdio transport) via OmniClipRAG-MCP.exe.
+          <p data-zh="通过只读 stdio 线路，把你的本地引力场接到外部模型。">
+            A read-only stdio line out. Fragments may travel. The archive does not.
           </p>
           <div class="path-grid">
             <article class="path-card">
               <h3>Registry / MCPB</h3>
-              <p data-zh="拥抱标准生态：通过官方 Registry 检索，或直接使用最新支持的 MCPB 格式一键挂载。">
-                Embrace the standard ecosystem: discover via the official Registry or mount instantly using the modern MCPB format.
+              <p data-zh="面向 Registry 原生客户端的标准路径。">
+                The native route for Registry-speaking MCP clients.
               </p>
             </article>
             <article class="path-card">
               <h3>Manual ZIP</h3>
-              <p data-zh="提供绝对的向下兼容：解压绿色包，将客户端直接指向执行文件，无需任何前置依赖。">
-                Absolute backward compatibility: unpack the portable ZIP and point your client directly to the executable with zero dependencies.
+              <p data-zh="保留给仍依赖可执行路径的兼容兜底。">
+                The fallback route for executable-minded clients.
               </p>
             </article>
           </div>
-          <p class="mcp-inline-note" data-zh="标准交互范式：客户端请求 -> 调用 omniclip.status 确认防线状态 -> 调用 omniclip.search 提取知识。">
-            Standard interaction paradigm: Client request -> call omniclip.status to verify readiness -> call omniclip.search to extract knowledge.
+          <p class="mcp-inline-note" data-zh="先看状态，再取片段。">
+            State first. Fragment second.
           </p>
-          <a class="button button-secondary" href="https://github.com/msjsc001/OmniClip-RAG/blob/main/MCP_SETUP.md" target="_blank" rel="noreferrer" data-zh="研读完整接入协议">Study the Setup Protocol</a>
+          <a class="button button-secondary" href="https://github.com/msjsc001/OmniClip-RAG/blob/main/MCP_SETUP.md" target="_blank" rel="noreferrer" data-zh="研读完整接入协议">Read the MCP Spec</a>
         </div>
         <div class="diagram-frame">
-          <img class="illustration-blend" src="./assets/mcp-protocol-illustration.png" alt="Abstract illustration for OmniClip RAG MCP protocol delivery">
+          <div class="art-stage art-stage-diagram art-stage-orbit">
+            <img class="illustration-blend" src="./assets/mcp-protocol-illustration.png" alt="Abstract illustration for OmniClip RAG MCP protocol delivery">
+          </div>
         </div>
       </div>
     </section>
@@ -211,32 +217,35 @@
     <section id="screens" class="content-section alt-surface">
       <div class="container">
         <div class="section-intro">
-          <p class="section-kicker" data-zh="系统实况">Engine in Action</p>
-          <h2 data-zh="隐于后台的静默引力场。">A silent gravity field at your fingertips.</h2>
-          <p data-zh="没有冗余的视觉噪音。只有专注检索的图形交互，以及透明可控的配置总线。">
-            Zero visual noise. Just a fiercely focused retrieval interface and a transparent, completely controllable configuration bus.
+          <p class="section-kicker" data-zh="系统实况">Control Plates</p>
+          <h2 data-zh="隐于后台的静默引力场。">The quiet field at work.</h2>
+          <p data-zh="没有冗余噪音，只有证据控制台。">
+            Quiet in the background. Transparent at the surface.
           </p>
         </div>
         <div class="screen-grid">
-          <figure class="screen-card">
+          <figure class="screen-card screen-card-primary">
+            <span class="plate-label" data-zh="图版 I">Plate I</span>
             <img src="./assets/gui-shot.png" alt="OmniClip RAG desktop search interface">
             <figcaption>
               <strong data-zh="查询台">Query Desk</strong>
-              <span data-zh="自然语言提问、来源筛选与结果明细同时在线，适合直接构建高密度证据上下文。">A dense search desk for natural-language questions, source filtering, and evidence-ready result inspection.</span>
+              <span data-zh="整页最核心的证据控制台。">The central evidentiary console of the whole field.</span>
             </figcaption>
           </figure>
-          <figure class="screen-card">
+          <figure class="screen-card screen-card-secondary">
+            <span class="plate-label" data-zh="图版 II">Plate II</span>
             <img src="./assets/mcp-shot.png" alt="OmniClip RAG configuration and indexing interface">
             <figcaption>
               <strong data-zh="开始">Start Console</strong>
-              <span data-zh="从 Vault、Runtime 到索引状态，一页看清启动条件与快速起步动作。">A clear start console for vault setup, runtime readiness, and index building at a glance.</span>
+              <span data-zh="启动前的状态对齐页。">Readiness before lift-off.</span>
             </figcaption>
           </figure>
-          <figure class="screen-card">
+          <figure class="screen-card screen-card-tertiary">
+            <span class="plate-label" data-zh="图版 III">Plate III</span>
             <img src="./assets/format-selection.png" alt="OmniClip RAG extension format selection interface">
             <figcaption>
-              <strong data-zh="格式选择">Format Selection</strong>
-              <span data-zh="扩展格式以独立管线管理，Tika 兼容范围、选择状态与风险提示一目了然。">An isolated format-selection surface that exposes Tika coverage, enablement state, and compatibility cues.</span>
+              <strong data-zh="格式选择">Format Surface</strong>
+              <span data-zh="扩展边界与风险提示同屏可见。">Extension scope and risk at a glance.</span>
             </figcaption>
           </figure>
         </div>
@@ -247,20 +256,19 @@
       <div class="container">
         <div class="section-head section-head-stack">
           <figure class="section-art section-art-trust">
-            <img class="illustration-blend" src="./assets/trust-illustration.png" alt="Abstract illustration representing trust boundaries">
+            <div class="art-stage art-stage-seal">
+              <img class="illustration-blend" src="./assets/trust-illustration.png" alt="Abstract illustration representing trust boundaries">
+            </div>
           </figure>
           <div class="section-intro section-intro-centered">
             <p class="section-kicker" data-zh="底线与承诺">Trust Boundaries</p>
-            <h2 data-zh="坚守数据物理隔离。">Uncompromising data isolation.</h2>
+            <h2 data-zh="坚守数据物理隔离。">Physical isolation, uncompromised.</h2>
           </div>
         </div>
         <div class="trust-grid">
-          <div class="trust-chip" data-zh="MIT 开源协议">MIT Open Source</div>
-          <div class="trust-chip" data-zh="GitHub 透明发布">GitHub Releases</div>
-          <div class="trust-chip" data-zh="Windows 原生编译">Windows Native</div>
-          <div class="trust-chip" data-zh="物理断网可用">Works Fully Offline</div>
+          <div class="trust-chip" data-zh="MIT 开源协议">MIT License</div>
+          <div class="trust-chip" data-zh="只读 MCP">Read-only MCP</div>
           <div class="trust-chip" data-zh="零数据隐匿上传">Zero Telemetry</div>
-          <div class="trust-chip" data-zh="官方 MCP 认证">Registry Verified</div>
         </div>
       </div>
     </section>
@@ -270,14 +278,11 @@
     <div class="container footer-inner">
       <div>
         <p class="footer-title">OmniClip RAG</p>
-        <p class="footer-copy" data-zh="一道守护思想边界的纯本地知识防火墙。">A pure local knowledge firewall guarding the boundaries of your thoughts.</p>
       </div>
       <div class="footer-links">
         <a href="https://github.com/msjsc001/OmniClip-RAG" target="_blank" rel="noreferrer">GitHub</a>
         <a href="https://github.com/msjsc001/OmniClip-RAG/releases/latest" target="_blank" rel="noreferrer" data-zh="版本下载">Releases</a>
         <a href="https://github.com/msjsc001/OmniClip-RAG/blob/main/MCP_SETUP.md" target="_blank" rel="noreferrer" data-zh="协议接入">MCP Setup</a>
-        <a href="https://github.com/msjsc001/OmniClip-RAG/blob/main/ARCHITECTURE.md" target="_blank" rel="noreferrer" data-zh="系统架构">Architecture</a>
-        <a href="https://github.com/msjsc001/OmniClip-RAG/blob/main/LICENSE" target="_blank" rel="noreferrer" data-zh="开源许可证">License</a>
       </div>
     </div>
   </footer>
