@@ -177,6 +177,7 @@ Current website policy:
 
 - the public project site lives in the repository `docs/` directory,
 - it is published through GitHub Pages from `main /docs`,
+- the published `docs/` tree includes a committed `.nojekyll` marker so Pages serves the site as plain static output without Jekyll rewriting or underscore-path surprises,
 - it uses plain `HTML + CSS + a very small amount of native JS`,
 - it does not introduce React, Vue, Tailwind, npm build chains, or third-party UI runtime dependencies,
 - all page assets are referenced through relative paths so the site remains correct under the GitHub Pages repository subpath,
