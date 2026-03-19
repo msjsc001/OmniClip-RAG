@@ -171,6 +171,23 @@ Current MCP publishing policy:
 
 Why: the official ecosystem has already moved third-party discovery to the Registry, and Registry metadata becomes effectively immutable once published. That makes packaging discipline, SHA tracking, and version hygiene more important than chasing a legacy README mention.
 
+### 12. The project website is a static trust layer, not a second frontend product
+
+Current website policy:
+
+- the public project site lives in the repository `docs/` directory,
+- it is published through GitHub Pages from `main /docs`,
+- it uses plain `HTML + CSS + a very small amount of native JS`,
+- it does not introduce React, Vue, Tailwind, npm build chains, or third-party UI runtime dependencies,
+- all page assets are referenced through relative paths so the site remains correct under the GitHub Pages repository subpath,
+- social preview metadata uses absolute HTTPS image URLs because external crawlers cannot resolve repository-relative asset paths,
+- the landing page defaults to English, provides an explicit Chinese toggle, and persists the chosen language locally,
+- the site is intentionally a hybrid of project website and product landing page,
+- the site prioritizes private/local-first retrieval as the first identity and treats MCP as a strong secondary delivery line,
+- the site must always pair a conceptual hero visual with real product screenshots so style never outruns trust.
+
+Why: this repository needs a durable public-facing trust surface for GitHub, Registry, and community traffic, but it does not need a second app-shaped frontend subsystem with its own toolchain, dependency drift, and maintenance tax.
+
 ## Module Boundary
 
 - `omniclip_rag.config`: configuration and data paths
