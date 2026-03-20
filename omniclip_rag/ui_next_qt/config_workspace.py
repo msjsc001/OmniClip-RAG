@@ -19,20 +19,24 @@ from ..config import (
     UI_SCALE_PERCENT_MAX,
     UI_SCALE_PERCENT_MIN,
     WATCH_RESOURCE_PEAK_OPTIONS,
+    build_data_paths,
     default_data_root,
     ensure_data_paths,
+    materialize_data_directories,
     load_config,
     normalize_ui_scale_percent,
     normalize_ui_theme,
     normalize_vault_path,
     normalize_watch_resource_peak_percent,
     normalize_log_file_size_mb,
+    probe_data_root,
     save_config,
 )
+from ..data_root_bootstrap import known_data_roots as bootstrap_known_data_roots, resolve_and_validate_active_data_root, write_bootstrap_pointer
 from ..formatting import format_bytes, format_duration, format_space_report, summarize_preflight
 from ..preflight import estimate_model_cache_bytes
 from ..service import WATCHDOG_AVAILABLE, OmniClipService
-from ..ui_i18n import text, tooltip
+from ..ui_i18n import data_root_probe_summary_text, data_root_reason_text, text, tooltip
 from ..ui_shared import merge_page_filter_defaults
 from ..vector_index import build_runtime_install_command, detect_acceleration, get_local_model_dir, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, refresh_runtime_capability_snapshot, resolve_vector_device, runtime_component_catalog, runtime_component_status, runtime_component_usage, runtime_dependency_issue, runtime_guidance_context, runtime_install_sources, runtime_management_snapshot
 from ..reranker import get_local_reranker_dir, is_local_reranker_ready
@@ -65,19 +69,44 @@ class ConfigWorkspace(QtWidgets.QWidget):
     logMessageAdded = QtCore.Signal(str)
     showQueryLogRequested = QtCore.Signal()
     uiPreferencesChanged = QtCore.Signal(str, int)
-    def __init__(self, *, config, paths, language_code: str, theme: ThemeState, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        config,
+        paths,
+        language_code: str,
+        theme: ThemeState,
+        parent: QtWidgets.QWidget | None = None,
+        recovery_mode: bool = False,
+        recovery_path: str = '',
+        recovery_reason_code: str = '',
+        recovery_reason_text: str = '',
+    ) -> None:
         super().__init__(parent)
         self._config = config
         self._paths = paths
         self._language_code = language_code
         self._theme = theme
+        self._recovery_mode = bool(recovery_mode)
+        self._recovery_path = str(recovery_path or '').strip()
+        self._recovery_reason_code = str(recovery_reason_code or '').strip()
+        self._recovery_reason_text = str(recovery_reason_text or '').strip()
         self._saved_vaults = list(getattr(config, 'vault_paths', []))
+        self._known_data_roots = bootstrap_known_data_roots()
+        if str(getattr(paths, 'global_root', '') or '').strip():
+            self._known_data_roots = [str(paths.global_root), *self._known_data_roots]
+        self._data_root_ui_sync = False
+        self._data_root_switch_prompt_active = False
+        self._suppress_next_implicit_data_root_prompt = False
+        self._last_data_root_prompt_root = ''
+        self._last_data_root_prompt_at = 0.0
         self._busy = False
         self._watch_active = False
         self._watch_stopping = False
         self._watch_mode = 'watchdog'
         self._status_snapshot: dict[str, object] | None = None
         self._extension_registry = ExtensionRegistry()
+        self._suppress_extension_vault_refresh = False
         self._extension_state = ExtensionRegistryState()
         self._extension_state_loaded = False
         self._extension_ui_sync = False
@@ -180,16 +209,398 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.reranker_model_edit.textChanged.connect(self._on_live_runtime_preferences_changed)
         self.reranker_batch_cpu_edit.textChanged.connect(self._on_live_runtime_preferences_changed)
         self.reranker_batch_cuda_edit.textChanged.connect(self._on_live_runtime_preferences_changed)
-        self._apply_config_to_controls(self._config, self._paths)
-        self._refresh_status_summary(snapshot=None)
+        if self._recovery_mode:
+            self._apply_recovery_state_to_controls()
+        else:
+            self._apply_config_to_controls(self._config, self._paths)
+            self._refresh_status_summary(snapshot=None)
     def _tr(self, key: str, **kwargs) -> str:
         return text(self._language_code, key, **kwargs)
     def _tip(self, key: str, **kwargs) -> str:
         return tooltip(self._language_code, key, **kwargs)
 
+    def _recovery_root_display(self) -> str:
+        return self._recovery_path or self._active_data_root()
+
+    def _recovery_reason_display(self) -> str:
+        if self._recovery_reason_text:
+            return self._recovery_reason_text
+        return self._format_data_root_reason(self._recovery_reason_code)
+
+    def _recovery_status_text(self) -> str:
+        return self._tr(
+            'data_root_recovery_status',
+            path=self._recovery_root_display(),
+            reason=self._recovery_reason_display(),
+        )
+
+    def _current_active_data_root(self) -> str:
+        return self._recovery_root_display() if self._recovery_mode else self._active_data_root()
+
+    def _format_data_root_reason(self, reason: str = '', detail: str = '') -> str:
+        return data_root_reason_text(self._language_code, reason, detail)
+
+    def _selected_data_root_preview_summary(self) -> str:
+        selected_root = self._selected_data_root()
+        if self._recovery_mode and selected_root == self._recovery_root_display():
+            return self._tr(
+                'data_root_probe_unavailable',
+                path=selected_root,
+                reason=self._recovery_reason_display(),
+            )
+        try:
+            probe = self._selected_data_root_probe()
+        except Exception as exc:
+            return self._tr('data_root_probe_unavailable', path=selected_root, reason=str(exc))
+        detected_vault = ''
+        if probe.state == 'existing':
+            try:
+                preview_paths = build_data_paths(Path(selected_root), self.vault_edit.text().strip() or None)
+                preview_config = load_config(preview_paths)
+            except Exception:
+                preview_config = None
+            if preview_config is not None and str(preview_config.vault_path or '').strip():
+                detected_vault = Path(preview_config.vault_path).name or preview_config.vault_path
+        return data_root_probe_summary_text(
+            self._language_code,
+            probe.state,
+            path=selected_root,
+            reason=probe.reason,
+            detail=probe.detail,
+            legacy_environment=probe.legacy_environment,
+            detected_vault=detected_vault,
+        )
+
+    def _apply_recovery_state_to_controls(self) -> None:
+        self._set_known_data_roots(self._known_data_roots, active_root=self._recovery_root_display())
+        self.data_root_combo.setCurrentText(self._recovery_root_display())
+        self.data_dir_edit.setText(self._recovery_root_display())
+        self._refresh_workspace_summary()
+        self._update_recovery_notice()
+        self.sub_tabs.setCurrentWidget(self.start_page)
+        while self.sub_tabs.count() > 1:
+            self.sub_tabs.removeTab(self.sub_tabs.count() - 1)
+        for button in (
+            self.preflight_button,
+            self.bootstrap_button,
+            self.rebuild_button,
+            self.watch_button,
+        ):
+            button.setEnabled(False)
+            button.setToolTip(self._tr('data_root_recovery_action_disabled_tip'))
+        self.statusMessageChanged.emit(self._recovery_status_text())
+        self._emit_query_block_state()
+
+    def _update_recovery_notice(self) -> None:
+        if not self._recovery_mode:
+            return
+        body = self._tr(
+            'data_root_recovery_banner_body',
+            path=self._recovery_root_display(),
+            reason=self._recovery_reason_display(),
+        )
+        selected_root = self._selected_data_root()
+        if selected_root != self._recovery_root_display():
+            body = f"{body}\n\n{self._tr('data_root_recovery_target_prefix', summary=self._selected_data_root_preview_summary())}"
+        if hasattr(self, 'recovery_notice_title'):
+            self.recovery_notice_title.setText(self._tr('data_root_recovery_banner_title'))
+        if hasattr(self, 'recovery_notice_body'):
+            self.recovery_notice_body.setText(body)
+
+    def _retry_recovery_data_root(self) -> None:
+        if not self._recovery_mode:
+            return
+        target = self._normalized_data_root(self._recovery_root_display())
+        try:
+            probe = probe_data_root(target, allow_create=False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                self._tr('data_root_unavailable_title'),
+                self._tr('data_root_switch_probe_invalid_body', path=target, reason=str(exc)),
+            )
+            return
+        if probe.state not in {'existing', 'new'}:
+            self._recovery_reason_code = str(probe.reason or self._recovery_reason_code)
+            self._recovery_reason_text = self._format_data_root_reason(probe.reason, probe.detail)
+            self._update_recovery_notice()
+            self.statusMessageChanged.emit(self._recovery_status_text())
+            QtWidgets.QMessageBox.information(
+                self,
+                self._tr('data_root_unavailable_title'),
+                self._tr('data_root_switch_probe_invalid_body', path=target, reason=self._recovery_reason_display()),
+            )
+            return
+        try:
+            resolved = resolve_and_validate_active_data_root(target)
+            if probe.state == 'new':
+                materialize_data_directories(build_data_paths(resolved.path))
+            write_bootstrap_pointer(
+                resolved.path,
+                known_data_roots=[*self._known_data_roots, self._recovery_root_display(), str(resolved.path)],
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('data_root_unavailable_title'), str(exc))
+            return
+        self._remember_data_root(str(resolved.path), active_root=str(resolved.path))
+        self.statusMessageChanged.emit(self._tr('status_data_root_switch_saved', path=resolved.path))
+        self._append_log(self._tr('log_data_root_switch_saved', path=resolved.path))
+        self._restart_for_data_root_switch()
+
+    def _exit_application(self) -> None:
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.quit()
+
     def current_runtime_snapshot(self) -> tuple[AppConfig, Any]:
         """Return the latest live workspace/runtime snapshot from the current controls."""
-        return self._collect_config(False)
+        return self._collect_config(False, use_data_root_input=False)
+    def _normalized_data_root(self, value: str | None) -> str:
+        raw = str(value or '').strip()
+        if not raw:
+            raw = str(default_data_root())
+        try:
+            return str(Path(raw).expanduser().resolve(strict=False))
+        except OSError:
+            return str(Path(raw).expanduser())
+    def _active_data_root(self) -> str:
+        return self._normalized_data_root(getattr(self._paths, 'global_root', default_data_root()))
+    def _selected_data_root(self) -> str:
+        return self._normalized_data_root(self.data_dir_edit.text())
+    def _set_known_data_roots(self, roots: list[str] | tuple[str, ...], *, active_root: str | None = None) -> None:
+        normalized_active = self._normalized_data_root(active_root or self._active_data_root())
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for raw in [normalized_active, *list(roots or [])]:
+            normalized = self._normalized_data_root(raw)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        self._known_data_roots = ordered
+        self._data_root_ui_sync = True
+        try:
+            self.data_root_combo.blockSignals(True)
+            self.data_root_combo.clear()
+            self.data_root_combo.addItems(self._known_data_roots)
+            self.data_root_combo.setCurrentText(normalized_active)
+        finally:
+            self.data_root_combo.blockSignals(False)
+            self._data_root_ui_sync = False
+    def _remember_data_root(self, root: str | Path, *, active_root: str | None = None) -> None:
+        normalized = self._normalized_data_root(root)
+        self._set_known_data_roots([normalized, *self._known_data_roots], active_root=active_root or normalized)
+    def _selected_data_root_probe(self, *, allow_create: bool = True):
+        return probe_data_root(self._selected_data_root(), allow_create=allow_create)
+    def _has_pending_data_root_switch(self) -> bool:
+        return self._selected_data_root() != self._current_active_data_root()
+    def _pending_data_root_switch_message(self) -> str:
+        return self._tr('pending_data_root_switch_body')
+    def _guard_pending_data_root_switch(self, *, title_key: str) -> bool:
+        if not self._has_pending_data_root_switch():
+            return True
+        message = self._pending_data_root_switch_message()
+        self.statusMessageChanged.emit(message)
+        QtWidgets.QMessageBox.information(self, self._tr(title_key), message)
+        return False
+    def _restart_for_data_root_switch(self) -> bool:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return False
+        program = sys.executable
+        args = list(sys.argv[1:])
+        started = QtCore.QProcess.startDetached(program, args, str(Path.cwd()))
+        if started:
+            app.quit()
+            return True
+        QtWidgets.QMessageBox.information(
+            self,
+            self._tr('data_root_switch_restart_title'),
+            self._tr('data_root_switch_restart_body'),
+        )
+        return False
+
+    def _request_pending_data_root_switch(self) -> None:
+        self._prompt_pending_data_root_switch(explicit=False)
+
+    def _can_remove_saved_data_root(self, root: str) -> bool:
+        normalized = self._normalized_data_root(root)
+        normalized_known = {self._normalized_data_root(item) for item in self._known_data_roots}
+        return bool(normalized) and normalized in normalized_known and normalized != self._current_active_data_root()
+
+    def _forget_saved_data_root(self, root: str) -> bool:
+        normalized = self._normalized_data_root(root)
+        if not self._can_remove_saved_data_root(normalized):
+            return False
+        active_root = self._current_active_data_root()
+        remaining = [item for item in self._known_data_roots if self._normalized_data_root(item) != normalized]
+        write_bootstrap_pointer(active_root, known_data_roots=remaining)
+        self._set_known_data_roots(remaining, active_root=active_root)
+        self.data_root_combo.setCurrentText(active_root)
+        self.statusMessageChanged.emit(self._tr('status_ready'))
+        self._append_log(self._tr('log_data_root_removed', path=normalized))
+        self._refresh_workspace_summary()
+        if self._recovery_mode:
+            self._update_recovery_notice()
+            self._emit_query_block_state()
+        return True
+
+    def _known_data_roots_for_switch(self, next_root: str) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for candidate in [*self._known_data_roots, self._current_active_data_root(), next_root]:
+            normalized = self._normalized_data_root(candidate)
+            if not normalized:
+                continue
+            if normalized in seen:
+                continue
+            ordered.append(normalized)
+            seen.add(normalized)
+        return ordered
+
+    def _confirm_pending_data_root_switch(self, selected_root: str, *, probe_state: str) -> str:
+        message = (
+            self._tr('data_root_switch_confirm_existing_body', path=selected_root)
+            if probe_state == 'existing'
+            else self._tr('data_root_switch_confirm_new_body', path=selected_root)
+        )
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        dialog.setWindowTitle(self._tr('data_root_switch_confirm_title'))
+        dialog.setText(message)
+        remove_button = None
+        selected_is_known = self._normalized_data_root(selected_root) in {
+            self._normalized_data_root(item) for item in self._known_data_roots
+        }
+        selected_is_active = self._normalized_data_root(selected_root) == self._current_active_data_root()
+        if selected_is_known:
+            remove_button = dialog.addButton(self._tr('data_root_switch_confirm_remove'), QtWidgets.QMessageBox.ButtonRole.ActionRole)
+            if selected_is_active:
+                remove_button.setEnabled(False)
+                remove_button.setToolTip(self._tr('saved_data_root_active_forbidden'))
+        continue_button = dialog.addButton(self._tr('data_root_switch_confirm_continue'), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton(self._tr('data_root_switch_confirm_cancel'), QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(continue_button)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is continue_button:
+            return 'continue'
+        if remove_button is not None and clicked is remove_button and remove_button.isEnabled():
+            return 'remove'
+        return 'cancel'
+
+    def _prompt_invalid_data_root_action(self, selected_root: str, reason_text: str) -> str:
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        dialog.setWindowTitle(self._tr('data_root_switch_confirm_title'))
+        dialog.setText(self._tr('data_root_switch_probe_invalid_body', path=selected_root, reason=reason_text))
+        retry_button = dialog.addButton(self._tr('data_root_invalid_choice_retry'), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        remove_button = None
+        if self._can_remove_saved_data_root(selected_root):
+            remove_button = dialog.addButton(self._tr('data_root_invalid_choice_remove'), QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = dialog.addButton(self._tr('data_root_invalid_choice_cancel'), QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(retry_button)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is retry_button:
+            return 'retry'
+        if remove_button is not None and clicked is remove_button:
+            return 'remove'
+        if clicked is cancel_button:
+            return 'cancel'
+        return 'cancel'
+
+    def _prompt_pending_data_root_switch(self, *, explicit: bool = False) -> None:
+        if self._data_root_ui_sync or not self._has_pending_data_root_switch():
+            return
+        if not explicit and self._suppress_next_implicit_data_root_prompt:
+            self._suppress_next_implicit_data_root_prompt = False
+            return
+        if self._data_root_switch_prompt_active:
+            return
+        selected_root = self._selected_data_root()
+        now = time.monotonic()
+        if (
+            selected_root
+            and selected_root == self._last_data_root_prompt_root
+            and (now - self._last_data_root_prompt_at) < 0.8
+        ):
+            return
+        self._last_data_root_prompt_root = selected_root
+        self._last_data_root_prompt_at = now
+        if explicit:
+            self._suppress_next_implicit_data_root_prompt = True
+        try:
+            self._data_root_switch_prompt_active = True
+            while self._has_pending_data_root_switch():
+                selected_root = self._selected_data_root()
+                try:
+                    probe = self._selected_data_root_probe()
+                except Exception as exc:
+                    action = self._prompt_invalid_data_root_action(selected_root, str(exc))
+                    if action == 'retry':
+                        continue
+                    if action == 'remove':
+                        try:
+                            self._forget_saved_data_root(selected_root)
+                        except Exception as remove_exc:
+                            QtWidgets.QMessageBox.critical(self, self._tr('data_root_switch_confirm_title'), str(remove_exc))
+                        return
+                    self.data_root_combo.setCurrentText(self._current_active_data_root())
+                    self._refresh_workspace_summary()
+                    self._emit_query_block_state()
+                    return
+                if probe.state not in {'existing', 'new'}:
+                    reason_text = self._format_data_root_reason(probe.reason, probe.detail)
+                    action = self._prompt_invalid_data_root_action(selected_root, reason_text)
+                    if action == 'retry':
+                        continue
+                    if action == 'remove':
+                        try:
+                            self._forget_saved_data_root(selected_root)
+                        except Exception as remove_exc:
+                            QtWidgets.QMessageBox.critical(self, self._tr('data_root_switch_confirm_title'), str(remove_exc))
+                        return
+                    self.data_root_combo.setCurrentText(self._current_active_data_root())
+                    self._refresh_workspace_summary()
+                    self._emit_query_block_state()
+                    return
+                action = self._confirm_pending_data_root_switch(selected_root, probe_state=probe.state)
+                if action == 'remove':
+                    try:
+                        self._forget_saved_data_root(selected_root)
+                    except Exception as remove_exc:
+                        QtWidgets.QMessageBox.critical(self, self._tr('data_root_switch_confirm_title'), str(remove_exc))
+                    self.data_root_combo.setCurrentText(self._current_active_data_root())
+                    self._refresh_workspace_summary()
+                    self._emit_query_block_state()
+                    return
+                if action != 'continue':
+                    self.data_root_combo.setCurrentText(self._current_active_data_root())
+                    self._refresh_workspace_summary()
+                    self._emit_query_block_state()
+                    return
+                try:
+                    resolved = resolve_and_validate_active_data_root(selected_root)
+                    if probe.state == 'new':
+                        materialize_data_directories(build_data_paths(resolved.path))
+                    write_bootstrap_pointer(
+                        resolved.path,
+                        known_data_roots=self._known_data_roots_for_switch(str(resolved.path)),
+                    )
+                except Exception as exc:
+                    QtWidgets.QMessageBox.critical(self, self._tr('data_root_switch_confirm_title'), str(exc))
+                    self.data_root_combo.setCurrentText(self._current_active_data_root())
+                    self._refresh_workspace_summary()
+                    self._emit_query_block_state()
+                    return
+                self._remember_data_root(str(resolved.path), active_root=str(resolved.path))
+                self.statusMessageChanged.emit(self._tr('status_data_root_switch_saved', path=resolved.path))
+                self._append_log(self._tr('log_data_root_switch_saved', path=resolved.path))
+                self._restart_for_data_root_switch()
+                return
+        finally:
+            self._data_root_switch_prompt_active = False
     def _set_button_variant(self, button: QtWidgets.QPushButton, variant: str) -> None:
         button.setProperty('variant', variant)
         style = button.style()
@@ -271,8 +682,39 @@ class ConfigWorkspace(QtWidgets.QWidget):
             chip.setMargin(8)
             chips.addWidget(chip)
         chips.addStretch(1)
+        if self._recovery_mode:
+            recovery_card, recovery_layout = self._make_card()
+            self._insert_card(parent, 0, recovery_card)
+            self.recovery_notice_title = QtWidgets.QLabel(self._tr('data_root_recovery_banner_title'), recovery_card)
+            self.recovery_notice_title.setProperty('role', 'warningTitle')
+            recovery_layout.addWidget(self.recovery_notice_title)
+            self.recovery_notice_body = QtWidgets.QLabel(recovery_card)
+            self.recovery_notice_body.setProperty('role', 'warning')
+            self.recovery_notice_body.setWordWrap(True)
+            recovery_layout.addWidget(self.recovery_notice_body)
+            recovery_actions = QtWidgets.QHBoxLayout()
+            recovery_actions.setContentsMargins(0, 0, 0, 0)
+            recovery_actions.setSpacing(8)
+            recovery_layout.addLayout(recovery_actions)
+            self.recovery_retry_button = QtWidgets.QPushButton(self._tr('data_root_unavailable_retry'), recovery_card)
+            self._set_button_variant(self.recovery_retry_button, 'primary')
+            self.recovery_retry_button.clicked.connect(self._retry_recovery_data_root)
+            recovery_actions.addWidget(self.recovery_retry_button)
+            self.recovery_choose_button = QtWidgets.QPushButton(self._tr('data_root_unavailable_choose'), recovery_card)
+            self._set_button_variant(self.recovery_choose_button, 'secondary')
+            self.recovery_choose_button.clicked.connect(self._browse_data_root)
+            recovery_actions.addWidget(self.recovery_choose_button)
+            self.recovery_exit_button = QtWidgets.QPushButton(self._tr('data_root_unavailable_exit'), recovery_card)
+            self._set_button_variant(self.recovery_exit_button, 'ghost')
+            self.recovery_exit_button.clicked.connect(self._exit_application)
+            recovery_actions.addWidget(self.recovery_exit_button)
+            recovery_actions.addStretch(1)
+        workspace_card_index = 2 if self._recovery_mode else 1
+        actions_card_index = 3 if self._recovery_mode else 2
+        status_card_index = 4 if self._recovery_mode else 3
+        task_card_index = 5 if self._recovery_mode else 4
         workspace_card, workspace_layout = self._make_card()
-        self._insert_card(parent, 1, workspace_card)
+        self._insert_card(parent, workspace_card_index, workspace_card)
         form = QtWidgets.QGridLayout()
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(10)
@@ -303,20 +745,30 @@ class ConfigWorkspace(QtWidgets.QWidget):
         data_label = QtWidgets.QLabel(self._tr('data_dir_label'), workspace_card)
         data_label.setProperty('role', 'muted')
         form.addWidget(data_label, 2, 0)
-        self.data_dir_edit = QtWidgets.QLineEdit(workspace_card)
-        self.data_dir_edit.setToolTip(self._tip('data_dir'))
-        form.addWidget(self.data_dir_edit, 2, 1)
+        self.data_root_combo = QtWidgets.QComboBox(workspace_card)
+        self.data_root_combo.setEditable(True)
+        self.data_root_combo.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+        self.data_root_combo.setToolTip(self._tip('data_dir'))
+        self.data_root_combo.currentTextChanged.connect(self._on_data_root_text_changed)
+        self.data_root_combo.activated.connect(lambda _index: self._request_pending_data_root_switch())
+        self.data_dir_edit = self.data_root_combo.lineEdit()
+        self.data_dir_edit.editingFinished.connect(self._request_pending_data_root_switch)
+        form.addWidget(self.data_root_combo, 2, 1)
         browse_data = QtWidgets.QPushButton('...', workspace_card)
         browse_data.setToolTip(self._tip('browse_data'))
         self._set_button_variant(browse_data, 'secondary')
         browse_data.clicked.connect(self._browse_data_root)
         form.addWidget(browse_data, 2, 2)
+        self.remove_data_root_button = QtWidgets.QPushButton(self._tr('remove_saved_data_root'), workspace_card)
+        self._set_button_variant(self.remove_data_root_button, 'secondary')
+        self.remove_data_root_button.clicked.connect(self._remove_selected_data_root)
+        form.addWidget(self.remove_data_root_button, 2, 3)
         self.workspace_summary_label = QtWidgets.QLabel(workspace_card)
         self.workspace_summary_label.setWordWrap(True)
         self.workspace_summary_label.setProperty('role', 'guide')
         workspace_layout.addWidget(self.workspace_summary_label)
         actions_card, actions_layout = self._make_card()
-        self._insert_card(parent, 2, actions_card)
+        self._insert_card(parent, actions_card_index, actions_card)
         action_row = QtWidgets.QGridLayout()
         action_row.setHorizontalSpacing(8)
         action_row.setVerticalSpacing(8)
@@ -341,7 +793,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.watch_button.clicked.connect(self._toggle_watch)
         action_row.addWidget(self.watch_button, 1, 1)
         status_card, status_layout = self._make_card()
-        self._insert_card(parent, 3, status_card)
+        self._insert_card(parent, status_card_index, status_card)
         stat_row = QtWidgets.QHBoxLayout()
         stat_row.setSpacing(10)
         status_layout.addLayout(stat_row)
@@ -366,7 +818,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.watch_summary_label.setProperty('role', 'muted')
         status_layout.addWidget(self.watch_summary_label)
         task_card, task_layout = self._make_card()
-        self._insert_card(parent, 4, task_card)
+        self._insert_card(parent, task_card_index, task_card)
         self.task_progress = QtWidgets.QProgressBar(task_card)
         self.task_progress.setRange(0, 100)
         self.task_progress.setValue(0)
@@ -675,19 +1127,39 @@ class ConfigWorkspace(QtWidgets.QWidget):
         parent_layout.addWidget(card, 1)
         return value
     def _ui_theme_label(self, code: str) -> str:
-        return self._tr(f'ui_theme_{normalize_ui_theme(code)}')
+        theme_key = normalize_ui_theme(code).replace('-', '_')
+        return self._tr(f'ui_theme_{theme_key}')
     def _ui_theme_code(self, label: str) -> str:
         mapping = {
             self._tr('ui_theme_system'): 'system',
             self._tr('ui_theme_light'): 'light',
             self._tr('ui_theme_dark'): 'dark',
+            self._tr('ui_theme_sepia'): 'sepia',
+            self._tr('ui_theme_nord'): 'nord',
+            self._tr('ui_theme_solarized_light'): 'solarized-light',
+            self._tr('ui_theme_solarized_dark'): 'solarized-dark',
+            self._tr('ui_theme_graphite'): 'graphite',
             'system': 'system',
             'light': 'light',
             'dark': 'dark',
+            'sepia': 'sepia',
+            'nord': 'nord',
+            'solarized-light': 'solarized-light',
+            'solarized-dark': 'solarized-dark',
+            'graphite': 'graphite',
         }
         return mapping.get(str(label or '').strip(), normalize_ui_theme(getattr(self._config, 'ui_theme', 'system')))
     def _ui_theme_choices(self) -> list[str]:
-        return [self._ui_theme_label('system'), self._ui_theme_label('light'), self._ui_theme_label('dark')]
+        return [
+            self._ui_theme_label('system'),
+            self._ui_theme_label('light'),
+            self._ui_theme_label('dark'),
+            self._ui_theme_label('sepia'),
+            self._ui_theme_label('nord'),
+            self._ui_theme_label('solarized-light'),
+            self._ui_theme_label('solarized-dark'),
+            self._ui_theme_label('graphite'),
+        ]
     def _build_profile_label(self, profile: str) -> str:
         return self._tr(f'build_profile_{normalize_build_resource_profile(profile)}')
     def _build_profile_code(self, label: str) -> str:
@@ -779,7 +1251,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         except OSError:
             return 'missing'
         try:
-            paths = ensure_data_paths(self.data_dir_edit.text().strip() or str(default_data_root()), normalized_vault)
+            paths = ensure_data_paths(self._active_data_root(), normalized_vault)
         except OSError:
             return 'missing'
         rebuild_state_file = paths.state_dir / 'rebuild_state.json'
@@ -913,6 +1385,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._refresh_extension_saved_vault_sources()
 
     def _refresh_extension_saved_vault_sources(self) -> None:
+        if self._suppress_extension_vault_refresh:
+            return
         if not hasattr(self, 'ext_pdf_enabled_check') or not self._extension_state_loaded:
             return
         try:
@@ -929,18 +1403,31 @@ class ConfigWorkspace(QtWidgets.QWidget):
 
     def _refresh_workspace_summary(self) -> None:
         vault = normalize_vault_path(self.vault_edit.text().strip())
-        data_root = self.data_dir_edit.text().strip() or str(default_data_root())
+        data_root = self._selected_data_root()
+        show_probe_summary = self._recovery_mode or self._has_pending_data_root_switch()
         if not vault:
             summary = self._tr('workspace_empty')
         else:
             try:
-                paths = ensure_data_paths(data_root, vault)
-                summary = self._tr('workspace_current', vault=Path(vault).name or vault, workspace=paths.root, shared=paths.shared_root)
+                paths = build_data_paths(Path(data_root), vault)
+                summary = self._tr(
+                    'workspace_current',
+                    vault=Path(vault).name or vault,
+                    workspace=paths.root,
+                    shared=paths.shared_root,
+                )
             except OSError:
                 summary = self._tr('workspace_pending', vault=Path(vault).name or vault)
+        if show_probe_summary:
+            summary = f"{self._selected_data_root_preview_summary()}\n\n{summary}"
         self.workspace_summary_label.setText(summary)
         self.data_workspace_label.setText(summary)
         self._refresh_log_storage_summary()
+    def _on_data_root_text_changed(self) -> None:
+        self._refresh_workspace_summary()
+        if self._recovery_mode:
+            self._update_recovery_notice()
+        self._emit_query_block_state()
     def _set_chip_style(self, widget: QtWidgets.QLabel, *, ok: bool = False, warn: bool = False) -> None:
         colors = self._theme.colors
         if ok:
@@ -1638,6 +2125,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._populate_runtime_component_table(force_refresh=force_refresh, context=context)
 
     def focus_runtime_management(self) -> None:
+        if self._recovery_mode:
+            return
         if hasattr(self, 'sub_tabs') and hasattr(self, 'runtime_page'):
             self.sub_tabs.setCurrentWidget(self.runtime_page)
             if hasattr(self, 'runtime_components_table'):
@@ -3216,6 +3705,16 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.preflight_notice_label.setText(self._tr('preflight_success_notice') if show_notice else '')
         self.preflight_notice_label.setVisible(show_notice)
     def _refresh_status_summary(self, snapshot: dict[str, object] | None) -> None:
+        if self._recovery_mode:
+            self._status_snapshot = None
+            self.files_value.setText('0')
+            self.chunks_value.setText('0')
+            self.refs_value.setText('0')
+            self.preflight_label.setText(self._tr('data_root_recovery_status', path=self._recovery_root_display(), reason=self._recovery_reason_display()))
+            self.watch_summary_label.setText(self._tr('data_root_recovery_banner_title'))
+            self._emit_query_block_state()
+            self._emit_result_summary()
+            return
         if isinstance(snapshot, dict):
             self._status_snapshot = snapshot
             stats = snapshot.get('stats') or {}
@@ -3258,6 +3757,20 @@ class ConfigWorkspace(QtWidgets.QWidget):
             f"{self._tr('stat_files')} {self.files_value.text()} · {self._tr('stat_chunks')} {self.chunks_value.text()} · {self._tr('stat_refs')} {self.refs_value.text()}"
         )
     def _emit_query_block_state(self) -> None:
+        if self._recovery_mode:
+            self.queryBlockStateChanged.emit(
+                True,
+                self._tr('data_root_recovery_banner_title'),
+                self._recovery_status_text(),
+            )
+            return
+        if self._has_pending_data_root_switch():
+            self.queryBlockStateChanged.emit(
+                True,
+                self._tr('query_status_blocked_title'),
+                self._tr('query_status_blocked_detail_data_root_switch'),
+            )
+            return
         if self._busy and self._active_task_key:
             self.queryBlockStateChanged.emit(True, self._tr('query_status_blocked_title'), self._tr('query_status_blocked_detail_task', task=self._tr(self._active_task_key)))
             return
@@ -3296,14 +3809,17 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.watch_button.setToolTip(self._tr('watch_start_blocked_checking_body'))
         else:
             self.watch_button.setToolTip(self._tr('watch_start_blocked_missing_body'))
-    def _apply_config_to_controls(self, config: AppConfig, paths) -> None:
-        self._config = config
-        self._paths = paths
+    def _apply_config_to_controls(self, config: AppConfig, paths, *, activate: bool = True) -> None:
+        if activate:
+            self._config = config
+            self._paths = paths
         self._device_runtime_prompt_suppressed = True
         self._live_runtime_sync_suppressed = True
+        self._suppress_extension_vault_refresh = True
+        self._data_root_ui_sync = True
         try:
             self.vault_edit.setText(config.vault_path)
-            self.data_dir_edit.setText(config.data_root)
+            self._set_known_data_roots([config.data_root, *bootstrap_known_data_roots(), *self._known_data_roots], active_root=config.data_root)
             self._set_saved_vaults(config.vault_paths, active_vault=config.vault_path)
             self.backend_combo.setCurrentText(config.vector_backend or 'disabled')
             self.model_edit.setText(config.vector_model)
@@ -3330,13 +3846,16 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._refresh_advanced_visibility()
             self._refresh_workspace_summary()
         finally:
+            self._data_root_ui_sync = False
             self._device_runtime_prompt_suppressed = False
             self._live_runtime_sync_suppressed = False
+            self._suppress_extension_vault_refresh = False
         self.device_summary_label.setText(self._device_summary())
         self.device_runtime_status_label.setText(self._device_runtime_status_text())
         self._load_extension_state(paths, getattr(config, 'vault_path', ''))
-        self.runtimeConfigChanged.emit(self._config, self._paths)
-    def _collect_config(self, require_vault: bool) -> tuple[AppConfig, Any]:
+        if activate:
+            self.runtimeConfigChanged.emit(self._config, self._paths)
+    def _collect_config(self, require_vault: bool, *, use_data_root_input: bool = False) -> tuple[AppConfig, Any]:
         vault = normalize_vault_path(self.vault_edit.text().strip())
         if require_vault:
             if not vault:
@@ -3345,8 +3864,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
             if not vault_path.exists() or not vault_path.is_dir():
                 raise ValueError(self._tr('vault_invalid'))
             vault = str(vault_path)
-        data_root = self.data_dir_edit.text().strip() or str(default_data_root())
-        paths = ensure_data_paths(data_root, vault or None)
+        data_root = self._selected_data_root() if use_data_root_input else self._active_data_root()
+        paths = build_data_paths(Path(data_root), vault or None)
+        if not use_data_root_input or data_root == self._active_data_root():
+            paths = materialize_data_directories(paths)
         interval = float(self.interval_edit.text().strip() or '2.0')
         reranker_batch_cpu = int(self.reranker_batch_cpu_edit.text().strip() or '4')
         reranker_batch_cuda = int(self.reranker_batch_cuda_edit.text().strip() or '8')
@@ -3412,12 +3933,15 @@ class ConfigWorkspace(QtWidgets.QWidget):
         initial_status_delay_ms: int = 0,
     ) -> None:
         """Serialize heavy startup probes so packaged cold starts do not race native imports."""
-
+        if self._recovery_mode:
+            return
         self._startup_status_after_probe = True
         self._startup_status_delay_ms = max(int(initial_status_delay_ms), 0)
         self.schedule_device_probe(delay_ms=device_probe_delay_ms, safe_mode=safe_mode)
 
     def schedule_device_probe(self, delay_ms: int = 0, *, safe_mode: bool = False) -> None:
+        if self._recovery_mode:
+            return
         if self._device_probe_scheduled or self._device_probe_worker is not None:
             return
         self._device_probe_scheduled = True
@@ -3452,6 +3976,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._startup_status_delay_ms = 0
             self.schedule_initial_status_load(delay_ms=delay_ms)
     def schedule_initial_status_load(self, delay_ms: int = 0) -> None:
+        if self._recovery_mode:
+            return
         if self._initial_status_scheduled or self._initial_status_worker is not None:
             return
         self._initial_status_scheduled = True
@@ -3530,8 +4056,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
         selected = QtWidgets.QFileDialog.getExistingDirectory(self, self._tr('data_dir_label'), self.data_dir_edit.text().strip() or str(default_data_root()))
         if not selected:
             return
-        self.data_dir_edit.setText(str(Path(selected).expanduser().resolve()))
+        try:
+            normalized = str(Path(selected).expanduser().resolve(strict=False))
+        except OSError:
+            normalized = str(Path(selected).expanduser())
+        self._suppress_next_implicit_data_root_prompt = True
+        self.data_root_combo.setCurrentText(normalized)
         self._load_config_from_current_dir()
+        self._prompt_pending_data_root_switch(explicit=True)
     def _on_saved_vault_selected(self, value: str) -> None:
         selected = normalize_vault_path(value)
         if selected:
@@ -3568,12 +4100,36 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.statusMessageChanged.emit(self._tr('status_ready'))
             self._refresh_status_summary(snapshot=None)
         self._append_log(self._tr('log_vault_removed', vault=Path(selected).name or selected))
+
+    def _remove_selected_data_root(self) -> None:
+        selected = self._selected_data_root()
+        normalized_known = [self._normalized_data_root(root) for root in self._known_data_roots]
+        if not selected or selected not in normalized_known:
+            QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), self._tr('saved_data_root_missing'))
+            return
+        active_root = self._current_active_data_root()
+        if selected == active_root:
+            QtWidgets.QMessageBox.information(
+                self,
+                self._tr('data_root_switch_confirm_title'),
+                self._tr('saved_data_root_active_forbidden'),
+            )
+            return
+        try:
+            self._forget_saved_data_root(selected)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('data_root_switch_confirm_title'), str(exc))
+            return
     def _save_only(self) -> None:
         try:
-            config, paths = self._collect_config(False)
+            pending_switch = self._has_pending_data_root_switch()
+            config, paths = self._collect_config(False, use_data_root_input=False)
             save_config(config, paths)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, self._tr('save_failed_title'), str(exc))
+            return
+        if pending_switch:
+            self._prompt_pending_data_root_switch()
             return
         self._apply_config_to_controls(config, paths)
         self.statusMessageChanged.emit(self._tr('status_saved', path=paths.config_file))
@@ -3581,19 +4137,31 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_status_summary(self._status_snapshot)
     def _load_config_from_current_dir(self) -> None:
         active_vault = self.vault_edit.text().strip() or None
-        paths = ensure_data_paths(self.data_dir_edit.text().strip() or str(default_data_root()), active_vault)
-        config = load_config(paths)
-        if config is None:
-            self._current_report = None
-            self._status_snapshot = None
-            self._latest_preflight_snapshot = None
-            self._set_saved_vaults([], active_vault=active_vault or '')
+        selected_root = self._selected_data_root()
+        try:
+            probe = probe_data_root(selected_root, allow_create=True)
+            paths = build_data_paths(Path(selected_root), active_vault)
+        except Exception:
             self._refresh_workspace_summary()
-            self._refresh_status_summary(snapshot=None)
+            self._emit_query_block_state()
             return
-        self._apply_config_to_controls(config, paths)
-        self._append_log(self._tr('log_loaded_config', path=paths.config_file))
-        self._load_initial_status()
+        if self._recovery_mode and selected_root == self._recovery_root_display():
+            self._refresh_workspace_summary()
+            self._update_recovery_notice()
+            self._emit_query_block_state()
+            return
+        if selected_root == self._active_data_root():
+            config = load_config(materialize_data_directories(paths))
+            if config is not None:
+                self._apply_config_to_controls(config, build_data_paths(Path(selected_root), active_vault), activate=True)
+                self._append_log(self._tr('log_loaded_config', path=paths.config_file))
+                self._load_initial_status()
+        elif probe.state == 'existing':
+            config = load_config(paths)
+            if config is not None:
+                self._append_log(self._tr('log_loaded_config', path=paths.config_file))
+        self._refresh_workspace_summary()
+        self._emit_query_block_state()
     def _apply_recommended(self) -> None:
         self.backend_combo.setCurrentText('lancedb')
         self.model_edit.setText('BAAI/bge-m3')
@@ -3685,6 +4253,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         finally:
             self._device_runtime_prompt_suppressed = False
     def _apply_ui_preferences(self) -> None:
+        if not self._guard_pending_data_root_switch(title_key='save_failed_title'):
+            return
         try:
             config, paths = self._collect_config(False)
             config.ui_theme = self._ui_theme_code(self.ui_theme_combo.currentText())
@@ -3749,7 +4319,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if not hasattr(self, 'log_storage_summary_label'):
             return
         try:
-            _config, paths = self._collect_config(False)
+            paths = build_data_paths(Path(self._selected_data_root()), normalize_vault_path(self.vault_edit.text().strip()) or None)
         except Exception:
             self.log_storage_summary_label.setText(self._tr('log_storage_summary_unavailable', limit=normalize_log_file_size_mb(getattr(self._config, 'log_file_size_mb', DEFAULT_LOG_FILE_SIZE_MB), DEFAULT_LOG_FILE_SIZE_MB), backups=LOG_BACKUP_COUNT + 1))
             return
@@ -3757,6 +4327,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         total_bytes = self._log_directory_bytes(paths.logs_dir)
         self.log_storage_summary_label.setText(self._tr('log_storage_summary', path=paths.logs_dir, size=format_bytes(total_bytes), limit=limit_mb, backups=LOG_BACKUP_COUNT + 1))
     def _save_log_preferences(self) -> None:
+        if not self._guard_pending_data_root_switch(title_key='save_failed_title'):
+            return
         try:
             config, paths = self._collect_config(False)
             config.log_file_size_mb = normalize_log_file_size_mb(self.log_size_spin.value(), DEFAULT_LOG_FILE_SIZE_MB)
@@ -3775,6 +4347,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         dialog.rulesSaved.connect(self._on_page_blocklist_saved)
         dialog.exec()
     def _on_page_blocklist_saved(self, serialized_rules: str) -> None:
+        if not self._guard_pending_data_root_switch(title_key='save_failed_title'):
+            return
         self._config.page_blocklist_rules = serialized_rules
         try:
             config, paths = self._collect_config(False)
@@ -3799,6 +4373,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         dialog.rulesSaved.connect(self._on_sensitive_filters_saved)
         dialog.exec()
     def _on_sensitive_filters_saved(self, core_enabled: bool, extended_enabled: bool, custom_rules: str) -> None:
+        if not self._guard_pending_data_root_switch(title_key='save_failed_title'):
+            return
         self._config.rag_filter_core_enabled = core_enabled
         self._config.rag_filter_extended_enabled = extended_enabled
         self._config.rag_filter_custom_rules = custom_rules
@@ -4101,6 +4677,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.task_detail_label.setText(self._tr('task_detail_rebuild_watchdog', seconds=float(payload.get('watchdog_wait_seconds', 0.0) or 0.0), report=str(payload.get('watchdog_report_path') or self._tr('none_value'))))
         self._refresh_task_controls()
     def _start_service_task(self, label_key: str, runner, on_success, *, require_vault: bool) -> None:
+        if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
+            return
         if self._busy:
             QtWidgets.QMessageBox.information(self, self._tr('busy_title'), self._tr('busy_body'))
             return
@@ -4252,6 +4830,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _run_preflight(self) -> None:
         self._start_service_task('preflight_button', lambda service, emit, pause, cancel: {'report': service.estimate_space(on_progress=emit, pause_event=pause, cancel_event=cancel), 'status': service.status_snapshot()}, self._after_preflight, require_vault=True)
     def _run_bootstrap_model(self, *, followup=None) -> None:
+        if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
+            return
         try:
             config, paths = self._collect_config(True)
         except Exception as exc:
@@ -4277,6 +4857,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 followup()
         self._start_service_task('bootstrap_button', runner, after, require_vault=True)
     def _run_bootstrap_reranker(self) -> None:
+        if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
+            return
         try:
             config, paths = self._collect_config(False)
         except Exception as exc:
@@ -4292,6 +4874,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return
         self._start_service_task('bootstrap_reranker_button', lambda service, emit, pause, cancel: {'result': service.bootstrap_reranker(), 'status': service.status_snapshot()}, self._after_bootstrap_reranker, require_vault=False)
     def _run_rebuild(self, *, resume: bool = False) -> None:
+        if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
+            return
         try:
             config, paths = self._collect_config(True)
         except Exception as exc:
@@ -4361,6 +4945,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.statusMessageChanged.emit(self._tr('status_watch_stopping'))
             self._append_log(self._tr('log_watch_requested_stop'))
             self._refresh_watch_button()
+            return
+        if not self._guard_pending_data_root_switch(title_key='watch_start_failed_title'):
             return
         if self._busy:
             QtWidgets.QMessageBox.information(self, self._tr('busy_title'), self._tr('busy_body'))

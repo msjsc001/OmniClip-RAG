@@ -50,10 +50,56 @@ _TEXTS = {
         "index_missing": "索引还没建立",
         "index_pending": "索引未完成（Pending）",
         "index_checking": "索引状态检测中",
-        "saved_vaults_label": "已保存笔记库",
+        "saved_vaults_label": "已保存笔记库（可多选\\切换）",
         "remove_saved_vault": "移除",
         "vault_label": "笔记库",
-        "data_dir_label": "数据目录",
+        "data_dir_label": "数据目录（可多选\\切换）",
+        "remove_saved_data_root": "移除",
+        "data_root_unavailable_title": "目录不可用",
+        "data_root_unavailable_body": "当前激活的数据目录不可用：\n{path}\n\n原因：{reason}\n\n请重试、选择新的数据目录，或直接退出。",
+        "data_root_unavailable_retry": "重试",
+        "data_root_unavailable_choose": "选择新的数据目录",
+        "data_root_unavailable_exit": "退出",
+        "data_root_recovery_banner_title": "当前数据目录不可用",
+        "data_root_recovery_banner_body": "当前记录的数据目录暂时无法使用：\n{path}\n\n原因：{reason}\n\n你可以先重试，或改用其他数据目录。在恢复完成前，查询、运行时和工作区功能都会保持关闭。",
+        "data_root_recovery_status": "恢复模式：{path} · {reason}",
+        "data_root_recovery_action_disabled_tip": "当前处于恢复模式，请先修复或切换数据目录。",
+        "data_root_switch_confirm_title": "切换数据目录",
+        "data_root_switch_confirm_existing_body": "将切换到这个数据目录对应的 OmniClip 环境：\n{path}\n\n程序会重启并进入该环境，不会迁移当前数据。\n\n继续吗？",
+        "data_root_switch_confirm_new_body": "这个目录中没有现有 OmniClip 环境：\n{path}\n\n继续后会把它作为一个新环境使用，程序会重启并进入该环境，不会迁移当前数据。\n\n继续吗？",
+        "data_root_switch_confirm_continue": "切换并重启",
+        "data_root_switch_confirm_remove": "移除此目录",
+        "data_root_switch_confirm_cancel": "取消",
+        "data_root_switch_probe_invalid_body": "这个目录不能作为 OmniClip 环境使用：\n{path}\n\n原因：{reason}",
+        "data_root_switch_restart_title": "数据目录已保存",
+        "data_root_switch_restart_body": "新的数据目录已经保存并设为下次启动使用的环境根目录。\n\n当前会话仍停留在旧环境，请重启 OmniClip RAG 完成切换。\n\n程序不会自动迁移旧数据；如需搬家，请手动复制目录。",
+        "pending_data_root_switch_body": "数据目录已变更。请先保存配置并重启，避免当前会话混用新旧环境。",
+        "status_data_root_switch_saved": "数据目录已保存，将在重启后切换到新环境：{path}",
+        "log_data_root_switch_saved": "数据目录已保存，重启后切换到新环境：{path}",
+        "saved_data_root_missing": "当前没有可移除的已保存数据目录。",
+        "saved_data_root_active_forbidden": "当前激活的数据目录不能移除。请先切换到其他数据目录。",
+        "log_data_root_removed": "已从已保存数据目录列表移除：{path}。",
+        "data_root_reason_path_missing": "路径不存在或目录当前不可用。",
+        "data_root_reason_not_directory": "所选路径不是文件夹。",
+        "data_root_reason_not_environment": "该目录存在，但不是 OmniClip 环境目录。",
+        "data_root_reason_broken_environment": "该目录存在，但环境结构不完整或已损坏。",
+        "data_root_reason_not_writable": "该目录当前不可写。",
+        "data_root_reason_schema_unsupported": "该环境版本不受当前程序支持。",
+        "data_root_reason_bootstrap_invalid": "程序保存的当前数据目录记录已损坏或无法识别，请重新选择正确的数据目录。",
+        "data_root_reason_unavailable_detail": "该目录当前不可用：{detail}",
+        "data_root_reason_unavailable_code": "该目录当前不可用：{reason}",
+        "data_root_reason_unknown": "该目录当前不可用。",
+        "data_root_probe_existing": "已识别现有 OmniClip 环境：\n{path}\n检测到的笔记库：{vault}",
+        "data_root_probe_existing_legacy": "已识别现有 OmniClip 环境（legacy 结构）：\n{path}\n检测到的笔记库：{vault}",
+        "data_root_probe_new": "该目录当前为空，将作为一个新环境使用：\n{path}\n\n不会迁移当前环境中的任何数据。",
+        "data_root_probe_invalid_not_directory": "所选路径不是文件夹：\n{path}",
+        "data_root_probe_invalid_not_environment": "该目录存在，但不是 OmniClip 环境目录：\n{path}\n\n请选择一个现有环境目录，或使用空目录作为新环境。",
+        "data_root_probe_invalid_broken_environment": "该目录存在，但其中的 OmniClip 环境结构不完整或已损坏：\n{path}\n\n它不会被当作新环境处理，请改选其他目录。",
+        "data_root_probe_unavailable": "当前无法访问该目录：\n{path}\n\n原因：{reason}",
+        "data_root_recovery_target_prefix": "当前选择：\n{summary}",
+        "data_root_invalid_choice_remove": "移除",
+        "data_root_invalid_choice_retry": "重试",
+        "data_root_invalid_choice_cancel": "取消",
         "browse": "浏览",
         "preflight_button": "预检查空间时间",
         "bootstrap_button": "下载模型",
@@ -69,6 +115,11 @@ _TEXTS = {
         "ui_theme_system": "跟随系统",
         "ui_theme_light": "白天模式",
         "ui_theme_dark": "黑夜模式",
+        "ui_theme_sepia": "暖纸色",
+        "ui_theme_nord": "北境蓝灰",
+        "ui_theme_solarized_light": "Solarized 浅色",
+        "ui_theme_solarized_dark": "Solarized 深色",
+        "ui_theme_graphite": "深石墨",
         "apply_ui_button": "应用 UI 设置",
         "settings_title": "推荐设置",
         "settings_subtitle": "这里用于设置建库与热监听时使用的向量后端、模型运行方式、设备，以及资源占用策略。大多数用户保持默认即可，需要时再调整。",
@@ -95,6 +146,7 @@ _TEXTS = {
         "query_source_tika": "扩展格式(Tika)",
         "query_source_none_title": "请选择查询来源",
         "query_source_none_body": "至少勾选一个查询来源后再开始查询。",
+        "query_status_blocked_detail_data_root_switch": "数据目录已变更，请先保存配置并重启，避免当前查询混用新旧环境。",
         "interval_label": "监听间隔（秒）",
         "advanced_show": "显示高级选项",
         "advanced_hide": "收起高级选项",
@@ -275,6 +327,8 @@ _TEXTS = {
         "clear_button": "执行清理",
         "search_title": "查询台",
         "search_subtitle": "直接输入你想问 AI 的问题。自然语言通常比孤立关键词效果更好。",
+        "search_controls_collapse": "折叠",
+        "search_controls_expand": "展开",
         "query_hint": "示例：心理容纳度与边界感的关系",
         "search_button": "查询",
         "search_copy_button": "查询并复制",
@@ -775,10 +829,56 @@ _TEXTS = {
         "index_missing": "Index not built yet",
         "index_pending": "Index pending",
         "index_checking": "Checking index status",
-        "saved_vaults_label": "Saved vaults",
+        "saved_vaults_label": "Saved vaults (multi-select / switch)",
         "remove_saved_vault": "Remove",
         "vault_label": "Vault",
-        "data_dir_label": "Data folder",
+        "data_dir_label": "Data directory (multi-select / switch)",
+        "remove_saved_data_root": "Remove",
+        "data_root_unavailable_title": "Data directory unavailable",
+        "data_root_unavailable_body": "The active data directory is unavailable:\n{path}\n\nReason: {reason}\n\nRetry, choose a new data directory, or exit.",
+        "data_root_unavailable_retry": "Retry",
+        "data_root_unavailable_choose": "Choose new data directory",
+        "data_root_unavailable_exit": "Exit",
+        "data_root_recovery_banner_title": "Current data directory is unavailable",
+        "data_root_recovery_banner_body": "The saved active data directory is currently unavailable:\n{path}\n\nReason: {reason}\n\nRetry first, or switch to a different data directory. Query, runtime, and workspace features stay disabled until recovery completes.",
+        "data_root_recovery_status": "Recovery mode: {path} · {reason}",
+        "data_root_recovery_action_disabled_tip": "Recovery mode is active. Fix or switch the data directory first.",
+        "data_root_switch_confirm_title": "Switch data directory",
+        "data_root_switch_confirm_existing_body": "Switch to the OmniClip environment stored in:\n{path}\n\nThe app will restart into that environment and will not migrate your current data.\n\nContinue?",
+        "data_root_switch_confirm_new_body": "No OmniClip environment was found in:\n{path}\n\nContinue to use this folder as a new environment? The app will restart into it and will not migrate your current data.\n\nContinue?",
+        "data_root_switch_confirm_continue": "Switch and restart",
+        "data_root_switch_confirm_remove": "Remove this directory",
+        "data_root_switch_confirm_cancel": "Cancel",
+        "data_root_switch_probe_invalid_body": "This directory cannot be used as an OmniClip environment:\n{path}\n\nReason: {reason}",
+        "data_root_switch_restart_title": "Data directory saved",
+        "data_root_switch_restart_body": "The new data directory has been saved and will become the next startup environment root.\n\nThis session is still running on the old environment. Restart OmniClip RAG to finish the switch.\n\nThe app does not migrate old data automatically; copy directories manually if you need to move them.",
+        "pending_data_root_switch_body": "The data directory has changed. Save the config and restart first so this session does not mix old and new environments.",
+        "status_data_root_switch_saved": "Data directory saved. Restart to switch to the new environment: {path}",
+        "log_data_root_switch_saved": "Data directory saved; restart will switch to: {path}",
+        "saved_data_root_missing": "There is no saved data root to remove right now.",
+        "saved_data_root_active_forbidden": "The active data root cannot be removed. Switch to another data root first.",
+        "log_data_root_removed": "Removed saved data root from the list: {path}.",
+        "data_root_reason_path_missing": "The path does not exist or the directory is currently unavailable.",
+        "data_root_reason_not_directory": "The selected path is not a folder.",
+        "data_root_reason_not_environment": "The directory exists, but it is not an OmniClip environment.",
+        "data_root_reason_broken_environment": "The directory exists, but the environment structure is incomplete or damaged.",
+        "data_root_reason_not_writable": "The directory is not writable right now.",
+        "data_root_reason_schema_unsupported": "This environment version is not supported by the current app.",
+        "data_root_reason_bootstrap_invalid": "The saved active data directory record is damaged or unreadable. Choose the correct data directory again.",
+        "data_root_reason_unavailable_detail": "The directory is currently unavailable: {detail}",
+        "data_root_reason_unavailable_code": "The directory is currently unavailable: {reason}",
+        "data_root_reason_unknown": "The directory is currently unavailable.",
+        "data_root_probe_existing": "Recognized an existing OmniClip environment:\n{path}\nDetected vault: {vault}",
+        "data_root_probe_existing_legacy": "Recognized an existing OmniClip environment (legacy layout):\n{path}\nDetected vault: {vault}",
+        "data_root_probe_new": "This directory is currently empty and will be used as a new environment:\n{path}\n\nNo data from the current environment will be migrated.",
+        "data_root_probe_invalid_not_directory": "The selected path is not a folder:\n{path}",
+        "data_root_probe_invalid_not_environment": "This directory exists, but it is not an OmniClip environment:\n{path}\n\nChoose an existing environment directory, or use an empty directory as a new environment.",
+        "data_root_probe_invalid_broken_environment": "This directory exists, but the OmniClip environment inside it is incomplete or damaged:\n{path}\n\nIt will not be treated as a new environment. Choose another directory.",
+        "data_root_probe_unavailable": "This directory is currently unavailable:\n{path}\n\nReason: {reason}",
+        "data_root_recovery_target_prefix": "Current selection:\n{summary}",
+        "data_root_invalid_choice_remove": "Remove",
+        "data_root_invalid_choice_retry": "Retry",
+        "data_root_invalid_choice_cancel": "Cancel",
         "browse": "Browse",
         "preflight_button": "Precheck space/time",
         "bootstrap_button": "Download model",
@@ -794,6 +894,11 @@ _TEXTS = {
         "ui_theme_system": "Follow system",
         "ui_theme_light": "Light mode",
         "ui_theme_dark": "Dark mode",
+        "ui_theme_sepia": "Sepia",
+        "ui_theme_nord": "Nord",
+        "ui_theme_solarized_light": "Solarized Light",
+        "ui_theme_solarized_dark": "Solarized Dark",
+        "ui_theme_graphite": "Graphite",
         "apply_ui_button": "Apply UI settings",
         "settings_title": "Recommended settings",
         "settings_subtitle": "This page controls the vector backend, runtime mode, device choice, and hardware usage strategy used during indexing and live watch. Most people can keep the defaults and only change them when needed.",
@@ -820,6 +925,7 @@ _TEXTS = {
         "query_source_tika": "Extensions (Tika)",
         "query_source_none_title": "Choose at least one source",
         "query_source_none_body": "Select at least one source family before starting the query.",
+        "query_status_blocked_detail_data_root_switch": "The data directory has changed. Save the config and restart before querying so old and new environments do not mix.",
         "interval_label": "Watch interval (sec)",
         "advanced_show": "Show advanced options",
         "advanced_hide": "Hide advanced options",
@@ -986,6 +1092,8 @@ _TEXTS = {
         "clear_button": "Run cleanup",
         "search_title": "Search workspace",
         "search_subtitle": "Type the question you want to ask an AI. Full natural-language questions usually work better than isolated keywords.",
+        "search_controls_collapse": "Collapse",
+        "search_controls_expand": "Expand",
         "query_hint": "Example: relationship between psychological capacity and personal boundaries",
         "search_button": "Search",
         "search_copy_button": "Search and copy",
@@ -1632,6 +1740,61 @@ def tooltip(language: str, key: str, **kwargs) -> str:
     catalog = _TOOLTIPS.get(normalize_language(language), _TOOLTIPS[DEFAULT_LANGUAGE])
     template = catalog.get(key, _TOOLTIPS[DEFAULT_LANGUAGE].get(key, ""))
     return template.format(**kwargs) if kwargs else template
+
+
+def data_root_reason_text(language: str, reason: str = "", detail: str = "") -> str:
+    normalized_reason = str(reason or "").strip()
+    normalized_detail = str(detail or "").strip()
+    if normalized_detail == "path-missing" or normalized_reason == "active_data_root_missing":
+        return text(language, "data_root_reason_path_missing")
+    if normalized_detail == "not-a-directory":
+        return text(language, "data_root_reason_not_directory")
+    if normalized_detail == "not-an-omniclip-environment":
+        return text(language, "data_root_reason_not_environment")
+    if normalized_detail == "broken-environment":
+        return text(language, "data_root_reason_broken_environment")
+    if normalized_reason == "active_data_root_not_writable":
+        return text(language, "data_root_reason_not_writable")
+    if normalized_reason == "environment_schema_unsupported":
+        return text(language, "data_root_reason_schema_unsupported")
+    if normalized_reason == "bootstrap_invalid":
+        return text(language, "data_root_reason_bootstrap_invalid")
+    if normalized_detail:
+        return text(language, "data_root_reason_unavailable_detail", detail=normalized_detail)
+    if normalized_reason:
+        return text(language, "data_root_reason_unavailable_code", reason=normalized_reason)
+    return text(language, "data_root_reason_unknown")
+
+
+def data_root_probe_summary_text(
+    language: str,
+    probe_state: str,
+    *,
+    path: str,
+    reason: str = "",
+    detail: str = "",
+    legacy_environment: bool = False,
+    detected_vault: str = "",
+) -> str:
+    normalized_path = str(path or "").strip() or text(language, "none_value")
+    normalized_vault = str(detected_vault or "").strip() or text(language, "none_value")
+    if probe_state == "existing":
+        key = "data_root_probe_existing_legacy" if legacy_environment else "data_root_probe_existing"
+        return text(language, key, path=normalized_path, vault=normalized_vault)
+    if probe_state == "new":
+        return text(language, "data_root_probe_new", path=normalized_path)
+    if probe_state == "invalid_not_directory":
+        return text(language, "data_root_probe_invalid_not_directory", path=normalized_path)
+    if probe_state == "invalid_not_environment":
+        return text(language, "data_root_probe_invalid_not_environment", path=normalized_path)
+    if probe_state == "invalid_broken_environment":
+        return text(language, "data_root_probe_invalid_broken_environment", path=normalized_path)
+    return text(
+        language,
+        "data_root_probe_unavailable",
+        path=normalized_path,
+        reason=data_root_reason_text(language, reason, detail),
+    )
 
 
 

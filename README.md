@@ -7,9 +7,9 @@
 
 <img alt="image" src="https://github.com/user-attachments/assets/2ca47563-138b-4138-8b62-05e14f294cd4" />
 
-[![Version](https://img.shields.io/badge/version-v0.4.1-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.2-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
-[中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md) | [MCP Setup](MCP_SETUP.md)
+[中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md) | [MCP Setup](MCP_SETUP.md) | [Website](https://msjsc001.github.io/OmniClip-RAG/)
 
 </div>
 
@@ -18,10 +18,10 @@
 > **TL;DR: MCP Quickstart**
 >
 > OmniClip RAG now ships a **read-only local-first MCP server** for searching private Markdown, PDF, and Tika-backed knowledge bases on Windows.
-> Download `OmniClipRAG-MCP-v0.4.1-win64.zip` for manual `stdio` setup or `omniclip-rag-mcp-win-x64-v0.4.1.mcpb` for the official MCP Registry / MCPB path.
+> Download `OmniClipRAG-MCP-v0.4.2-win64.zip` for manual `stdio` setup or `omniclip-rag-mcp-win-x64-v0.4.2.mcpb` for the official MCP Registry / MCPB path.
 > Point your MCP client at `OmniClipRAG-MCP.exe`, then ask the AI to call `omniclip.status` first and `omniclip.search` for the actual retrieval flow. Full details: [MCP_SETUP.md](MCP_SETUP.md).
 
- **What is it?** It is a local Markdown semantic search software, a local RAG knowledge base, and now a read-only MCP retrieval server. (V0.4.1 **already supports semantic retrieval for 1290 formats, a standard MCP interface, and a Registry-ready MCPB package line**)
+ **What is it?** It is a local Markdown semantic search software, a local RAG knowledge base, and now a read-only MCP retrieval server. (V0.4.2 **already supports semantic retrieval for 1290 formats, a standard MCP interface, a Registry-ready MCPB package line, and unified environment-root data storage**)
  **How to use it?** Just open the application, input your Markdown notes path, and click "Build Knowledge Base" to set up your local RAG vault. Once built, you can use it to semantically search your notes. The retrieved content can be copied and sent to any AI for in-depth discussion, or used for your own deep reading.
  **What are the benefits?** No need to upload any of your data, and no vendor lock-in. It requires no complex configuration or setup. Moreover, it features hot-reloading—newly written notes automatically enter the RAG vault! New notes can also be an organized collection of your historical conversations with AIs, which in turn implicitly provides a permanent memory for them.
 
@@ -150,9 +150,21 @@ OmniClip is intentionally not trying to win with flashy UI tricks. The real work
 
 ---
 
+## 🔄 V0.4.2 Key Updates
+
+`v0.4.2` is the release that turns OmniClip's recent internal convergence work into a publishable product line: data-root truth is now unified, GUI recovery can repair broken environments without silent fallback, and the desktop shell is cleaner to operate day to day.
+
+- 🗂 **Data root is now treated as the active environment root**: config, logs, cache, models, main Runtime, Tika Runtime, and workspaces now follow the same active data root contract instead of letting GUI, Runtime, and launcher guess separately.
+- 🚧 **Broken data roots now enter a recovery shell instead of trapping users outside the app**: when the active environment is unavailable, the GUI starts in a restricted recovery mode, explains the problem in plain language, and lets the user retry or switch to another saved environment.
+- 🔁 **Saved data-root switching is now a real environment switcher**: the GUI can keep multiple saved roots, forget invalid ones from the list, and switch whole environments through a controlled restart instead of partial hot state drift.
+- 🧰 **Desktop polish landed on top of the architecture work**: the query desk can collapse into a compact one-line form, classic UI themes were added, and the app icon chain was unified so runtime assets and packaged Windows builds stop drifting apart.
+- 🌐 **The documentation surface now includes a public website**: the GitHub Pages site is live at [msjsc001.github.io/OmniClip-RAG](https://msjsc001.github.io/OmniClip-RAG/), and the top-level docs now point to it directly.
+
+---
+
 ## 🔄 V0.4.1 Key Updates
 
-`v0.4.1` turns the new MCP line from "a working second shell" into "a Registry-ready delivery line" so OmniClip can be published through the official MCP Registry instead of living only as a raw manual ZIP.
+`v0.4.1` turned the new MCP line from "a working second shell" into "a Registry-ready delivery line" so OmniClip could be published through the official MCP Registry instead of living only as a raw manual ZIP.
 
 - 🚀 **Official Registry route is now the primary discovery strategy**: the project now ships a formal `server.json` metadata file for MCP Registry publishing instead of targeting the deprecated `modelcontextprotocol/servers` README list.
 - 📦 **A standard MCPB package is now part of the release story**: `omniclip-rag-mcp-win-x64-v0.4.1.mcpb` becomes the Registry/MCPB-aware distribution asset, while the old ZIP remains for manual users.
@@ -171,10 +183,10 @@ OmniClip is intentionally not trying to win with flashy UI tricks. The real work
 
 `OmniClip RAG MCP Server` lets MCP-capable AI clients search your local knowledge base through the same read-only retrieval core that powers the desktop app.
 
-From `v0.4.1`, the MCP line is packaged in two parallel distribution forms:
+From `v0.4.2`, the MCP line is packaged in two parallel distribution forms:
 
-- `OmniClipRAG-MCP-v0.4.1-win64.zip` for manual file-based setup
-- `omniclip-rag-mcp-win-x64-v0.4.1.mcpb` for the official MCP Registry and MCPB-aware clients
+- `OmniClipRAG-MCP-v0.4.2-win64.zip` for manual file-based setup
+- `omniclip-rag-mcp-win-x64-v0.4.2.mcpb` for the official MCP Registry and MCPB-aware clients
 
 ### What You Need First
 
@@ -186,12 +198,12 @@ If your index has not been built yet, the MCP side will return an explicit `inde
 
 ### Official Route (Registry / MCPB)
 
-Since `v0.4.1`, OmniClip RAG is published through the official MCP Registry, so clients that support Registry discovery or MCPB installation can use that path first.
+Since `v0.4.1`, OmniClip RAG keeps a first-class MCP Registry / MCPB line, so clients that support Registry discovery or MCPB installation can use that path first.
 
 - If your client supports Registry discovery, look for:
   - `io.github.msjsc001/omniclip-rag-mcp`
 - If your client supports MCPB installation, prefer the Release asset:
-  - `omniclip-rag-mcp-win-x64-v0.4.1.mcpb`
+- `omniclip-rag-mcp-win-x64-v0.4.2.mcpb`
 - For the full Registry/MCPB explanation and client-specific setup notes, see [MCP_SETUP.md](MCP_SETUP.md).
 
 ### Traditional Manual Route (Jan.ai / OpenClaw)
@@ -211,7 +223,7 @@ In Jan.ai, create a new MCP server with the following values:
 Example command path:
 
 ```text
-D:\software\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.1\OmniClipRAG-MCP.exe
+D:\software\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.2\OmniClipRAG-MCP.exe
 ```
 
 If you moved your Runtime or data root to a custom location, you may optionally add environment variables later, but most users do not need this.
@@ -231,7 +243,7 @@ Add an `mcpServers` entry like this:
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.1\\OmniClipRAG-MCP.exe",
+      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.2\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -369,6 +381,8 @@ OmniClip stands on a serious amount of open-source work. The core projects that 
 - **watchdog** for filesystem watch support
 - **PyInstaller** for Windows portable packaging
 - **pytest** for automated regression coverage
+- **ONNX Runtime** for CPU-first local inference execution and portable runtime closure
+- **MCP Python SDK / Model Context Protocol** for the official MCP server contract and tooling surface
 
 Thanks to these projects and their maintainers for the long-term engineering work that makes a tool like this possible.
 
@@ -401,4 +415,3 @@ This project is released under the [MIT License](LICENSE).
 <div align="center">
   <b>Infinite insights within a bounded space.</b>
 </div>
-

@@ -7,7 +7,8 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore", message="Unable to find acceptable character detection dependency.*")
 
-from .config import AppConfig, ensure_data_paths, load_config, normalize_vault_path, save_config
+from .config import AppConfig, build_data_paths, load_config, materialize_data_directories, normalize_vault_path, save_config
+from .data_root_bootstrap import resolve_and_validate_active_data_root
 from .formatting import format_bytes, format_space_report
 from .service import OmniClipService, WATCHDOG_AVAILABLE
 
@@ -16,10 +17,10 @@ def main() -> int:
     _configure_stdio()
     parser = _build_parser()
     args = parser.parse_args()
-    global_paths = ensure_data_paths(getattr(args, "data_dir", None))
+    global_paths = _resolved_paths(getattr(args, "data_dir", None))
 
     if args.command == "init":
-        data_paths = ensure_data_paths(getattr(args, "data_dir", None), args.vault)
+        data_paths = _resolved_paths(getattr(args, "data_dir", None), args.vault)
         config = AppConfig(
             vault_path=normalize_vault_path(args.vault),
             vault_paths=[normalize_vault_path(args.vault)],
@@ -34,7 +35,7 @@ def main() -> int:
     config = load_config(global_paths)
     if config is None:
         if getattr(args, "vault", None):
-            data_paths = ensure_data_paths(getattr(args, "data_dir", None), args.vault)
+            data_paths = _resolved_paths(getattr(args, "data_dir", None), args.vault)
             config = AppConfig(
                 vault_path=normalize_vault_path(args.vault),
                 vault_paths=[normalize_vault_path(args.vault)],
@@ -50,7 +51,7 @@ def main() -> int:
     if config.vault_path and config.vault_path not in config.vault_paths:
         config.vault_paths.insert(0, config.vault_path)
     changed = _apply_runtime_overrides(config, args)
-    data_paths = ensure_data_paths(getattr(args, "data_dir", None), config.vault_path)
+    data_paths = _resolved_paths(getattr(args, "data_dir", None), config.vault_path)
     if changed or getattr(args, "vault", None):
         save_config(config, data_paths)
 
@@ -216,6 +217,11 @@ def _apply_runtime_overrides(config: AppConfig, args: argparse.Namespace) -> boo
         config.vector_local_files_only = True
         changed = True
     return changed
+
+
+def _resolved_paths(data_root: str | None, vault_path: str | None = None):
+    resolved = resolve_and_validate_active_data_root(data_root)
+    return materialize_data_directories(build_data_paths(resolved.path, vault_path=vault_path))
 
 
 

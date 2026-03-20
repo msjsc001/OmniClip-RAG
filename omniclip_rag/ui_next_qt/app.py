@@ -16,10 +16,13 @@ if TYPE_CHECKING:
 
 from .. import __version__
 from ..app_logging import configure_file_logging, install_exception_logging
+from ..config import AppConfig, build_data_paths, default_data_root
+from ..errors import ActiveDataRootUnavailableError
 from ..headless.bootstrap import RuntimeBundle, apply_runtime_layout_if_needed, load_runtime_bundle
 from ..runtime_recovery import mark_session_clean_exit, mark_session_running, mark_session_started, prepare_startup_recovery
+from ..ui_i18n import data_root_reason_text, detect_system_language, text
 
-APP_USER_MODEL_ID = 'msjsc001.OmniClipRAG'
+APP_USER_MODEL_ID = 'msjsc001.OmniClipRAG.GUI'
 APP_LOGGER = logging.getLogger(__name__)
 
 _QT_MODULES: tuple[Any, Any, Any] | None = None
@@ -95,7 +98,7 @@ def _startup_function_worker_class():
         """
 
         succeeded = QtCore.Signal(object)
-        failed = QtCore.Signal(str, str)
+        failed = QtCore.Signal(object, str, str)
         finished = QtCore.Signal()
 
         def __init__(self, *, fn) -> None:
@@ -111,7 +114,7 @@ def _startup_function_worker_class():
             try:
                 self.succeeded.emit(self._fn())
             except Exception as exc:
-                self.failed.emit(str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
+                self.failed.emit(exc, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
             finally:
                 self.finished.emit()
 
@@ -180,9 +183,76 @@ def main() -> int:
     startup_worker: StartupFunctionWorker | None = None
     startup_window: MainWindow | None = None
     startup_exit_code = 0
+    startup_language = detect_system_language()
 
-    def _handle_startup_failure(message: str, traceback_text: str) -> None:
+    def _tr(key: str, **kwargs) -> str:
+        return text(startup_language, key, **kwargs)
+
+    def _start_startup_worker(status_text: str, detail_text: str) -> None:
+        nonlocal startup_worker
+        if startup_dialog is not None:
+            startup_dialog.set_status(status_text, detail=detail_text)
+            startup_dialog.show()
+            app.processEvents()
+        startup_worker = StartupFunctionWorker(fn=_prepare_startup_bundle)
+        startup_worker.succeeded.connect(_handle_startup_success)
+        startup_worker.failed.connect(_handle_startup_failure)
+        startup_worker.finished.connect(lambda: None)
+        startup_worker.start()
+
+    def _handle_directory_unavailable(error: ActiveDataRootUnavailableError, traceback_text: str) -> None:
+        nonlocal startup_exit_code, startup_dialog, startup_window
+        APP_LOGGER.error('Qt startup blocked by unavailable active data root: %s\n%s', error, traceback_text)
+        _stderr(f'Qt startup blocked: {error}')
+        reason_text = data_root_reason_text(startup_language, error.reason, error.detail)
+        recovery_root = error.path or str(default_data_root())
+        if startup_dialog is not None:
+            startup_dialog.set_status(_tr('data_root_unavailable_title'), detail=recovery_root)
+            app.processEvents()
+        from .main_window import MainWindow
+        from .theme import apply_application_style, build_theme
+
+        placeholder_paths = build_data_paths(Path(default_data_root()))
+        recovery_config = AppConfig(
+            vault_path='',
+            data_root=str(placeholder_paths.global_root),
+            ui_language=startup_language,
+        )
+        theme = build_theme(recovery_config.ui_theme, recovery_config.ui_scale_percent)
+        apply_application_style(app, theme)
+        icon = _load_app_icon()
+        if icon is not None:
+            app.setWindowIcon(icon)
+            if startup_dialog is not None:
+                startup_dialog.setWindowIcon(icon)
+        startup_window = MainWindow(
+            config=recovery_config,
+            paths=placeholder_paths,
+            language_code=startup_language,
+            theme=theme,
+            version=__version__,
+            recovery_mode=True,
+            recovery_context={
+                'path': recovery_root,
+                'reason_code': error.reason,
+                'reason_text': reason_text,
+            },
+        )
+        MainWindow._register_live_window(startup_window)
+        if icon is not None:
+            startup_window.setWindowIcon(icon)
+        startup_window.show()
+        startup_window.raise_()
+        startup_window.activateWindow()
+        if startup_dialog is not None:
+            startup_dialog.close()
+            startup_dialog = None
+
+    def _handle_startup_failure(exc: object, message: str, traceback_text: str) -> None:
         nonlocal startup_dialog, startup_exit_code
+        if isinstance(exc, ActiveDataRootUnavailableError):
+            _handle_directory_unavailable(exc, traceback_text)
+            return
         startup_exit_code = 1
         APP_LOGGER.error('Qt startup failed with an unhandled exception: %s\n%s', message, traceback_text)
         _stderr(f'Qt startup failed: {message}')
@@ -249,6 +319,7 @@ def main() -> int:
     _trace_startup('create QApplication')
     QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    _apply_app_identity(app)
     startup_dialog = StartupProgressDialog()
     icon = _load_app_icon()
     if icon is not None:
@@ -262,11 +333,7 @@ def main() -> int:
     startup_dialog.show()
     app.processEvents()
 
-    startup_worker = StartupFunctionWorker(fn=_prepare_startup_bundle)
-    startup_worker.succeeded.connect(_handle_startup_success)
-    startup_worker.failed.connect(_handle_startup_failure)
-    startup_worker.finished.connect(lambda: None)
-    startup_worker.start()
+    _start_startup_worker(startup_dialog._status_label.text(), startup_dialog._detail_label.text())
     exit_code = app.exec()
     return startup_exit_code or exit_code
 
@@ -276,6 +343,15 @@ def _set_windows_app_user_model_id() -> None:
         return
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
+def _apply_app_identity(app) -> None:
+    try:
+        app.setApplicationName('OmniClip RAG')
+        app.setApplicationDisplayName('OmniClip RAG')
+        app.setOrganizationName('msjsc001')
     except Exception:
         pass
 

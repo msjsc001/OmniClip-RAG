@@ -5,7 +5,8 @@ import os
 import sys
 from pathlib import Path
 
-from omniclip_rag.config import default_data_root
+from omniclip_rag.config import build_data_paths, default_data_root
+from omniclip_rag.data_root_bootstrap import resolve_active_data_root
 from omniclip_rag.runtime_layout import ensure_runtime_layout
 
 
@@ -16,17 +17,11 @@ def _preferred_runtime_dir() -> Path:
     override = str(os.environ.get('OMNICLIP_RUNTIME_ROOT') or '').strip()
     if override:
         return Path(override).expanduser().resolve()
-    default_root = default_data_root().resolve()
-    config_path = default_root / 'config.json'
-    if config_path.exists():
-        try:
-            payload = json.loads(config_path.read_text(encoding='utf-8'))
-        except Exception:
-            payload = {}
-        configured_root = str(payload.get('data_root') or '').strip()
-        if configured_root:
-            return Path(configured_root).expanduser().resolve() / 'shared' / 'runtime'
-    return default_root / 'shared' / 'runtime'
+    try:
+        resolved = resolve_active_data_root()
+        return build_data_paths(resolved.path).shared_root / 'runtime'
+    except Exception:
+        return build_data_paths(default_data_root()).shared_root / 'runtime'
 
 
 def _runtime_bootstrap_paths(runtime_dir: Path) -> tuple[list[Path], list[Path]]:

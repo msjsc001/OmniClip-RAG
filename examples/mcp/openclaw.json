@@ -2,7 +2,7 @@
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.1\\OmniClipRAG-MCP.exe",
+      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.2\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }

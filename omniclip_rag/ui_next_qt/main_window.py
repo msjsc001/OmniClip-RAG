@@ -14,15 +14,27 @@ from .theme import ThemeState, apply_application_style, build_theme
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, *, config, paths, language_code: str, theme: ThemeState, version: str) -> None:
+    def __init__(
+        self,
+        *,
+        config,
+        paths,
+        language_code: str,
+        theme: ThemeState,
+        version: str,
+        recovery_mode: bool = False,
+        recovery_context: dict[str, str] | None = None,
+    ) -> None:
         super().__init__()
         self._config = config
         self._paths = paths
         self._language_code = language_code
         self._theme = theme
         self._version = version
+        self._recovery_mode = bool(recovery_mode)
+        self._recovery_context = dict(recovery_context or {})
         self._query_status_message = self._tr('status_ready')
-        self._config_status_message = self._tr('status_ready')
+        self._config_status_message = self._recovery_status_text() if self._recovery_mode else self._tr('status_ready')
         self._query_result_summary = self._tr('result_empty')
         self._config_result_summary = ''
         self._header_collapsed = bool(getattr(self._config, 'qt_header_collapsed', False))
@@ -102,6 +114,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.guide_label.setWordWrap(True)
         title_layout.addWidget(self.guide_label)
 
+        self.recovery_banner = QtWidgets.QLabel(self.header_card)
+        self.recovery_banner.setProperty('role', 'warning')
+        self.recovery_banner.setWordWrap(True)
+        self.recovery_banner.setVisible(self._recovery_mode)
+        if self._recovery_mode:
+            self.recovery_banner.setText(
+                self._tr(
+                    'data_root_recovery_banner_body',
+                    path=self._recovery_context.get('path') or self._tr('none_value'),
+                    reason=self._recovery_context.get('reason_text') or self._tr('none_value'),
+                )
+            )
+            title_layout.addWidget(self.recovery_banner)
+
         controls_layout = QtWidgets.QVBoxLayout()
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(8)
@@ -140,44 +166,51 @@ class MainWindow(QtWidgets.QMainWindow):
         self.main_tabs.currentChanged.connect(self._sync_status_bar)
         root_layout.addWidget(self.main_tabs, 1)
 
-        self.query_workspace = QueryWorkspace(
-            config=self._config,
-            paths=self._paths,
-            language_code=self._language_code,
-            theme=self._theme,
-            parent=self.main_tabs,
-        )
-        self.query_workspace.statusMessageChanged.connect(self._set_query_status_message)
-        self.query_workspace.resultSummaryChanged.connect(self._set_query_result_summary)
-        self.main_tabs.addTab(self.query_workspace, self._tr('main_tab_query'))
-
         self.config_workspace = ConfigWorkspace(
             config=self._config,
             paths=self._paths,
             language_code=self._language_code,
             theme=self._theme,
             parent=self.main_tabs,
+            recovery_mode=self._recovery_mode,
+            recovery_path=self._recovery_context.get('path', ''),
+            recovery_reason_code=self._recovery_context.get('reason_code', ''),
+            recovery_reason_text=self._recovery_context.get('reason_text', ''),
         )
         self.config_workspace.statusMessageChanged.connect(self._set_config_status_message)
         self.config_workspace.resultSummaryChanged.connect(self._set_config_result_summary)
         self.config_workspace.runtimeConfigChanged.connect(self._on_runtime_config_changed)
-        self.config_workspace.queryBlockStateChanged.connect(
-            lambda blocked, title, detail: self.query_workspace.set_external_block_state(blocked=blocked, title=title, detail=detail)
-        )
-        self.config_workspace.queryReplayRequested.connect(self.query_workspace.rerun_current_query)
-        self.config_workspace.logMessageAdded.connect(self.query_workspace.append_external_log)
-        self.config_workspace.showQueryLogRequested.connect(self._show_query_log_tab)
         self.config_workspace.uiPreferencesChanged.connect(self.apply_ui_preferences)
+        if not self._recovery_mode:
+            self.query_workspace = QueryWorkspace(
+                config=self._config,
+                paths=self._paths,
+                language_code=self._language_code,
+                theme=self._theme,
+                parent=self.main_tabs,
+            )
+            self.query_workspace.statusMessageChanged.connect(self._set_query_status_message)
+            self.query_workspace.resultSummaryChanged.connect(self._set_query_result_summary)
+            self.main_tabs.addTab(self.query_workspace, self._tr('main_tab_query'))
+            self.config_workspace.queryBlockStateChanged.connect(
+                lambda blocked, title, detail: self.query_workspace.set_external_block_state(blocked=blocked, title=title, detail=detail)
+            )
+            self.config_workspace.queryReplayRequested.connect(self.query_workspace.rerun_current_query)
+            self.config_workspace.logMessageAdded.connect(self.query_workspace.append_external_log)
+            self.config_workspace.showQueryLogRequested.connect(self._show_query_log_tab)
+            self.query_workspace.pageBlocklistRequested.connect(self.config_workspace.open_page_blocklist_dialog)
+            self.query_workspace.sensitiveFilterRequested.connect(self.config_workspace.open_sensitive_filter_dialog)
+            self.query_workspace.runtimeRepairRequested.connect(self._show_runtime_management)
+            self.query_workspace.set_runtime_snapshot_provider(self.config_workspace.current_runtime_snapshot)
+        else:
+            self.query_workspace = None
         self.main_tabs.addTab(self.config_workspace, self._tr('main_tab_config'))
+        if self._recovery_mode:
+            self.main_tabs.setCurrentWidget(self.config_workspace)
 
-        self.query_workspace.pageBlocklistRequested.connect(self.config_workspace.open_page_blocklist_dialog)
-        self.query_workspace.sensitiveFilterRequested.connect(self.config_workspace.open_sensitive_filter_dialog)
-        self.query_workspace.runtimeRepairRequested.connect(self._show_runtime_management)
-        self.query_workspace.set_runtime_snapshot_provider(self.config_workspace.current_runtime_snapshot)
-
-        self.status_label = QtWidgets.QLabel(self._query_status_message, self)
+        self.status_label = QtWidgets.QLabel(self._config_status_message if self._recovery_mode else self._query_status_message, self)
         self.status_label.setProperty('role', 'muted')
-        self.result_label = QtWidgets.QLabel(self._query_result_summary, self)
+        self.result_label = QtWidgets.QLabel(self._config_result_summary if self._recovery_mode else self._query_result_summary, self)
         self.result_label.setProperty('role', 'muted')
         status_bar = QtWidgets.QStatusBar(self)
         status_bar.addWidget(self.status_label, 1)
@@ -189,6 +222,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _tip(self, key: str, **kwargs) -> str:
         return tooltip(self._language_code, key, **kwargs)
+
+    def _recovery_status_text(self) -> str:
+        if not self._recovery_mode:
+            return self._tr('status_ready')
+        return self._tr(
+            'data_root_recovery_status',
+            path=self._recovery_context.get('path') or self._tr('none_value'),
+            reason=self._recovery_context.get('reason_text') or self._tr('none_value'),
+        )
 
     def _refresh_header_collapsed(self) -> None:
         collapsed = self._header_collapsed
@@ -207,17 +249,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._header_collapsed = not self._header_collapsed
         self._config.qt_header_collapsed = self._header_collapsed
         self._refresh_header_collapsed()
-        self._save_config_safely(self._config, self._paths)
+        if not self._recovery_mode:
+            self._save_config_safely(self._config, self._paths)
 
     def _restore_window_state(self) -> None:
         geometry = self._decode_state(getattr(self._config, 'qt_window_geometry', ''))
         if geometry:
             self.restoreGeometry(QtCore.QByteArray(geometry))
         self._ensure_window_visible()
-        self.query_workspace.restore_splitter_states(
-            query_state=self._decode_state(getattr(self._config, 'qt_query_splitter_state', '')),
-            results_state=self._decode_state(getattr(self._config, 'qt_results_splitter_state', '')),
-        )
+        if self.query_workspace is not None:
+            self.query_workspace.restore_splitter_states(
+                query_state=self._decode_state(getattr(self._config, 'qt_query_splitter_state', '')),
+                results_state=self._decode_state(getattr(self._config, 'qt_results_splitter_state', '')),
+            )
         self._sync_status_bar()
 
     def _ensure_window_visible(self) -> None:
@@ -249,6 +293,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return bytes(QtCore.QByteArray(value).toBase64()).decode('ascii') if value else ''
 
     def _active_workspace_key(self) -> str:
+        if self._recovery_mode:
+            return 'config'
         if not hasattr(self, 'config_workspace'):
             return 'query'
         return 'config' if self.main_tabs.currentWidget() is self.config_workspace else 'query'
@@ -272,6 +318,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_status_bar()
 
     def _show_query_log_tab(self) -> None:
+        if self.query_workspace is None:
+            return
         self.main_tabs.setCurrentWidget(self.query_workspace)
         self.query_workspace.show_log_tab()
         self._sync_status_bar()
@@ -292,10 +340,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_runtime_config_changed(self, config, paths) -> None:
         self._config = config
         self._paths = paths
-        self.query_workspace.update_runtime(config=config, paths=paths)
+        if self.query_workspace is not None:
+            self.query_workspace.update_runtime(config=config, paths=paths)
 
     def _can_switch_language(self) -> tuple[bool, str, str]:
-        if getattr(self.query_workspace, '_busy', False) or getattr(self.config_workspace, '_busy', False):
+        if (self.query_workspace is not None and getattr(self.query_workspace, '_busy', False)) or getattr(self.config_workspace, '_busy', False):
             return False, self._tr('busy_title'), self._tr('busy_body')
         if getattr(self.config_workspace, '_watch_active', False):
             return False, self._tr('stop_watch_first_title'), self._tr('stop_watch_first_body')
@@ -318,32 +367,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self._replace_window_for_language(new_language_code)
 
     def _snapshot_window_state(self) -> dict[str, object]:
-        return {
+        payload = {
             'geometry': bytes(self.saveGeometry()),
             'main_tab_index': self.main_tabs.currentIndex(),
             'header_collapsed': self._header_collapsed,
-            'query_workspace': self.query_workspace.snapshot_view_state(),
             'config_workspace': self.config_workspace.snapshot_view_state(),
         }
+        if self.query_workspace is not None:
+            payload['query_workspace'] = self.query_workspace.snapshot_view_state()
+        return payload
 
     def _build_replacement_runtime(self, language_code: str) -> tuple[object, object]:
-        try:
-            config, paths = self.config_workspace._collect_config(False)
-        except Exception:
+        if self._recovery_mode:
             config = replace(self._config)
             paths = self._paths
-        try:
-            config.query_limit = int(self.query_workspace.limit_edit.text().strip() or config.query_limit)
-        except Exception:
-            pass
-        try:
-            config.query_score_threshold = float(self.query_workspace.threshold_edit.text().strip() or config.query_score_threshold)
-        except Exception:
-            pass
+        else:
+            try:
+                config, paths = self.config_workspace._collect_config(False)
+            except Exception:
+                config = replace(self._config)
+                paths = self._paths
+            try:
+                config.query_limit = int(self.query_workspace.limit_edit.text().strip() or config.query_limit)
+            except Exception:
+                pass
+            try:
+                config.query_score_threshold = float(self.query_workspace.threshold_edit.text().strip() or config.query_score_threshold)
+            except Exception:
+                pass
         config.ui_language = language_code
         config.qt_window_geometry = self._encode_state(bytes(self.saveGeometry()))
-        config.qt_query_splitter_state = self._encode_state(self.query_workspace.query_splitter_state())
-        config.qt_results_splitter_state = self._encode_state(self.query_workspace.results_splitter_state())
+        if self.query_workspace is not None:
+            config.qt_query_splitter_state = self._encode_state(self.query_workspace.query_splitter_state())
+            config.qt_results_splitter_state = self._encode_state(self.query_workspace.results_splitter_state())
+            config.qt_query_controls_collapsed = self.query_workspace.search_controls_collapsed()
         config.qt_header_collapsed = self._header_collapsed
         return config, paths
 
@@ -354,7 +411,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._header_collapsed = bool(snapshot.get('header_collapsed', self._header_collapsed))
         self._config.qt_header_collapsed = self._header_collapsed
         self._refresh_header_collapsed()
-        self.query_workspace.restore_view_state(snapshot.get('query_workspace') if isinstance(snapshot.get('query_workspace'), dict) else None)
+        if self.query_workspace is not None:
+            self.query_workspace.restore_view_state(snapshot.get('query_workspace') if isinstance(snapshot.get('query_workspace'), dict) else None)
         self.config_workspace.restore_view_state(snapshot.get('config_workspace') if isinstance(snapshot.get('config_workspace'), dict) else None)
         main_tab_index = int(snapshot.get('main_tab_index', 0) or 0)
         if 0 <= main_tab_index < self.main_tabs.count():
@@ -367,13 +425,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._config = config
         self._paths = paths
         self._language_code = language_code
-        self._save_config_safely(config, paths)
+        if not self._recovery_mode:
+            self._save_config_safely(config, paths)
         replacement = MainWindow(
             config=config,
             paths=paths,
             language_code=language_code,
             theme=self._theme,
             version=self._version,
+            recovery_mode=self._recovery_mode,
+            recovery_context=self._recovery_context,
         )
         self._replacement_window = replacement
         self._register_live_window(replacement)
@@ -381,8 +442,9 @@ class MainWindow(QtWidgets.QMainWindow):
         replacement.raise_()
         replacement.activateWindow()
         QtCore.QTimer.singleShot(0, lambda snap=snapshot, win=replacement: win._apply_window_snapshot(snap))
-        QtCore.QTimer.singleShot(60, replacement.config_workspace.schedule_device_probe)
-        QtCore.QTimer.singleShot(180, replacement.config_workspace.schedule_initial_status_load)
+        if not self._recovery_mode:
+            QtCore.QTimer.singleShot(60, replacement.config_workspace.schedule_device_probe)
+            QtCore.QTimer.singleShot(180, replacement.config_workspace.schedule_initial_status_load)
         self.close()
 
     def _save_config_safely(self, config, paths) -> None:
@@ -399,7 +461,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if app is not None:
             apply_application_style(app, theme)
         self._theme = theme
-        self.query_workspace.update_theme(theme)
+        if self.query_workspace is not None:
+            self.query_workspace.update_theme(theme)
         self.config_workspace.update_theme(theme)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
@@ -407,17 +470,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.config_workspace.shutdown_extension_runtimes()
         except Exception:
             pass
-        try:
-            self._config.query_limit = int(self.query_workspace.limit_edit.text().strip() or self._config.query_limit)
-        except Exception:
-            pass
-        try:
-            self._config.query_score_threshold = float(self.query_workspace.threshold_edit.text().strip() or self._config.query_score_threshold)
-        except Exception:
-            pass
-        self._config.qt_window_geometry = self._encode_state(bytes(self.saveGeometry()))
-        self._config.qt_query_splitter_state = self._encode_state(self.query_workspace.query_splitter_state())
-        self._config.qt_results_splitter_state = self._encode_state(self.query_workspace.results_splitter_state())
-        self._config.qt_header_collapsed = self._header_collapsed
-        self._save_config_safely(self._config, self._paths)
+        if not self._recovery_mode and self.query_workspace is not None:
+            try:
+                self._config.query_limit = int(self.query_workspace.limit_edit.text().strip() or self._config.query_limit)
+            except Exception:
+                pass
+            try:
+                self._config.query_score_threshold = float(self.query_workspace.threshold_edit.text().strip() or self._config.query_score_threshold)
+            except Exception:
+                pass
+            self._config.qt_window_geometry = self._encode_state(bytes(self.saveGeometry()))
+            self._config.qt_query_splitter_state = self._encode_state(self.query_workspace.query_splitter_state())
+            self._config.qt_results_splitter_state = self._encode_state(self.query_workspace.results_splitter_state())
+            self._config.qt_query_controls_collapsed = self.query_workspace.search_controls_collapsed()
+            self._config.qt_header_collapsed = self._header_collapsed
+            self._save_config_safely(self._config, self._paths)
         super().closeEvent(event)

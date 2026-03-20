@@ -15,9 +15,10 @@ from omniclip_rag.app_entry.desktop import launch_desktop, main as desktop_main
 from omniclip_rag.ui_next_qt import app as qt_app
 from omniclip_rag.ui_next_qt.app import StartupProgressDialog
 from omniclip_rag.config import AppConfig, ensure_data_paths, load_config, save_config
+from omniclip_rag.data_root_bootstrap import write_bootstrap_pointer
 from omniclip_rag.errors import BuildCancelledError
 from omniclip_rag.models import QueryInsights, QueryResult, SearchHit, SpaceEstimate
-from omniclip_rag.ui_i18n import text
+from omniclip_rag.ui_i18n import data_root_reason_text, text
 from omniclip_rag.preflight import estimate_storage_for_vault
 from omniclip_rag.vector_index import get_local_model_dir
 from omniclip_rag.ui_next_qt.config_workspace import ConfigWorkspace
@@ -29,7 +30,10 @@ from omniclip_rag.ui_next_qt.theme import build_stylesheet, build_theme
 from omniclip_rag.ui_next_qt.workers import QueryTaskResult
 
 ROOT = Path(__file__).resolve().parents[1]
-TEST_ROOT = ROOT / '.tmp' / 'test_qt_ui'
+BASE_TEST_SANDBOX = ROOT / '.tmp' / 'test_qt_ui_sandbox'
+TEST_SANDBOX = BASE_TEST_SANDBOX
+TEST_ROOT = TEST_SANDBOX / 'data'
+ENV_ROOT = TEST_SANDBOX / 'system'
 SAMPLE_ROOT = ROOT / '笔记样本'
 
 
@@ -41,9 +45,55 @@ def get_app() -> QtWidgets.QApplication:
 
 
 class QtUiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        global TEST_SANDBOX, TEST_ROOT, ENV_ROOT
+        TEST_SANDBOX = BASE_TEST_SANDBOX / self._testMethodName
+        TEST_ROOT = TEST_SANDBOX / 'data'
+        ENV_ROOT = TEST_SANDBOX / 'system'
+        if TEST_SANDBOX.exists():
+            shutil.rmtree(TEST_SANDBOX, ignore_errors=True)
+        self._env = patch.dict(
+            os.environ,
+            {
+                'APPDATA': str((ENV_ROOT / 'appdata').resolve()),
+                'LOCALAPPDATA': str((ENV_ROOT / 'localappdata').resolve()),
+                'TEMP': str((ENV_ROOT / 'temp').resolve()),
+                'TMP': str((ENV_ROOT / 'temp').resolve()),
+                'USERPROFILE': str((ENV_ROOT / 'profile').resolve()),
+                'HOME': str((ENV_ROOT / 'profile').resolve()),
+                'OMNICLIP_STRICT_TEST_ROOT': str(TEST_SANDBOX.resolve()),
+                'OMNICLIP_BOOTSTRAP_PATH': str((ENV_ROOT / 'roaming' / 'bootstrap.json').resolve()),
+            },
+            clear=False,
+        )
+        self._env.start()
+
     def tearDown(self) -> None:
-        if TEST_ROOT.exists():
-            shutil.rmtree(TEST_ROOT, ignore_errors=True)
+        global TEST_SANDBOX, TEST_ROOT, ENV_ROOT
+        self._env.stop()
+        if TEST_SANDBOX.exists():
+            shutil.rmtree(TEST_SANDBOX, ignore_errors=True)
+        TEST_SANDBOX = BASE_TEST_SANDBOX
+        TEST_ROOT = TEST_SANDBOX / 'data'
+        ENV_ROOT = TEST_SANDBOX / 'system'
+
+    def _make_broken_environment_root(self, root: Path) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / 'shared').mkdir(parents=True, exist_ok=True)
+        (root / 'config.json').write_text('{}', encoding='utf-8')
+        return root
+
+    def _make_legacy_environment_root(self, root: Path, vault_path: Path | None = None) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / 'shared').mkdir(parents=True, exist_ok=True)
+        (root / 'workspaces').mkdir(parents=True, exist_ok=True)
+        payload = {
+            'vault_path': str(vault_path or SAMPLE_ROOT),
+            'data_root': str(root.resolve()),
+            'vault_paths': [str(vault_path or SAMPLE_ROOT)],
+        }
+        (root / 'config.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        return root
 
     def test_desktop_entry_defaults_to_next_ui(self) -> None:
         with patch('omniclip_rag.app_entry.desktop.launch_desktop', return_value=0) as launch_mock:
@@ -264,6 +314,66 @@ class QtUiTests(unittest.TestCase):
             replacement.deleteLater()
             app.processEvents()
 
+    def test_query_workspace_snapshot_restores_search_controls_collapsed(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._toggle_search_controls_collapsed()
+            self.assertTrue(workspace.search_controls_collapsed())
+            self.assertFalse(workspace.query_edit.isHidden())
+            self.assertFalse(workspace.search_button.isHidden())
+            self.assertFalse(workspace.search_controls_toggle_button.isHidden())
+            self.assertTrue(workspace.search_header_widget.isHidden())
+            self.assertTrue(workspace.query_hint_label.isHidden())
+            self.assertTrue(workspace.search_details_widget.isHidden())
+            self.assertEqual(workspace.search_controls_toggle_button.text(), '展开')
+            snapshot = workspace.snapshot_view_state()
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+        replacement = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            replacement.restore_view_state(snapshot)
+            self.assertTrue(replacement.search_controls_collapsed())
+            self.assertFalse(replacement.query_edit.isHidden())
+            self.assertFalse(replacement.search_button.isHidden())
+            self.assertFalse(replacement.search_controls_toggle_button.isHidden())
+            self.assertTrue(replacement.search_header_widget.isHidden())
+            self.assertTrue(replacement.query_hint_label.isHidden())
+            self.assertTrue(replacement.search_details_widget.isHidden())
+            self.assertEqual(replacement.search_controls_toggle_button.text(), '展开')
+        finally:
+            replacement.deleteLater()
+            app.processEvents()
+
+    def test_query_workspace_collapsed_mode_compacts_query_splitter(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'collapsed_splitter_root'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace.resize(1200, 900)
+            workspace.show()
+            app.processEvents()
+            before_sizes = workspace.query_splitter.sizes()
+            workspace._toggle_search_controls_collapsed()
+            app.processEvents()
+            after_sizes = workspace.query_splitter.sizes()
+            self.assertTrue(workspace.search_controls_collapsed())
+            self.assertEqual(workspace.search_controls_toggle_button.text(), '展开')
+            self.assertEqual(len(before_sizes), 2)
+            self.assertEqual(len(after_sizes), 2)
+            self.assertLess(after_sizes[0], before_sizes[0])
+        finally:
+            workspace.close()
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_query_workspace_rebuilds_context_and_summary(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -412,6 +522,7 @@ class QtUiTests(unittest.TestCase):
             app.processEvents()
             window.query_workspace.query_splitter.setSizes([260, 700])
             window.query_workspace.results_splitter.setSizes([320, 380])
+            window.query_workspace._toggle_search_controls_collapsed()
             window._toggle_header_collapsed()
             window.close()
             app.processEvents()
@@ -421,6 +532,7 @@ class QtUiTests(unittest.TestCase):
             self.assertTrue(loaded.qt_window_geometry)
             self.assertTrue(loaded.qt_query_splitter_state)
             self.assertTrue(loaded.qt_results_splitter_state)
+            self.assertTrue(loaded.qt_query_controls_collapsed)
             self.assertTrue(loaded.qt_header_collapsed)
         finally:
             window.deleteLater()
@@ -739,6 +851,106 @@ class QtUiTests(unittest.TestCase):
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual(loaded.watch_resource_peak_percent, 60)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_ui_theme_choices_include_classic_themes(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), ui_language='zh-CN')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        seen_preferences: list[tuple[str, int]] = []
+        workspace.uiPreferencesChanged.connect(lambda code, scale: seen_preferences.append((code, scale)))
+        try:
+            labels = [workspace.ui_theme_combo.itemText(index) for index in range(workspace.ui_theme_combo.count())]
+            for expected in ('暖纸色', '北境蓝灰', 'Solarized 浅色', 'Solarized 深色', '深石墨'):
+                self.assertIn(expected, labels)
+            workspace.ui_theme_combo.setCurrentText('暖纸色')
+            workspace._apply_ui_preferences()
+            self.assertEqual(seen_preferences[-1][0], 'sepia')
+            loaded = load_config(paths)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.ui_theme, 'sepia')
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_current_runtime_snapshot_ignores_unsaved_data_root_change(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        vault = SAMPLE_ROOT
+        paths_a = ensure_data_paths(str(TEST_ROOT / 'data_a'), str(vault))
+        ensure_data_paths(str(TEST_ROOT / 'data_b'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths_a.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths_a, language_code='zh-CN', theme=theme)
+        try:
+            workspace.data_dir_edit.setText(str((TEST_ROOT / 'data_b').resolve()))
+            live_config, live_paths = workspace.current_runtime_snapshot()
+            self.assertEqual(str(live_paths.global_root), str(paths_a.global_root))
+            self.assertEqual(live_config.data_root, str(paths_a.global_root))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_pending_data_root_switch_blocks_query_and_saves_target_root_on_save(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        vault = SAMPLE_ROOT
+        paths_a = ensure_data_paths(str(TEST_ROOT / 'save_pending_a'), str(vault))
+        target_root = (TEST_ROOT / 'save_pending_b').resolve()
+        config = AppConfig(vault_path=str(vault), data_root=str(paths_a.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths_a, language_code='zh-CN', theme=theme)
+        blocked_events: list[tuple[bool, str, str]] = []
+        workspace.queryBlockStateChanged.connect(lambda blocked, title, detail: blocked_events.append((bool(blocked), str(title), str(detail))))
+        try:
+            workspace.data_dir_edit.setText(str(target_root))
+            with patch('omniclip_rag.ui_next_qt.config_workspace.write_bootstrap_pointer') as pointer_mock, \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.resolve_and_validate_active_data_root') as resolve_mock, \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.ConfigWorkspace._restart_for_data_root_switch', return_value=False) as restart_mock, \
+                 patch('PySide6.QtWidgets.QMessageBox.question', return_value=QtWidgets.QMessageBox.StandardButton.Yes):
+                resolve_mock.return_value = type('Resolved', (), {'path': target_root})()
+                workspace._save_only()
+            pointer_mock.assert_called_once()
+            restart_mock.assert_called_once()
+            self.assertEqual(str(workspace._paths.global_root), str(paths_a.global_root))
+            saved = load_config(paths_a)
+            self.assertIsNotNone(saved)
+            assert saved is not None
+            self.assertEqual(saved.data_root, str(paths_a.global_root))
+            self.assertFalse((target_root / 'config.json').exists())
+            workspace._emit_query_block_state()
+            self.assertTrue(blocked_events)
+            self.assertTrue(blocked_events[-1][0])
+            self.assertIn(text('zh-CN', 'query_status_blocked_detail_data_root_switch'), blocked_events[-1][2])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_loads_selected_data_root_as_preview_without_activating_runtime_paths(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        vault_a = TEST_ROOT / 'preview_vault_a'
+        vault_b = TEST_ROOT / 'preview_vault_b'
+        vault_a.mkdir(parents=True, exist_ok=True)
+        vault_b.mkdir(parents=True, exist_ok=True)
+        paths_a = ensure_data_paths(str(TEST_ROOT / 'preview_data_a'), str(vault_a))
+        paths_b = ensure_data_paths(str(TEST_ROOT / 'preview_data_b'), str(vault_b))
+        config_a = AppConfig(vault_path=str(vault_a), data_root=str(paths_a.global_root), vector_backend='disabled')
+        config_b = AppConfig(vault_path=str(vault_b), data_root=str(paths_b.global_root), vector_backend='lancedb')
+        save_config(config_a, paths_a)
+        save_config(config_b, paths_b)
+        workspace = ConfigWorkspace(config=config_a, paths=paths_a, language_code='zh-CN', theme=theme)
+        try:
+            workspace.data_dir_edit.setText(str(paths_b.global_root))
+            workspace._load_config_from_current_dir()
+            self.assertEqual(workspace.vault_edit.text(), str(vault_a.resolve()))
+            self.assertEqual(str(workspace._paths.global_root), str(paths_a.global_root))
+            live_config, live_paths = workspace.current_runtime_snapshot()
+            self.assertEqual(str(live_paths.global_root), str(paths_a.global_root))
+            self.assertEqual(live_config.data_root, str(paths_a.global_root))
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -1443,10 +1655,294 @@ class QtUiTests(unittest.TestCase):
             window.deleteLater()
             app.processEvents()
 
+    def test_main_window_recovery_mode_only_keeps_config_shell(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        recovery_root = TEST_ROOT / 'missing_root'
+        reason_text = data_root_reason_text('zh-CN', 'active_data_root_missing', 'path-missing')
+        paths = ensure_data_paths(str(TEST_ROOT / 'recovery_placeholder'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path='', data_root=str(paths.global_root), ui_language='zh-CN')
+        window = MainWindow(
+            config=config,
+            paths=paths,
+            language_code='zh-CN',
+            theme=theme,
+            version='0.2.0',
+            recovery_mode=True,
+            recovery_context={
+                'path': str(recovery_root),
+                'reason_code': 'active_data_root_missing',
+                'reason_text': reason_text,
+            },
+        )
+        try:
+            window.show()
+            app.processEvents()
+            self.assertEqual(window.main_tabs.count(), 1)
+            self.assertIs(window.main_tabs.currentWidget(), window.config_workspace)
+            self.assertIsNone(window.query_workspace)
+            self.assertTrue(window.recovery_banner.isVisible())
+            self.assertEqual(window.recovery_banner.property('role'), 'warning')
+            self.assertIn(str(recovery_root), window.recovery_banner.text())
+            self.assertNotIn('startup pointer', window.recovery_banner.text().lower())
+            self.assertEqual(window.status_label.text(), text('zh-CN', 'data_root_recovery_status', path=str(recovery_root), reason=reason_text))
+        finally:
+            window.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_recovery_switches_existing_environment_and_requests_restart(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        placeholder_paths = ensure_data_paths(str(TEST_ROOT / 'recovery_placeholder'), str(SAMPLE_ROOT))
+        target_paths = ensure_data_paths(str(TEST_ROOT / 'valid_env'), str(SAMPLE_ROOT))
+        save_config(AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(target_paths.global_root)), target_paths)
+        workspace = ConfigWorkspace(
+            config=AppConfig(vault_path='', data_root=str(placeholder_paths.global_root)),
+            paths=placeholder_paths,
+            language_code='zh-CN',
+            theme=theme,
+            recovery_mode=True,
+            recovery_path=str(TEST_ROOT / 'missing_root'),
+            recovery_reason_code='active_data_root_missing',
+            recovery_reason_text=data_root_reason_text('zh-CN', 'active_data_root_missing', 'path-missing'),
+        )
+        try:
+            workspace.data_root_combo.setCurrentText(str(target_paths.global_root))
+            with patch.object(workspace, '_confirm_pending_data_root_switch', return_value='continue'), \
+                 patch('PySide6.QtCore.QProcess.startDetached', return_value=True) as start_detached:
+                workspace._prompt_pending_data_root_switch()
+            start_detached.assert_called_once()
+            bootstrap = json.loads((ENV_ROOT / 'roaming' / 'bootstrap.json').read_text(encoding='utf-8'))
+            self.assertEqual(bootstrap['active_data_root'], str(target_paths.global_root))
+            self.assertIn(str(target_paths.global_root), bootstrap['known_data_roots'])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_switch_dialog_can_remove_selected_saved_root(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        active_paths = ensure_data_paths(str(TEST_ROOT / 'switch_forget_active'), str(SAMPLE_ROOT))
+        target_paths = ensure_data_paths(str(TEST_ROOT / 'switch_forget_target'), str(SAMPLE_ROOT))
+        write_bootstrap_pointer(active_paths.global_root, known_data_roots=[str(active_paths.global_root), str(target_paths.global_root)])
+        workspace = ConfigWorkspace(
+            config=AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(active_paths.global_root)),
+            paths=active_paths,
+            language_code='zh-CN',
+            theme=theme,
+        )
+        try:
+            workspace.data_root_combo.setCurrentText(str(target_paths.global_root))
+            with patch.object(workspace, '_confirm_pending_data_root_switch', return_value='remove'), \
+                 patch('PySide6.QtCore.QProcess.startDetached', return_value=True):
+                workspace._prompt_pending_data_root_switch(explicit=True)
+            bootstrap = json.loads((ENV_ROOT / 'roaming' / 'bootstrap.json').read_text(encoding='utf-8'))
+            self.assertEqual(bootstrap['active_data_root'], str(active_paths.global_root))
+            self.assertNotIn(str(target_paths.global_root), bootstrap['known_data_roots'])
+            self.assertIn(str(active_paths.global_root), bootstrap['known_data_roots'])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_recovery_retry_restores_original_root_and_requests_restart(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        placeholder_paths = ensure_data_paths(str(TEST_ROOT / 'recovery_placeholder_retry'), str(SAMPLE_ROOT))
+        restored_root = TEST_ROOT / 'restored_env'
+        workspace = ConfigWorkspace(
+            config=AppConfig(vault_path='', data_root=str(placeholder_paths.global_root)),
+            paths=placeholder_paths,
+            language_code='zh-CN',
+            theme=theme,
+            recovery_mode=True,
+            recovery_path=str(restored_root),
+            recovery_reason_code='active_data_root_missing',
+            recovery_reason_text=data_root_reason_text('zh-CN', 'active_data_root_missing', 'path-missing'),
+        )
+        try:
+            restored_paths = ensure_data_paths(str(restored_root), str(SAMPLE_ROOT))
+            save_config(AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(restored_paths.global_root)), restored_paths)
+            with patch('PySide6.QtCore.QProcess.startDetached', return_value=True) as start_detached:
+                workspace._retry_recovery_data_root()
+            start_detached.assert_called_once()
+            bootstrap = json.loads((ENV_ROOT / 'roaming' / 'bootstrap.json').read_text(encoding='utf-8'))
+            self.assertEqual(bootstrap['active_data_root'], str(restored_root.resolve()))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_recovery_preview_distinguishes_new_and_broken_environment(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        placeholder_paths = ensure_data_paths(str(TEST_ROOT / 'recovery_preview_placeholder'), str(SAMPLE_ROOT))
+        broken_root = self._make_broken_environment_root(TEST_ROOT / 'broken_env')
+        empty_root = TEST_ROOT / 'empty_env'
+        empty_root.mkdir(parents=True, exist_ok=True)
+        workspace = ConfigWorkspace(
+            config=AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(placeholder_paths.global_root)),
+            paths=placeholder_paths,
+            language_code='zh-CN',
+            theme=theme,
+            recovery_mode=True,
+            recovery_path=str(TEST_ROOT / 'missing_root'),
+            recovery_reason_code='active_data_root_missing',
+            recovery_reason_text=data_root_reason_text('zh-CN', 'active_data_root_missing', 'path-missing'),
+        )
+        try:
+            workspace.data_root_combo.setCurrentText(str(empty_root))
+            app.processEvents()
+            self.assertIn('新环境', workspace.workspace_summary_label.text())
+            workspace.data_root_combo.setCurrentText(str(broken_root))
+            app.processEvents()
+            self.assertIn('环境结构不完整', workspace.workspace_summary_label.text())
+            self.assertNotIn('将作为一个新环境使用', workspace.workspace_summary_label.text())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_recovery_preview_identifies_existing_legacy_environment(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        placeholder_paths = ensure_data_paths(str(TEST_ROOT / 'recovery_legacy_placeholder'), str(SAMPLE_ROOT))
+        legacy_root = self._make_legacy_environment_root(TEST_ROOT / 'legacy_env', SAMPLE_ROOT)
+        workspace = ConfigWorkspace(
+            config=AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(placeholder_paths.global_root)),
+            paths=placeholder_paths,
+            language_code='zh-CN',
+            theme=theme,
+            recovery_mode=True,
+            recovery_path=str(TEST_ROOT / 'missing_root'),
+            recovery_reason_code='active_data_root_missing',
+            recovery_reason_text=data_root_reason_text('zh-CN', 'active_data_root_missing', 'path-missing'),
+        )
+        try:
+            workspace.data_root_combo.setCurrentText(str(legacy_root))
+            app.processEvents()
+            self.assertIn('已识别现有 OmniClip 环境', workspace.workspace_summary_label.text())
+            self.assertIn('legacy', workspace.workspace_summary_label.text())
+            self.assertIn(str(legacy_root), workspace.workspace_summary_label.text())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_recovery_notice_uses_warning_roles(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        placeholder_paths = ensure_data_paths(str(TEST_ROOT / 'recovery_notice_placeholder'), str(SAMPLE_ROOT))
+        workspace = ConfigWorkspace(
+            config=AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(placeholder_paths.global_root)),
+            paths=placeholder_paths,
+            language_code='zh-CN',
+            theme=theme,
+            recovery_mode=True,
+            recovery_path=str(TEST_ROOT / 'missing_root'),
+            recovery_reason_code='active_data_root_missing',
+            recovery_reason_text=data_root_reason_text('zh-CN', 'active_data_root_missing', 'path-missing'),
+        )
+        try:
+            self.assertEqual(workspace.recovery_notice_title.property('role'), 'warningTitle')
+            self.assertEqual(workspace.recovery_notice_body.property('role'), 'warning')
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_invalid_saved_data_root_can_be_removed_from_prompt(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        active_paths = ensure_data_paths(str(TEST_ROOT / 'active_prompt_env'), str(SAMPLE_ROOT))
+        broken_root = self._make_broken_environment_root(TEST_ROOT / 'broken_prompt_env').resolve()
+        write_bootstrap_pointer(active_paths.global_root, known_data_roots=[str(active_paths.global_root), str(broken_root)])
+        workspace = ConfigWorkspace(
+            config=AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(active_paths.global_root)),
+            paths=active_paths,
+            language_code='zh-CN',
+            theme=theme,
+        )
+        try:
+            workspace.data_root_combo.setCurrentText(str(broken_root))
+            with patch.object(workspace, '_prompt_invalid_data_root_action', return_value='remove'):
+                workspace._prompt_pending_data_root_switch(explicit=True)
+            bootstrap = json.loads((ENV_ROOT / 'roaming' / 'bootstrap.json').read_text(encoding='utf-8'))
+            self.assertNotIn(str(broken_root), bootstrap['known_data_roots'])
+            self.assertTrue(broken_root.exists())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_browse_data_root_prompts_once(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        active_paths = ensure_data_paths(str(TEST_ROOT / 'browse_active_env'), str(SAMPLE_ROOT))
+        empty_root = TEST_ROOT / 'browse_empty_env'
+        empty_root.mkdir(parents=True, exist_ok=True)
+        workspace = ConfigWorkspace(
+            config=AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(active_paths.global_root)),
+            paths=active_paths,
+            language_code='zh-CN',
+            theme=theme,
+        )
+        try:
+            with patch('PySide6.QtWidgets.QFileDialog.getExistingDirectory', return_value=str(empty_root)), \
+                 patch.object(workspace, '_confirm_pending_data_root_switch', return_value='cancel') as confirm_mock:
+                workspace._browse_data_root()
+                app.processEvents()
+            self.assertEqual(confirm_mock.call_count, 1)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_can_remove_non_active_saved_data_root(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        active_paths = ensure_data_paths(str(TEST_ROOT / 'active_env'), str(SAMPLE_ROOT))
+        extra_root = (TEST_ROOT / 'extra_env').resolve()
+        extra_root.mkdir(parents=True, exist_ok=True)
+        write_bootstrap_pointer(active_paths.global_root, known_data_roots=[str(active_paths.global_root), str(extra_root)])
+        workspace = ConfigWorkspace(
+            config=AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(active_paths.global_root)),
+            paths=active_paths,
+            language_code='zh-CN',
+            theme=theme,
+        )
+        try:
+            workspace.data_root_combo.setCurrentText(str(extra_root))
+            workspace._remove_selected_data_root()
+            bootstrap = json.loads((ENV_ROOT / 'roaming' / 'bootstrap.json').read_text(encoding='utf-8'))
+            self.assertNotIn(str(extra_root), bootstrap['known_data_roots'])
+            self.assertEqual(bootstrap['active_data_root'], str(active_paths.global_root))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_cannot_remove_active_saved_data_root(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        active_paths = ensure_data_paths(str(TEST_ROOT / 'active_env_forbid'), str(SAMPLE_ROOT))
+        write_bootstrap_pointer(active_paths.global_root, known_data_roots=[str(active_paths.global_root)])
+        workspace = ConfigWorkspace(
+            config=AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(active_paths.global_root)),
+            paths=active_paths,
+            language_code='zh-CN',
+            theme=theme,
+        )
+        try:
+            with patch('PySide6.QtWidgets.QMessageBox.information') as info_mock:
+                workspace._remove_selected_data_root()
+            info_mock.assert_called_once()
+            bootstrap = json.loads((ENV_ROOT / 'roaming' / 'bootstrap.json').read_text(encoding='utf-8'))
+            self.assertEqual(bootstrap['known_data_roots'], [str(active_paths.global_root)])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_stylesheet_defines_combobox_hover_state(self) -> None:
         sheet = build_stylesheet(build_theme('light', 100))
         self.assertIn('QComboBox QAbstractItemView::item:hover', sheet)
         self.assertIn('selection-background-color', sheet)
+
+    def test_runtime_app_icon_loads_from_resources(self) -> None:
+        icon = qt_app._load_app_icon()
+        self.assertFalse(icon.isNull())
 
 
 if __name__ == '__main__':

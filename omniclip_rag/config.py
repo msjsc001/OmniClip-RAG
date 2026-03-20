@@ -13,9 +13,21 @@ from .ui_i18n import detect_system_language, normalize_language
 
 
 APP_NAME = "OmniClip RAG"
+DEFAULT_ENV_ROOT_NAME = f"{APP_NAME}-default"
+ENVIRONMENT_MARKER_FILENAME = ".omniclip-root.json"
+ENVIRONMENT_MARKER_SCHEMA_VERSION = 1
 DEFAULT_WORKSPACE_ID = "default"
 DEFAULT_UI_THEME = "system"
-SUPPORTED_UI_THEMES = {"system", "light", "dark"}
+SUPPORTED_UI_THEMES = {
+    "system",
+    "light",
+    "dark",
+    "sepia",
+    "nord",
+    "solarized-light",
+    "solarized-dark",
+    "graphite",
+}
 UI_SCALE_PERCENT_MIN = 80
 UI_SCALE_PERCENT_MAX = 200
 WATCH_RESOURCE_PEAK_OPTIONS = (5, 10, 15, 20, 30, 40, 50, 60, 70, 80, 90)
@@ -39,6 +51,17 @@ class DataPaths:
     exports_dir: Path
     config_file: Path
     sqlite_file: Path
+
+
+@dataclass(slots=True)
+class DataRootProbe:
+    root: Path
+    state: str
+    reason: str = ""
+    detail: str = ""
+    has_marker: bool = False
+    legacy_environment: bool = False
+    marker_schema_version: int | None = None
 
 
 @dataclass(slots=True)
@@ -92,6 +115,7 @@ class AppConfig:
     qt_query_splitter_state: str = ''
     qt_results_splitter_state: str = ''
     qt_header_collapsed: bool = False
+    qt_query_controls_collapsed: bool = False
 
     @property
     def vault_dir(self) -> Path:
@@ -99,6 +123,20 @@ class AppConfig:
 
 
 def default_data_root() -> Path:
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / DEFAULT_ENV_ROOT_NAME
+    return Path.home() / "AppData" / "Roaming" / DEFAULT_ENV_ROOT_NAME
+
+
+def default_bootstrap_root() -> Path:
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / APP_NAME
+    return Path.home() / "AppData" / "Roaming" / APP_NAME
+
+
+def legacy_default_data_root() -> Path:
     appdata = os.environ.get("APPDATA")
     if appdata:
         return Path(appdata) / APP_NAME
@@ -145,6 +183,15 @@ def normalize_ui_theme(value: str | None) -> str:
         "day": "light",
         "dark": "dark",
         "night": "dark",
+        "sepia": "sepia",
+        "nord": "nord",
+        "solarized-light": "solarized-light",
+        "solarized_light": "solarized-light",
+        "solarized light": "solarized-light",
+        "solarized-dark": "solarized-dark",
+        "solarized_dark": "solarized-dark",
+        "solarized dark": "solarized-dark",
+        "graphite": "graphite",
     }
     theme = aliases.get(normalized, DEFAULT_UI_THEME)
     return theme if theme in SUPPORTED_UI_THEMES else DEFAULT_UI_THEME
@@ -190,31 +237,104 @@ def workspace_id_for_vault(vault_path: str | Path | None) -> str:
     return f"{slug}-{digest}"
 
 
-def ensure_data_paths(custom_root: str | None = None, vault_path: str | Path | None = None) -> DataPaths:
-    if custom_root:
-        return _create_data_paths(Path(custom_root).expanduser().resolve(), vault_path=vault_path)
+def environment_marker_path(global_root: str | Path) -> Path:
+    return Path(global_root).expanduser().resolve() / ENVIRONMENT_MARKER_FILENAME
 
-    candidates: list[Path] = [default_data_root(), default_local_data_root(), temp_data_root()]
 
-    last_error: OSError | None = None
-    seen: set[str] = set()
-    for candidate in candidates:
-        key = str(candidate)
-        if key in seen:
-            continue
-        seen.add(key)
+def probe_data_root(
+    root: str | Path,
+    *,
+    allow_create: bool = False,
+) -> DataRootProbe:
+    candidate = Path(root).expanduser().resolve()
+    _enforce_test_isolation(candidate)
+    if candidate.exists():
+        if not candidate.is_dir():
+            return DataRootProbe(
+                candidate,
+                "invalid_not_directory",
+                reason="active_data_root_unavailable",
+                detail="not-a-directory",
+            )
         try:
-            return _create_data_paths(candidate, vault_path=vault_path)
+            next(candidate.iterdir(), None)
         except OSError as exc:
-            last_error = exc
-            continue
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("无法创建 OmniClip 数据目录。")
+            return DataRootProbe(candidate, "unavailable", reason="active_data_root_unavailable", detail=str(exc))
+        write_ok, write_detail = _probe_writeable(candidate)
+        if not write_ok:
+            return DataRootProbe(candidate, "unavailable", reason="active_data_root_not_writable", detail=write_detail)
+        shape = _probe_environment_shape(candidate)
+        marker_info = _read_environment_marker(candidate)
+        if marker_info["state"] == "invalid":
+            return DataRootProbe(
+                candidate,
+                "invalid_broken_environment",
+                reason="environment_schema_unsupported",
+                detail=str(marker_info.get("detail") or ""),
+                has_marker=True,
+            )
+        if marker_info["state"] == "present":
+            if shape["has_shared"] and shape["has_workspaces"]:
+                return DataRootProbe(
+                    candidate,
+                    "existing",
+                    has_marker=True,
+                    marker_schema_version=marker_info.get("schema_version"),
+                )
+            return DataRootProbe(
+                candidate,
+                "invalid_broken_environment",
+                reason="active_data_root_invalid",
+                detail="broken-environment",
+                has_marker=True,
+                marker_schema_version=marker_info.get("schema_version"),
+            )
+        if shape["legacy_complete"]:
+            return DataRootProbe(candidate, "existing", legacy_environment=True)
+        if shape["has_any_trace"]:
+            return DataRootProbe(
+                candidate,
+                "invalid_broken_environment",
+                reason="active_data_root_invalid",
+                detail="broken-environment",
+            )
+        if _is_empty_directory(candidate):
+            return DataRootProbe(candidate, "new")
+        return DataRootProbe(
+            candidate,
+            "invalid_not_environment",
+            reason="active_data_root_invalid",
+            detail="not-an-omniclip-environment",
+        )
+
+    if not allow_create:
+        return DataRootProbe(candidate, "unavailable", reason="active_data_root_missing", detail="path-missing")
+    parent = candidate.parent
+    if not parent.exists():
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return DataRootProbe(candidate, "unavailable", reason="active_data_root_unavailable", detail=str(exc))
+    if not parent.is_dir():
+        return DataRootProbe(candidate, "unavailable", reason="active_data_root_unavailable", detail="parent-not-a-directory")
+    write_ok, write_detail = _probe_writeable(parent)
+    if not write_ok:
+        return DataRootProbe(candidate, "unavailable", reason="active_data_root_not_writable", detail=write_detail)
+    return DataRootProbe(candidate, "new")
 
 
-def _create_data_paths(global_root: Path, vault_path: str | Path | None = None) -> DataPaths:
+def ensure_data_paths(custom_root: str | None = None, vault_path: str | Path | None = None) -> DataPaths:
+    root = Path(custom_root).expanduser().resolve() if str(custom_root or "").strip() else default_data_root().resolve()
+    probe = probe_data_root(root, allow_create=True)
+    if probe.state not in {"new", "existing"}:
+        raise PermissionError(f"无法使用数据目录：{probe.root}（{probe.reason or probe.state}）")
+    paths = build_data_paths(root, vault_path=vault_path)
+    return materialize_data_directories(paths)
+
+
+def build_data_paths(global_root: Path, vault_path: str | Path | None = None) -> DataPaths:
     global_root = global_root.resolve()
+    _enforce_test_isolation(global_root)
     shared_root = global_root / "shared"
     workspaces_dir = global_root / "workspaces"
     workspace_id = workspace_id_for_vault(vault_path)
@@ -223,11 +343,6 @@ def _create_data_paths(global_root: Path, vault_path: str | Path | None = None) 
     exports_dir = workspace_root / "exports"
     logs_dir = shared_root / "logs"
     cache_dir = shared_root / "cache"
-    for directory in (global_root, shared_root, workspaces_dir, workspace_root, state_dir, exports_dir, logs_dir, cache_dir):
-        _ensure_directory(directory)
-
-    _migrate_legacy_workspace_data(workspace_root, shared_root)
-
     return DataPaths(
         global_root=global_root,
         shared_root=shared_root,
@@ -241,6 +356,28 @@ def _create_data_paths(global_root: Path, vault_path: str | Path | None = None) 
         config_file=global_root / "config.json",
         sqlite_file=state_dir / "omniclip.sqlite3",
     )
+
+
+def materialize_data_directories(paths: DataPaths) -> DataPaths:
+    for directory in (
+        paths.global_root,
+        paths.shared_root,
+        paths.workspaces_dir,
+        paths.root,
+        paths.state_dir,
+        paths.exports_dir,
+        paths.logs_dir,
+        paths.cache_dir,
+    ):
+        _ensure_directory(directory)
+
+    _write_environment_marker(paths.global_root)
+    _migrate_legacy_workspace_data(paths.root, paths.shared_root)
+    return paths
+
+
+def ensure_data_directories(paths: DataPaths) -> DataPaths:
+    return materialize_data_directories(paths)
 
 
 def save_config(config: AppConfig, paths: DataPaths) -> None:
@@ -320,6 +457,96 @@ def _migrate_legacy_workspace_data(workspace_root: Path, shared_root: Path) -> N
             legacy_dir.rmdir()
         except OSError:
             pass
+
+
+def _read_environment_marker(global_root: Path) -> dict[str, object]:
+    marker_path = environment_marker_path(global_root)
+    if not marker_path.exists():
+        return {"state": "missing"}
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"state": "invalid", "detail": str(exc)}
+    if not isinstance(payload, dict):
+        return {"state": "invalid", "detail": "marker-not-object"}
+    try:
+        schema_version = int(payload.get("schema_version", 0))
+    except (TypeError, ValueError):
+        return {"state": "invalid", "detail": "schema-version-invalid"}
+    if schema_version > ENVIRONMENT_MARKER_SCHEMA_VERSION:
+        return {"state": "invalid", "detail": f"schema-version-{schema_version}"}
+    return {"state": "present", "schema_version": schema_version}
+
+
+def _write_environment_marker(global_root: Path) -> None:
+    marker_path = environment_marker_path(global_root)
+    marker_path.write_text(
+        json.dumps(
+            {
+                "schema_version": ENVIRONMENT_MARKER_SCHEMA_VERSION,
+                "app_name": APP_NAME,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _looks_like_legacy_environment(global_root: Path) -> bool:
+    shape = _probe_environment_shape(global_root)
+    return bool(shape["legacy_complete"])
+
+
+def _is_empty_directory(global_root: Path) -> bool:
+    try:
+        entries = list(global_root.iterdir())
+    except OSError:
+        return False
+    return not entries
+
+
+def _probe_environment_shape(global_root: Path) -> dict[str, bool]:
+    has_config = (global_root / "config.json").is_file()
+    has_shared = (global_root / "shared").is_dir()
+    has_workspaces = (global_root / "workspaces").is_dir()
+    has_marker = environment_marker_path(global_root).is_file()
+    has_any_trace = has_marker or has_config or has_shared or has_workspaces
+    legacy_complete = has_config and has_shared and has_workspaces and not has_marker
+    return {
+        "has_config": has_config,
+        "has_shared": has_shared,
+        "has_workspaces": has_workspaces,
+        "has_marker": has_marker,
+        "has_any_trace": has_any_trace,
+        "legacy_complete": legacy_complete,
+    }
+
+
+def _probe_writeable(target: Path) -> tuple[bool, str]:
+    probe_path = target / f".omniclip-write-probe-{os.getpid()}.tmp"
+    try:
+        probe_path.write_text("", encoding="utf-8")
+    except OSError as exc:
+        return False, str(exc)
+    finally:
+        try:
+            probe_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return True, ""
+
+
+def _enforce_test_isolation(path: Path) -> None:
+    strict_root = str(os.environ.get("OMNICLIP_STRICT_TEST_ROOT") or "").strip()
+    if not strict_root:
+        return
+    root = Path(strict_root).expanduser().resolve()
+    candidate = path.expanduser().resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise AssertionError(f"Path escaped strict test root: {candidate} not under {root}") from exc
 
 
 def _ensure_directory(path: Path) -> None:

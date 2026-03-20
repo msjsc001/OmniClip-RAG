@@ -87,6 +87,221 @@ DARK_THEME_COLORS = {
     'query_done_border': '#2D5E86',
 }
 
+SEPIA_THEME_COLORS = {
+    'bg': '#F2E8D8',
+    'card': '#FBF4E8',
+    'soft': '#EADCC7',
+    'soft_2': '#F7EEDF',
+    'ink': '#3C2F25',
+    'muted': '#7A6657',
+    'accent': '#8A5B32',
+    'accent_dark': '#6E4726',
+    'accent_soft': '#F1E2CF',
+    'danger': '#B65432',
+    'danger_dark': '#943E1C',
+    'border': '#D6C3A9',
+    'select': '#E7D8BF',
+    'chip_ok_bg': '#E6F0DF',
+    'chip_ok_fg': '#3F6A33',
+    'chip_warn_bg': '#FAE8C8',
+    'chip_warn_fg': '#8D5D00',
+    'chip_neutral_bg': '#E9DFD0',
+    'chip_neutral_fg': '#5D4E42',
+    'input_bg': '#FFF9F1',
+    'input_fg': '#3C2F25',
+    'input_border': '#CDB99D',
+    'secondary_active': '#E1D2BB',
+    'tree_bg': '#FFF9F1',
+    'tree_heading_bg': '#EADCC7',
+    'search_current_bg': '#E8C76A',
+    'query_idle_bg': '#EFE5D7',
+    'query_idle_fg': '#5D4E42',
+    'query_idle_border': '#CDB99D',
+    'query_running_bg': '#E8EFE0',
+    'query_running_fg': '#486738',
+    'query_running_border': '#9EB88E',
+    'query_blocked_bg': '#F9E7C9',
+    'query_blocked_fg': '#8D5D00',
+    'query_blocked_border': '#D9B06B',
+    'query_done_bg': '#E6EDF8',
+    'query_done_fg': '#365A91',
+    'query_done_border': '#A7B9D8',
+}
+
+NORD_THEME_COLORS = {
+    'bg': '#ECEFF4',
+    'card': '#F8FAFC',
+    'soft': '#E5E9F0',
+    'soft_2': '#EEF2F7',
+    'ink': '#2E3440',
+    'muted': '#5E6A7E',
+    'accent': '#5E81AC',
+    'accent_dark': '#48688F',
+    'accent_soft': '#E5ECF5',
+    'danger': '#BF616A',
+    'danger_dark': '#A64E57',
+    'border': '#D8DEE9',
+    'select': '#E1E8F2',
+    'chip_ok_bg': '#E4F0EA',
+    'chip_ok_fg': '#3B6B59',
+    'chip_warn_bg': '#F8ECD6',
+    'chip_warn_fg': '#8C6A23',
+    'chip_neutral_bg': '#E9EEF4',
+    'chip_neutral_fg': '#4C566A',
+    'input_bg': '#FFFFFF',
+    'input_fg': '#2E3440',
+    'input_border': '#C7D0DD',
+    'secondary_active': '#DCE4EF',
+    'tree_bg': '#FFFFFF',
+    'tree_heading_bg': '#E5E9F0',
+    'search_current_bg': '#EBCB8B',
+    'query_idle_bg': '#EEF2F7',
+    'query_idle_fg': '#4C566A',
+    'query_idle_border': '#C7D0DD',
+    'query_running_bg': '#E3EDF8',
+    'query_running_fg': '#48688F',
+    'query_running_border': '#9FB8D8',
+    'query_blocked_bg': '#FAE7E8',
+    'query_blocked_fg': '#A64E57',
+    'query_blocked_border': '#D9A0A6',
+    'query_done_bg': '#E7EEF8',
+    'query_done_fg': '#3B5D88',
+    'query_done_border': '#ABC0DA',
+}
+
+SOLARIZED_LIGHT_THEME_COLORS = {
+    'bg': '#FDF6E3',
+    'card': '#FFFBF1',
+    'soft': '#EEE8D5',
+    'soft_2': '#F7F0DD',
+    'ink': '#586E75',
+    'muted': '#7B8B8F',
+    'accent': '#268BD2',
+    'accent_dark': '#1C6CA4',
+    'accent_soft': '#E9F3FB',
+    'danger': '#DC322F',
+    'danger_dark': '#B62A27',
+    'border': '#D6CFBA',
+    'select': '#E8E1CC',
+    'chip_ok_bg': '#E8F3E6',
+    'chip_ok_fg': '#3C6D3A',
+    'chip_warn_bg': '#F9E9C7',
+    'chip_warn_fg': '#8A650A',
+    'chip_neutral_bg': '#EEE8D5',
+    'chip_neutral_fg': '#586E75',
+    'input_bg': '#FFFDF7',
+    'input_fg': '#586E75',
+    'input_border': '#CCC5B2',
+    'secondary_active': '#E6DFCB',
+    'tree_bg': '#FFFDF7',
+    'tree_heading_bg': '#EEE8D5',
+    'search_current_bg': '#E8C75F',
+    'query_idle_bg': '#F0EADA',
+    'query_idle_fg': '#586E75',
+    'query_idle_border': '#CCC5B2',
+    'query_running_bg': '#E7F0F8',
+    'query_running_fg': '#1C6CA4',
+    'query_running_border': '#97BCD7',
+    'query_blocked_bg': '#FBE4E3',
+    'query_blocked_fg': '#B62A27',
+    'query_blocked_border': '#D9A19F',
+    'query_done_bg': '#EAF2F3',
+    'query_done_fg': '#47727C',
+    'query_done_border': '#A9C3C8',
+}
+
+SOLARIZED_DARK_THEME_COLORS = {
+    'bg': '#002B36',
+    'card': '#073642',
+    'soft': '#0B3E4C',
+    'soft_2': '#06303B',
+    'ink': '#EEE8D5',
+    'muted': '#93A1A1',
+    'accent': '#2AA198',
+    'accent_dark': '#5CC3BB',
+    'accent_soft': '#0F4A4E',
+    'danger': '#DC322F',
+    'danger_dark': '#F26A67',
+    'border': '#1F4D58',
+    'select': '#12424D',
+    'chip_ok_bg': '#0F4A3A',
+    'chip_ok_fg': '#8FD4B3',
+    'chip_warn_bg': '#4B3A14',
+    'chip_warn_fg': '#F0C96A',
+    'chip_neutral_bg': '#123C48',
+    'chip_neutral_fg': '#D5D0C0',
+    'input_bg': '#052A34',
+    'input_fg': '#EEE8D5',
+    'input_border': '#2A5661',
+    'secondary_active': '#124450',
+    'tree_bg': '#052A34',
+    'tree_heading_bg': '#0B3E4C',
+    'search_current_bg': '#745800',
+    'query_idle_bg': '#113943',
+    'query_idle_fg': '#D5D0C0',
+    'query_idle_border': '#355C66',
+    'query_running_bg': '#0F4A4E',
+    'query_running_fg': '#8CD9D1',
+    'query_running_border': '#2D8F89',
+    'query_blocked_bg': '#4B2626',
+    'query_blocked_fg': '#F49A97',
+    'query_blocked_border': '#8E4A49',
+    'query_done_bg': '#163F49',
+    'query_done_fg': '#A6D5DD',
+    'query_done_border': '#3B7480',
+}
+
+GRAPHITE_THEME_COLORS = {
+    'bg': '#16181C',
+    'card': '#20242A',
+    'soft': '#272C33',
+    'soft_2': '#1A1E24',
+    'ink': '#ECEFF4',
+    'muted': '#A7B0BC',
+    'accent': '#7AA2F7',
+    'accent_dark': '#A4C2FF',
+    'accent_soft': '#21324C',
+    'danger': '#F7768E',
+    'danger_dark': '#FF9AAF',
+    'border': '#343A43',
+    'select': '#2A313B',
+    'chip_ok_bg': '#203629',
+    'chip_ok_fg': '#9BD0A7',
+    'chip_warn_bg': '#4A3A22',
+    'chip_warn_fg': '#F2C97A',
+    'chip_neutral_bg': '#2B3139',
+    'chip_neutral_fg': '#D4DAE3',
+    'input_bg': '#14181E',
+    'input_fg': '#ECEFF4',
+    'input_border': '#3B4350',
+    'secondary_active': '#313843',
+    'tree_bg': '#15191F',
+    'tree_heading_bg': '#262B33',
+    'search_current_bg': '#796100',
+    'query_idle_bg': '#242A31',
+    'query_idle_fg': '#D4DAE3',
+    'query_idle_border': '#46505D',
+    'query_running_bg': '#23354E',
+    'query_running_fg': '#B8D1FF',
+    'query_running_border': '#5379B8',
+    'query_blocked_bg': '#4E2A31',
+    'query_blocked_fg': '#F5B2BE',
+    'query_blocked_border': '#8A5661',
+    'query_done_bg': '#21333B',
+    'query_done_fg': '#A9D7E3',
+    'query_done_border': '#4A7A88',
+}
+
+THEME_COLOR_MAP = {
+    'light': LIGHT_THEME_COLORS,
+    'dark': DARK_THEME_COLORS,
+    'sepia': SEPIA_THEME_COLORS,
+    'nord': NORD_THEME_COLORS,
+    'solarized-light': SOLARIZED_LIGHT_THEME_COLORS,
+    'solarized-dark': SOLARIZED_DARK_THEME_COLORS,
+    'graphite': GRAPHITE_THEME_COLORS,
+}
+
 
 @dataclass(slots=True)
 class ThemeState:
@@ -114,11 +329,12 @@ def detect_system_theme_mode() -> str:
 
 def build_theme(theme_code: str, scale_percent: int) -> ThemeState:
     normalized_theme = str(theme_code or 'system').strip().lower() or 'system'
-    if normalized_theme not in {'system', 'light', 'dark'}:
+    if normalized_theme not in {'system', *THEME_COLOR_MAP.keys()}:
         normalized_theme = 'system'
     scale = max(80, min(int(scale_percent or 100), 200))
     effective_theme = detect_system_theme_mode() if normalized_theme == 'system' else normalized_theme
-    colors = dict(DARK_THEME_COLORS if effective_theme == 'dark' else LIGHT_THEME_COLORS)
+    resolved_theme = detect_system_theme_mode() if normalized_theme == 'system' else normalized_theme
+    colors = dict(THEME_COLOR_MAP.get(resolved_theme, LIGHT_THEME_COLORS))
     return ThemeState(
         theme_code=normalized_theme,
         effective_theme=effective_theme,
@@ -183,6 +399,15 @@ def build_stylesheet(theme: ThemeState) -> str:
     }}
     QLabel[role='guide'] {{
         color: {colors['accent_dark']};
+    }}
+    QLabel[role='warning'] {{
+        color: {colors['danger_dark']};
+        font-weight: 600;
+    }}
+    QLabel[role='warningTitle'] {{
+        color: {colors['danger_dark']};
+        font-size: {card_title_size}pt;
+        font-weight: 700;
     }}
     QLabel[role='cardTitle'] {{
         font-size: {card_title_size}pt;

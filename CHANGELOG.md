@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## V0.4.2 - 2026-03-20
+
+### Added
+
+- Added a unified `active_data_root` bootstrap model so the current environment root now governs config, logs, cache, models, main Runtime, Tika Runtime, and workspace state together.
+- Added a restricted GUI recovery shell for unavailable or invalid data roots, with plain-language recovery guidance, saved-root switching, and explicit retry/switch flows.
+- Added classic UI themes (`Sepia`, `Nord`, `Solarized Light`, `Solarized Dark`, `Graphite`), compact query-desk collapse, and refreshed icon assets across runtime and packaged builds.
+- Added [RELEASE_NOTES_v0.4.2](releases/RELEASE_NOTES_v0.4.2.md) and updated top-level docs to expose the public website at [msjsc001.github.io/OmniClip-RAG](https://msjsc001.github.io/OmniClip-RAG/).
+
+### Changed
+
+- Changed startup resolution so GUI, launcher, headless bootstrap, Runtime selection, and MCP all converge on one bootstrap/data-root truth instead of mixing default-path guesses and partial config inference.
+- Changed data-directory UX from a plain path field into an environment switcher with preflight classification, saved-root management, controlled restart, and recovery-mode entry when the active root is unavailable.
+- Changed the MCP release line, docs, examples, and Registry metadata references to `v0.4.2`, keeping the MCP ZIP and MCPB assets aligned with the same shared startup/data-root chain as the desktop app.
+- Changed release/documentation metadata to `v0.4.2`, including README badges, package metadata, MCP setup examples, and release notes.
+
+### Fixed
+
+- Fixed shared startup drift where tests or secondary entry points could poison the active data-root pointer or leave GUI/MCP/runtime behavior split across different root assumptions.
+- Fixed the UX failure mode where a broken active data root could trap GUI users outside the app instead of providing a repairable shell.
+- Fixed remaining desktop polish gaps around query-desk compact mode, saved data-root cleanup, and icon consistency across packaged/runtime surfaces.
+
 ## V0.4.1 - 2026-03-18
 
 ### Added

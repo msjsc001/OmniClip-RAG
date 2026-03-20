@@ -7,12 +7,12 @@
     "url": "https://github.com/msjsc001/OmniClip-RAG",
     "source": "github"
   },
-  "version": "0.4.1",
+  "version": "0.4.2",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/msjsc001/OmniClip-RAG/releases/download/v0.4.1/omniclip-rag-mcp-win-x64-v0.4.1.mcpb",
-      "fileSha256": "ed7408cb77ed05109bbe89a6532f5d83af5585adcc8c537a0b743c55416424b6",
+      "identifier": "https://github.com/msjsc001/OmniClip-RAG/releases/download/v0.4.2/omniclip-rag-mcp-win-x64-v0.4.2.mcpb",
+      "fileSha256": "17031ca2289e943aa612065320fde73c46b2d501e96e2a537e3e73ce5029f616",
       "transport": {
         "type": "stdio"
       }

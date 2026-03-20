@@ -1347,7 +1347,7 @@ class VectorIndexTests(unittest.TestCase):
         self.assertEqual(roots[0].resolve(), semantic_root.resolve())
         self.assertEqual(roots[1].resolve(), runtime_dir.resolve())
 
-    def test_frozen_runtime_discovery_reuses_complete_sibling_runtime_when_current_is_empty(self) -> None:
+    def test_frozen_runtime_discovery_stays_on_preferred_runtime_root(self) -> None:
         dist_root = TEST_DATA_ROOT / 'frozen_runtime_drift' / 'dist'
         current_app = dist_root / 'OmniClipRAG-v0.3.0'
         sibling_app = dist_root / 'OmniClipRAG-v0.2.4'
@@ -1364,7 +1364,7 @@ class VectorIndexTests(unittest.TestCase):
         ), patch.object(sys, 'frozen', True, create=True):
             active_runtime = _discover_active_runtime_dir()
 
-        self.assertEqual(active_runtime.resolve(), sibling_runtime.resolve())
+        self.assertEqual(active_runtime.resolve(), preferred_runtime.resolve())
 
     def test_frozen_preferred_runtime_root_is_shared_appdata_runtime(self) -> None:
         app_root = TEST_DATA_ROOT / 'preferred_frozen_runtime' / 'OmniClipRAG-v0.3.0'
@@ -1372,7 +1372,7 @@ class VectorIndexTests(unittest.TestCase):
         app_root.mkdir(parents=True, exist_ok=True)
         data_root.mkdir(parents=True, exist_ok=True)
         with patch('omniclip_rag.vector_index._application_root_dir', return_value=app_root), \
-             patch('omniclip_rag.vector_index.default_data_root', return_value=data_root), \
+             patch('omniclip_rag.vector_index.resolve_active_data_root', return_value=types.SimpleNamespace(path=data_root.resolve(), source='bootstrap', bootstrap_file=data_root / 'bootstrap.json')), \
              patch.object(sys, 'frozen', True, create=True):
             runtime_root = _preferred_runtime_dir_path()
         self.assertEqual(runtime_root.resolve(), (data_root / 'shared' / 'runtime').resolve())

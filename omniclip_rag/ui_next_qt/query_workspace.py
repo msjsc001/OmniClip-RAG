@@ -64,6 +64,10 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._pending_results_splitter_state: bytes | None = None
         self._splitter_restore_queued = False
         self._splitter_state_applied = False
+        self._search_controls_collapsed = False
+        self._expanded_query_splitter_sizes: list[int] | None = None
+        self._search_card_default_margins: tuple[int, int, int, int] | None = None
+        self._search_card_default_spacing = 0
 
         root_layout = QtWidgets.QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
@@ -104,7 +108,12 @@ class QueryWorkspace(QtWidgets.QWidget):
         return tooltip(self._language_code, key, **kwargs)
 
     def _build_search_card(self) -> None:
-        self.search_card, search_layout, search_header = self._create_card(self._tr('search_title'), self._tr('search_subtitle'))
+        self.search_card, self.search_card_layout, self.search_header_widget, search_header = self._create_card(
+            self._tr('search_title'),
+            self._tr('search_subtitle'),
+        )
+        self._search_card_default_margins = self.search_card_layout.getContentsMargins()
+        self._search_card_default_spacing = self.search_card_layout.spacing()
 
         self.query_status_banner = QtWidgets.QFrame(self.search_card)
         self.query_status_banner.setObjectName('QueryStatusBanner')
@@ -124,14 +133,17 @@ class QueryWorkspace(QtWidgets.QWidget):
         banner_layout.addWidget(self.query_status_detail)
         search_header.addWidget(self.query_status_banner, 0, QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignTop)
 
-        query_hint = QtWidgets.QLabel(self._tr('query_hint'), self.search_card)
-        query_hint.setProperty('role', 'guide')
-        query_hint.setWordWrap(True)
-        search_layout.addWidget(query_hint)
+        self.query_hint_label = QtWidgets.QLabel(self._tr('query_hint'), self.search_card)
+        self.query_hint_label.setProperty('role', 'guide')
+        self.query_hint_label.setWordWrap(True)
+        self.search_card_layout.addWidget(self.query_hint_label)
 
-        query_row = QtWidgets.QHBoxLayout()
+        self.query_row_host = QtWidgets.QWidget(self.search_card)
+        self.query_row_host.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        query_row = QtWidgets.QHBoxLayout(self.query_row_host)
+        query_row.setContentsMargins(0, 0, 0, 0)
         query_row.setSpacing(10)
-        search_layout.addLayout(query_row)
+        self.search_card_layout.addWidget(self.query_row_host)
 
         self.query_edit = QtWidgets.QLineEdit(self.search_card)
         self.query_edit.setToolTip(self._tip('query'))
@@ -143,6 +155,13 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._set_button_variant(self.search_button, 'secondary')
         self.search_button.clicked.connect(self.search)
         query_row.addWidget(self.search_button)
+
+        self.search_controls_toggle_button = QtWidgets.QPushButton(self._tr('search_controls_collapse'), self.search_card)
+        self.search_controls_toggle_button.setToolTip(self._tip('search'))
+        self._set_button_variant(self.search_controls_toggle_button, 'secondary')
+        self.search_controls_toggle_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.search_controls_toggle_button.clicked.connect(self._toggle_search_controls_collapsed)
+        query_row.addWidget(self.search_controls_toggle_button)
 
         self.search_copy_button = QtWidgets.QPushButton(self._tr('search_copy_button'), self.search_card)
         self.search_copy_button.setToolTip(self._tip('search_copy'))
@@ -156,10 +175,18 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.copy_context_button.clicked.connect(self.copy_current_context)
         self.copy_context_button.hide()
 
-        meta_row = QtWidgets.QGridLayout()
+        self.search_details_widget = QtWidgets.QWidget(self.search_card)
+        search_details_layout = QtWidgets.QVBoxLayout(self.search_details_widget)
+        search_details_layout.setContentsMargins(0, 0, 0, 0)
+        search_details_layout.setSpacing(10)
+        self.search_card_layout.addWidget(self.search_details_widget)
+
+        self.meta_widget = QtWidgets.QWidget(self.search_details_widget)
+        meta_row = QtWidgets.QGridLayout(self.meta_widget)
+        meta_row.setContentsMargins(0, 0, 0, 0)
         meta_row.setHorizontalSpacing(10)
         meta_row.setVerticalSpacing(8)
-        search_layout.addLayout(meta_row)
+        search_details_layout.addWidget(self.meta_widget)
 
         threshold_label = QtWidgets.QLabel(self._tr('score_threshold_label'), self.search_card)
         threshold_label.setProperty('role', 'muted')
@@ -182,9 +209,11 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.query_limit_hint_label.setWordWrap(True)
         meta_row.addWidget(self.query_limit_hint_label, 1, 0, 1, 4)
 
-        source_row = QtWidgets.QHBoxLayout()
+        self.source_widget = QtWidgets.QWidget(self.search_details_widget)
+        source_row = QtWidgets.QHBoxLayout(self.source_widget)
+        source_row.setContentsMargins(0, 0, 0, 0)
         source_row.setSpacing(10)
-        search_layout.addLayout(source_row)
+        search_details_layout.addWidget(self.source_widget)
 
         source_label = QtWidgets.QLabel(self._tr('query_source_filters_label'), self.search_card)
         source_label.setProperty('role', 'muted')
@@ -205,10 +234,13 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.query_runtime_hint_label.setOpenExternalLinks(False)
         self.query_runtime_hint_label.linkActivated.connect(self._handle_runtime_hint_link)
         self.query_runtime_hint_label.setVisible(False)
-        search_layout.addWidget(self.query_runtime_hint_label)
+        search_details_layout.addWidget(self.query_runtime_hint_label)
 
     def _build_results_card(self) -> None:
-        self.results_card, results_layout, results_header = self._create_card(self._tr('results_title'), self._tr('results_subtitle'))
+        self.results_card, results_layout, _results_header_widget, results_header = self._create_card(
+            self._tr('results_title'),
+            self._tr('results_subtitle'),
+        )
 
         results_actions = QtWidgets.QHBoxLayout()
         results_actions.setSpacing(8)
@@ -321,7 +353,11 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._refresh_results_columns()
         self._refresh_splitter_handles()
 
-    def _create_card(self, title: str, subtitle: str) -> tuple[QtWidgets.QFrame, QtWidgets.QVBoxLayout, QtWidgets.QHBoxLayout]:
+    def _create_card(
+        self,
+        title: str,
+        subtitle: str,
+    ) -> tuple[QtWidgets.QFrame, QtWidgets.QVBoxLayout, QtWidgets.QWidget, QtWidgets.QHBoxLayout]:
         card = QtWidgets.QFrame(self)
         card.setProperty('card', True)
         layout = QtWidgets.QVBoxLayout(card)
@@ -349,7 +385,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         subtitle_label.setWordWrap(True)
         title_layout.addWidget(subtitle_label)
 
-        return card, layout, header_layout
+        return card, layout, header, header_layout
 
     def _set_button_variant(self, button: QtWidgets.QPushButton, variant: str) -> None:
         button.setProperty('variant', variant)
@@ -383,7 +419,9 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.source_pdf_check.setChecked(True)
         self.source_tika_check.setChecked(True)
         self._query_runtime_warnings = ()
+        self._search_controls_collapsed = bool(getattr(self._config, 'qt_query_controls_collapsed', False))
         self._refresh_query_runtime_hint()
+        self._apply_search_controls_collapsed()
         self.preview_panel.set_text(self._tr('preview_empty'))
         self.context_panel.set_text(self._tr('context_empty'))
         self.log_panel.set_text(self._tr('log_empty'))
@@ -422,9 +460,11 @@ class QueryWorkspace(QtWidgets.QWidget):
         if not restored_results or min(self.results_splitter.sizes() or [0]) <= 0:
             self.results_splitter.setSizes(self.default_results_splitter_sizes())
         self._splitter_state_applied = True
+        QtCore.QTimer.singleShot(0, lambda: self._apply_query_splitter_compaction(collapsed=self._search_controls_collapsed))
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self._apply_search_controls_collapsed()
         if not self._splitter_state_applied or self._pending_query_splitter_state is not None or self._pending_results_splitter_state is not None:
             self._schedule_splitter_restore()
 
@@ -450,6 +490,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.log_panel.set_theme(theme)
         self._refresh_results_columns()
         self._refresh_splitter_handles()
+        self._apply_search_controls_collapsed()
         if min(self.query_splitter.sizes() or [0]) <= 0 or min(self.results_splitter.sizes() or [0]) <= 0:
             self._splitter_state_applied = False
             self._schedule_splitter_restore()
@@ -463,6 +504,7 @@ class QueryWorkspace(QtWidgets.QWidget):
             'source_pdf_checked': self.source_pdf_check.isChecked(),
             'source_tika_checked': self.source_tika_check.isChecked(),
             'detail_tab_index': self.detail_tabs.currentIndex(),
+            'search_controls_collapsed': self._search_controls_collapsed,
             'query_splitter_state': self.query_splitter_state(),
             'results_splitter_state': self.results_splitter_state(),
             'hits': self.results_model.hits(),
@@ -484,6 +526,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.source_markdown_check.setChecked(bool(payload.get('source_markdown_checked', True)))
         self.source_pdf_check.setChecked(bool(payload.get('source_pdf_checked', True)))
         self.source_tika_check.setChecked(bool(payload.get('source_tika_checked', True)))
+        self._search_controls_collapsed = bool(payload.get('search_controls_collapsed', getattr(self._config, 'qt_query_controls_collapsed', False)))
         query_state = payload.get('query_splitter_state')
         results_state = payload.get('results_splitter_state')
         if isinstance(query_state, (bytes, bytearray)) or isinstance(results_state, (bytes, bytearray)):
@@ -518,6 +561,65 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._refresh_query_limit_hint()
         self._refresh_context_selection_summary()
         self._refresh_page_sort_button()
+        self._apply_search_controls_collapsed()
+
+    def search_controls_collapsed(self) -> bool:
+        return bool(self._search_controls_collapsed)
+
+    def _toggle_search_controls_collapsed(self) -> None:
+        if not self._search_controls_collapsed:
+            current_sizes = list(self.query_splitter.sizes())
+            if len(current_sizes) == 2 and min(current_sizes) > 0:
+                self._expanded_query_splitter_sizes = current_sizes
+        self._search_controls_collapsed = not self._search_controls_collapsed
+        self._apply_search_controls_collapsed()
+
+    def _collapsed_search_card_height(self) -> int:
+        margins = self.search_card.layout().contentsMargins()
+        vertical_padding = margins.top() + margins.bottom()
+        row_height = max(self.query_row_host.sizeHint().height(), self.query_edit.sizeHint().height(), self.search_controls_toggle_button.sizeHint().height())
+        return row_height + vertical_padding + 8
+
+    def _apply_query_splitter_compaction(self, *, collapsed: bool) -> None:
+        if not self.isVisible():
+            return
+        if collapsed:
+            collapsed_height = self._collapsed_search_card_height()
+            current_sizes = list(self.query_splitter.sizes())
+            total_height = sum(current_sizes) if current_sizes else max(self.query_splitter.height(), sum(self.default_query_splitter_sizes()))
+            bottom_height = max(total_height - collapsed_height, 180)
+            self.query_splitter.setSizes([collapsed_height, bottom_height])
+            return
+        restore_sizes = self._expanded_query_splitter_sizes
+        if restore_sizes and len(restore_sizes) == 2 and min(restore_sizes) > 0:
+            self.query_splitter.setSizes(restore_sizes)
+            return
+        self.query_splitter.setSizes(self.default_query_splitter_sizes())
+
+    def _apply_search_controls_collapsed(self) -> None:
+        collapsed = bool(self._search_controls_collapsed)
+        for widget in (
+            self.search_header_widget,
+            self.query_status_banner,
+            self.query_hint_label,
+            self.search_details_widget,
+        ):
+            widget.setVisible(not collapsed)
+        self.search_controls_toggle_button.setText(self._tr('search_controls_expand') if collapsed else self._tr('search_controls_collapse'))
+        if collapsed:
+            collapsed_margin = scaled(self._theme, 10, minimum=8)
+            self.search_card.layout().setContentsMargins(collapsed_margin, collapsed_margin, collapsed_margin, collapsed_margin)
+            self.search_card.layout().setSpacing(4)
+            self.search_card.setMinimumHeight(self._collapsed_search_card_height())
+            self.search_card.setMaximumHeight(self._collapsed_search_card_height())
+        else:
+            if self._search_card_default_margins is not None:
+                self.search_card.layout().setContentsMargins(*self._search_card_default_margins)
+            self.search_card.layout().setSpacing(self._search_card_default_spacing)
+            self.search_card.setMinimumHeight(0)
+            self.search_card.setMaximumHeight(16777215)
+        self.search_card.updateGeometry()
+        QtCore.QTimer.singleShot(0, lambda collapsed=collapsed: self._apply_query_splitter_compaction(collapsed=collapsed))
         self.statusMessageChanged.emit(self.query_status_title.text() or self._tr('status_ready'))
         self.resultSummaryChanged.emit(self._tr('query_hits', count=self.results_model.total_count()) if self.results_model.total_count() else self._tr('result_empty'))
 
@@ -739,6 +841,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.query_status_detail.setText(detail)
 
     def _refresh_query_status_banner(self) -> None:
+        self.query_status_banner.setVisible(not self._search_controls_collapsed)
         if self._busy:
             payload = self._query_progress_payload or {}
             percent = float(payload.get('overall_percent') or 0.0)
@@ -783,7 +886,7 @@ class QueryWorkspace(QtWidgets.QWidget):
                 message = f"{message} <a href=\"runtime-repair\">{html.escape(self._tr('query_runtime_repair_link'))}</a>"
             lines.append(message)
         self.query_runtime_hint_label.setText('<br/>'.join(lines))
-        self.query_runtime_hint_label.setVisible(True)
+        self.query_runtime_hint_label.setVisible(not self._search_controls_collapsed)
 
     def _handle_runtime_hint_link(self, href: str) -> None:
         if str(href).strip().lower() == 'runtime-repair':

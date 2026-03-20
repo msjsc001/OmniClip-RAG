@@ -245,6 +245,35 @@ Current late-stage polishing policy:
 
 Why: once the site is already coherent, the remaining gains no longer come from prettier local components. They come from widening authority gaps between peaks and retreating anything that softens those power relationships.
 
+### 17. `data_root` is now the single environment truth
+
+Current data-root policy:
+
+- the active OmniClip environment is resolved from one startup truth chain only:
+  1. explicit override,
+  2. explicit test/developer override,
+  3. `%APPDATA%\OmniClip RAG\bootstrap.json`,
+  4. first-run default `%APPDATA%\OmniClip RAG-default`,
+- the bootstrap file is only a locator and may remember multiple known roots, but it does not store user data,
+- the real environment lives entirely under the selected `data_root`,
+- config, workspaces, logs, cache, models, main Runtime, and Tika Runtime all derive from that same root,
+- the legacy `%APPDATA%\OmniClip RAG` environment remains switchable and recognizable,
+- switching data roots means switching environments, not migrating data.
+
+Why: the product semantic is no longer "pick a save folder". It is "pick the current world". Allowing GUI, MCP, EXE, Runtime, or logging to guess different roots creates split-brain state and silent data leakage.
+
+### 18. Startup root resolution must be read-only and log-safe
+
+Current startup contract:
+
+- resolving the active data root is a pure read/probe phase,
+- startup root resolution must not create directories, migrate files, or write bootstrap state,
+- persistent file logging must not initialize before the active data root has been resolved and validated,
+- if the active data root is unavailable, GUI enters a blocking chooser flow and headless/MCP fail explicitly,
+- there is no product-level silent fallback from `%APPDATA%` to `%LOCALAPPDATA%` or `%TEMP%`.
+
+Why: mixing "figure out truth" with "touch disk" caused exactly the class of failures this refactor is meant to eliminate: polluted bootstrap state, stray logs under default roots, and runtime/layout decisions drifting away from the user-selected environment.
+
 ## Module Boundary
 
 - `omniclip_rag.config`: configuration and data paths
@@ -358,6 +387,54 @@ Current data split:
 - user notes themselves remain outside both of those trees.
 
 Why: shared Runtime reuse and clean packaged upgrades only work when cross-vault shared assets are not mixed into per-vault index directories.
+
+### 13. The selected data root is now the only environment root
+
+Current data-root policy:
+
+- the user-facing `Data directory` setting is the single environment switch,
+- the active environment root is tracked through a tiny global bootstrap pointer at `%APPDATA%\OmniClip RAG\bootstrap.json`,
+- the bootstrap pointer stores only `active_data_root` and is not treated as user data storage,
+- all real user data lives under the selected root:
+  - `<data_root>/config.json`
+  - `<data_root>/shared/runtime`
+  - `<data_root>/shared/cache/models`
+  - `<data_root>/shared/extensions_runtime/tika`
+  - `<data_root>/shared/logs`
+  - `<data_root>/workspaces/...`,
+- switching the data directory means switching to another whole environment,
+- the product does not automatically migrate runtime payloads, models, indexes, logs, or workspace data between roots,
+- users may copy environments manually, and the app only recognizes whichever root is currently selected,
+- runtime management, runtime health checks, and pending runtime update application must all follow the active data root instead of silently reading the historical default `%APPDATA%` config path,
+- `OMNICLIP_RUNTIME_ROOT` remains a developer-only override and must not redefine ordinary user behavior.
+
+Why: the old model already let most paths follow `data_root`, but the main semantic runtime still had side paths back into the default AppData tree. That made “change data directory” feel unified in the UI while still leaving hidden runtime truth elsewhere. The new rule is simpler and safer: one selected directory equals one whole OmniClip world.
+
+### 14. Missing or disconnected data roots must block startup instead of silently falling back
+
+Current unavailable-root policy:
+
+- if the active data root is missing, unreadable, unwritable, not a directory, or its backing drive is disconnected/locked, the app must treat that environment as unavailable,
+- GUI startup must enter an explicit `目录不可用` blocked state,
+- the GUI may only offer three actions in that state:
+  - `重试`
+  - `选择新的数据目录`
+  - `退出`,
+- headless / MCP / non-GUI entrypoints must fail clearly and immediately instead of silently falling back to a fresh default directory,
+- the product must never auto-create a new hidden environment in `%APPDATA%` just because the previously selected drive disappeared.
+
+Why: local-first software cannot quietly hop to a new storage root without destroying the user's mental model. If an encrypted disk is locked or an external drive is missing, the honest behavior is to say so and block, not to pretend the app started normally against a different world.
+
+### 15. Persistent file logging must start only after the active data root is resolved
+
+Current logging-bootstrap policy:
+
+- the process may install exception hooks early, but it must not initialize persistent file logging before the real active data root has been resolved and validated,
+- startup-time diagnostics before root resolution are limited to stderr / console output or temporary in-memory state,
+- file logs may only be created under `<active_data_root>/shared/logs` after the active root is known to be usable,
+- if the active data root is unavailable, startup may surface the error in UI or stderr, but it must not leave stray fallback log files under the default AppData tree.
+
+Why: if persistent logging starts too early, the app leaks partial startup traces into the wrong directory and undermines the whole “one selected directory equals one environment” rule.
 
 ### 13. Runtime is a shared sidecar, not an EXE-folder singleton
 
@@ -1412,3 +1489,42 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
   只有执行验证通过后才允许转绿。Why：这让“已安装”“探测通过”“真正执行过”不再被一个派生布尔值混掉。
 - 扩展来源目录行现在已经具备“已建索引 -> 先选 `扫描更新 / 重建`”的明确交互；行级进度同时显示阶段、当前文件、处理/跳过/错误/删除统计和关闭风险提示。Why：用户需要判断“它现在在干什么、能不能关”，而不只是看一个百分比条。
 - 扩展来源目录在空闲态会显示已索引摘要（文件数 / chunk 数 / 向量文档数）；这样即使当前没有任务，用户也能看到这行目录已经有历史索引结果。Why：避免来源目录表在任务结束后重新退回成“像什么都没做过”的状态。
+
+## 2026-03-20 数据目录 GUI 受限模式
+- 当前环境根 `active_data_root` 不可用时，GUI 不再走“阻断弹框循环”，而是进入 **主窗口受限模式**。Why：用户必须保留自救入口，但又不能让程序带着假环境继续跑。
+- 受限模式只保留 `开始 / 配置` 视图；`QueryWorkspace` 不构建，查询/运行时/工作区相关能力都不启动。Why：这不是 fallback 到空环境，也不是第二套恢复系统，而是最小修复壳。
+- 恢复入口固定在 `ConfigWorkspace` 的开始页顶部卡片，显示失效路径与具体原因，并只提供：
+  - `重试`
+  - `选择新的数据目录`
+  - `退出`
+  Why：目录不可用时，用户需要明确修复入口，但不应误以为其它功能仍能正常工作。
+- 恢复态里的数据目录切换仍沿用现有环境切换契约：**预检 -> 确认 -> 写 bootstrap -> 受控重启**。Why：环境切换继续坚持“重启切换，不做热迁移”这条低风险路线。
+- MCP / headless 保持原有策略：目录不可用时**明确失败退出**，不做 fallback。Why：只有 GUI 有可视化修复入口，非 GUI 入口必须继续坚持单根真相与可证明失败。
+- 为手测和回归增加了仓库内样本目录根：`.tmp/data_root_recovery_samples/`。Why：后续验证恢复态、切换到旧环境、新环境、坏路径时，不再依赖真实 `%APPDATA%` 环境。
+
+## 2026-03-20 数据目录恢复体验收口
+- `probe_data_root()` 现在必须把目录语义稳定分成五类：`existing / new / invalid_not_directory / invalid_not_environment / invalid_broken_environment`。Why：GUI 恢复态不能再把“空目录新环境”“普通非 OmniClip 目录”“损坏环境”都视觉上折叠成同一种“4 项未就绪”状态。
+- 判定规则已经收紧：只有**真正空目录**才允许落到 `new`；非空目录若没有完整环境证据，一律不能伪装成新环境；只要检测到部分 OmniClip 痕迹但不完整，就归到 `invalid_broken_environment`。Why：这避免用户误把损坏环境当成干净新环境继续使用。
+- GUI 不再向用户暴露底层 reason code，例如 `not-a-directory`、`not-an-omniclip-environment`。现在统一通过 `ui_i18n.data_root_reason_text()` / `data_root_probe_summary_text()` 映射成人类可读文案。Why：内部码适合调试，不适合环境切换产品化界面。
+- `ConfigWorkspace` 现在会在恢复态与待切换态里明确区分：
+  - 当前坏掉的 `active_data_root`
+  - 用户当前选择的目标目录
+  - 该目标是现有环境 / 新环境 / 非环境目录 / 损坏环境
+  Why：恢复壳的职责是帮助用户修目录，而不是让用户自己猜“为什么现在看起来像个空环境”。
+- “新手指引”下面那 4 条 readiness checklist 继续只表达**环境已成立后的工作准备状态**，不再承担“目录是否有效”的职责。Why：环境有效性与工作就绪度是两件不同的事，混在一起会误导用户。
+- `数据目录（可多选\切换）` 现在支持**移除已保存路径**，但移除动作只会从 `known_data_roots` 里忘记这条路径，不会删除磁盘目录；当前激活的数据目录不可移除。Why：测试路径、废弃路径和失效路径必须能从列表里清掉，但“忘记路径”和“删除环境”必须严格分开。
+- 恢复样本目录语义现已固定：
+  - `missing_root` = 缺失路径
+  - `invalid_root_file` = 非目录
+  - `broken_env_root` = 损坏环境
+  - `empty_root` = 新环境
+  - `valid_legacy_env` = 可恢复 legacy 环境
+  且样本根目录本身只是容器，不是可选环境。Why：这让 GUI 恢复态的手测和自动化回归都能围绕同一套可重复样本进行。
+
+## 2026-03-20 GUI 收官补丁：数据目录移除、查询台真折叠、图标统一
+- 数据目录切换确认框现在固定为三个动作：`切换并重启 / 移除此目录 / 取消`。Why：旧的 checkbox 语义不清，用户需要明确区分“切换到这个目录”和“只把这个目录从已保存列表里忘记”。
+- `移除目录` 的语义继续固定为“只从 `known_data_roots` 忘记路径，不删除磁盘目录”。Why：环境列表管理和磁盘数据管理必须严格分开，避免误删用户环境。
+- 查询台折叠现在改成“真收纳”：折叠后只保留搜索框、`查询` 按钮和内联 `展开` 按钮，标题区、提示区、状态区、阈值/来源/runtime 细节和底部说明区全部隐藏，并同步压缩 splitter 高度。Why：之前只隐藏文字但保留卡片高度，不能真正解决查询区占空间的问题。
+- 查询台折叠按钮不再使用悬浮覆盖式布局，而是放进查询核心行并继续持久化 `qt_query_controls_collapsed`。Why：覆盖式按钮在窄窗口下容易错位，内联结构更稳。
+- 桌面图标资产现在以 `icon/image.png` 为唯一源图，`resources/app_icon.png`、`resources/app_icon_32.png`、`resources/app_icon.ico` 只保留为派生交付资源。Why：运行时窗口图标、资源图标和打包 EXE 图标必须统一，不再允许多套旧图标真相并存。
+- Windows 图标链现在同时绑定 `AppUserModelID`、`QApplication` 级图标、启动窗图标、主窗口图标和 frozen EXE 图标，并优先使用 `.ico`。Why：只换资源图片不足以保证任务栏图标更新，Windows 还依赖进程级身份与窗口级图标绑定链。

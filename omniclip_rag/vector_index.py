@@ -21,7 +21,8 @@ from typing import Callable, Protocol
 
 from .build_control import BuildPerformanceController
 from .canary_backend import CANARY_VECTOR_MODEL_ID, encode_batch_tensors, is_canary_vector_model
-from .config import AppConfig, DataPaths, default_data_root
+from .config import AppConfig, DataPaths, build_data_paths
+from .data_root_bootstrap import resolve_active_data_root
 from .errors import BuildCancelledError, RuntimeDependencyError
 from .process_utils import run_hidden
 from .runtime_layout import (
@@ -1493,24 +1494,8 @@ def _preferred_runtime_dir_path() -> Path:
     override = str(os.environ.get('OMNICLIP_RUNTIME_ROOT') or '').strip()
     if override:
         return Path(override).expanduser().resolve()
-    base_root = default_data_root().resolve()
-    config_path = base_root / 'config.json'
-    try:
-        config_exists = config_path.exists()
-    except PermissionError:
-        config_exists = False
-    if config_exists:
-        try:
-            payload = json.loads(config_path.read_text(encoding='utf-8'))
-        except Exception:
-            payload = {}
-        configured_root = str(payload.get('data_root') or '').strip()
-        if configured_root:
-            try:
-                return Path(configured_root).expanduser().resolve() / 'shared' / 'runtime'
-            except Exception:
-                pass
-    return base_root / 'shared' / 'runtime'
+    resolved = resolve_active_data_root()
+    return build_data_paths(resolved.path).shared_root / 'runtime'
 
 
 def _runtime_candidate_sort_key(path: Path) -> tuple[int, tuple[int, ...], float]:
@@ -2084,29 +2069,7 @@ def inspect_runtime_environment(runtime_dir: Path | None = None) -> dict[str, ob
 
 
 def _discover_active_runtime_dir() -> Path:
-    preferred_runtime = _preferred_runtime_dir_path()
-    candidates = [preferred_runtime, *_legacy_runtime_candidate_dirs()]
-    inspected: list[tuple[Path, dict[str, object]]] = []
-    seen: set[Path] = set()
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except Exception:
-            resolved = candidate
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        inspected.append((candidate, inspect_runtime_environment(candidate)))
-    for candidate, state in inspected:
-        if state.get('runtime_complete'):
-            return candidate
-    for candidate, state in inspected:
-        if state.get('runtime_exists') and state.get('runtime_has_content'):
-            return candidate
-    for candidate, state in inspected:
-        if state.get('runtime_exists'):
-            return candidate
-    return preferred_runtime
+    return _preferred_runtime_dir_path()
 
 
 def _runtime_dir_path() -> Path:

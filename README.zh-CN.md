@@ -6,9 +6,9 @@
 （V0.3.3版后支持1290种格式，V0.4.1版开始提供 MCP Registry / MCPB 发布线）
 <img alt="image" src="https://github.com/user-attachments/assets/48321106-26fd-4b18-a4e4-df7be106bd92" />
 
-[![Version](https://img.shields.io/badge/version-v0.4.1-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.2-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
 
-[English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md)
+[English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md) | [官网](https://msjsc001.github.io/OmniClip-RAG/)
 
 </div>
 <br/>
@@ -16,7 +16,7 @@
 > **MCP 快速入口**
 >
 > 如果你想把方寸引接到 Jan.ai、OpenClaw、Claude Desktop、Cursor 或其他支持 MCP 的客户端，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
-> 从 `v0.4.1` 起，MCP 线除了继续提供手动 ZIP 外，也开始提供面向官方 MCP Registry / MCPB 客户端的标准发布物。
+> 从 `v0.4.2` 起，MCP 线除了继续提供手动 ZIP 外，也同步跟上了新的环境根目录、恢复模式与共享启动链，继续提供面向官方 MCP Registry / MCPB 客户端的标准发布物。
 
  **它是什么？** 它是本地 Markdown 语义搜索软件、本地 RAG 知识库，并且现在具备只读的 MCP 检索接口。
   **怎么用？** 你只需要打开程序输入你的 Markdown 笔记路径再点建库，就能搭建好你的本地 RAG 知识库，建库后你就可以用它来语义搜索你的笔记，搜索的内容你可以复制发给任意 AI 进行深度研讨，也可以供自己深度研读。 
@@ -147,6 +147,18 @@
 
 ---
 
+## 🔄 V0.4.2 重点更新
+
+`v0.4.2` 的重点，是把最近完成的一系列“底层收口”真正落成用户可以感知的稳定产品行为：数据目录不再只是保存路径，而是当前环境的唯一根；GUI 在目录损坏时也能进入恢复壳；桌面端细节也同步收紧。
+
+- 🗂 **数据目录升级为当前环境根目录**：配置、日志、缓存、模型、主 Runtime、Tika Runtime 与工作区状态，现在统一跟随当前激活的数据目录，不再让 GUI、Runtime、启动链各自猜真相。
+- 🚧 **坏目录不再把用户挡在门外**：当前数据目录不可用时，GUI 会进入受限恢复模式，用人话告诉你发生了什么，并允许你重试或切换到另一个已保存环境。
+- 🔁 **已保存数据目录真正变成环境切换器**：现在可以在多个环境根之间切换、清理坏路径列表，并通过受控重启稳定完成整套环境切换，而不是半热切换出一堆残留状态。
+- 🧰 **桌面体验补齐一轮收口**：查询台支持紧凑折叠，配置页增加经典主题，图标链统一到新的应用图标，GUI 的可用性和一致性都比上一版更完整。
+- 🌐 **官网已正式上线**：GitHub Pages 官网现在可以直接访问：[msjsc001.github.io/OmniClip-RAG](https://msjsc001.github.io/OmniClip-RAG/)
+
+---
+
 ## 🔄 V0.4.1 重点更新
 
 `v0.4.1` 的重点，不是再造新的查询后端，而是把已经落地的 MCP 线真正收口成可被官方 MCP Registry 消费的标准发布物。
@@ -168,10 +180,10 @@
 
 `OmniClip RAG MCP Server` 的作用，是把方寸引现有的本地检索能力，通过标准 MCP 协议提供给支持 MCP 的 AI 客户端使用。
 
-从 `v0.4.1` 开始，MCP 这条线会同时提供两种分发形态：
+从 `v0.4.2` 开始，MCP 这条线会同时提供两种分发形态：
 
-- `OmniClipRAG-MCP-v0.4.1-win64.zip`：给手动配置 `stdio` 的用户
-- `omniclip-rag-mcp-win-x64-v0.4.1.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
+- `OmniClipRAG-MCP-v0.4.2-win64.zip`：给手动配置 `stdio` 的用户
+- `omniclip-rag-mcp-win-x64-v0.4.2.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
 
 你可以把它理解成：
 
@@ -188,12 +200,12 @@
 
 ### 官方生态路线（Registry / MCPB）
 
-既然 `v0.4.1` 已经上架官方 MCP Registry，后续支持官方 Registry / MCPB 安装流的标准客户端，可以优先走这条更贴近官方生态的接入方式。
+方寸引从 `v0.4.1` 起就保持一条面向官方 MCP Registry / MCPB 的标准发布线；后续支持官方 Registry / MCPB 安装流的标准客户端，可以优先走这条更贴近官方生态的接入方式。
 
 - 如果客户端已经支持从 Registry 发现 MCP Server，请直接搜索或添加：
   - `io.github.msjsc001/omniclip-rag-mcp`
 - 如果客户端支持官方 MCPB 安装流，请优先使用 Release 中的：
-  - `omniclip-rag-mcp-win-x64-v0.4.1.mcpb`
+- `omniclip-rag-mcp-win-x64-v0.4.2.mcpb`
 - 更详细的官方发布线、MCPB 与 ZIP 的区别、以及不同客户端的接入说明，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
 
 ### 传统手动路线（Jan.ai / OpenClaw）
@@ -213,7 +225,7 @@
 命令路径示例：
 
 ```text
-D:\软件编写\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.1\OmniClipRAG-MCP.exe
+D:\软件编写\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.2\OmniClipRAG-MCP.exe
 ```
 
 大多数用户不需要额外填写环境变量。只有你把 Runtime 或数据目录手动改到了别处，才需要进一步自定义。
@@ -233,7 +245,7 @@ OpenClaw 的接法和 Jan.ai 不太一样。它通常不是在图形界面里逐
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.1\\OmniClipRAG-MCP.exe",
+      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.2\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -371,6 +383,8 @@ python launcher_mcp.py --mcp-selfcheck
 - **watchdog**：文件监听能力基础。
 - **PyInstaller**：Windows 绿色版打包链。
 - **pytest**：自动化测试主框架。
+- **ONNX Runtime**：CPU 优先的本地推理执行层与便携运行时闭环。
+- **MCP Python SDK / Model Context Protocol**：官方 MCP Server 协议实现与发布链基础。
 
 感谢这些项目及其维护者长期的开放协作与工程投入。
 
@@ -403,4 +417,3 @@ python launcher_mcp.py --mcp-selfcheck
 <div align="center">
   <b>方寸之间 · 连接无穷</b>
 </div>
-

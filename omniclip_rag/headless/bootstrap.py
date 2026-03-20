@@ -9,12 +9,14 @@ from ..app_logging import configure_file_logging
 from ..config import (
     AppConfig,
     DataPaths,
-    ensure_data_paths,
+    build_data_paths,
     load_config,
+    materialize_data_directories,
     normalize_ui_scale_percent,
     normalize_ui_theme,
     normalize_vault_path,
 )
+from ..data_root_bootstrap import resolve_and_validate_active_data_root
 from ..runtime_layout import apply_pending_runtime_updates
 from ..service import OmniClipService
 from ..ui_i18n import normalize_language
@@ -48,10 +50,15 @@ def startup_runtime_dir() -> Path:
     return Path(__file__).resolve().parents[2] / 'runtime'
 
 
-def apply_runtime_layout_if_needed() -> list[str]:
+def _resolved_data_paths(*, data_root: str | None = None, vault_path: str | None = None) -> DataPaths:
+    resolved = resolve_and_validate_active_data_root(data_root)
+    return materialize_data_directories(build_data_paths(resolved.path, vault_path=vault_path))
+
+
+def apply_runtime_layout_if_needed(explicit_data_root: str | None = None) -> list[str]:
     if not getattr(sys, 'frozen', False):
         return []
-    runtime_dir = startup_runtime_dir()
+    runtime_dir = _resolved_data_paths(data_root=explicit_data_root).shared_root / 'runtime'
     try:
         return list(apply_pending_runtime_updates(runtime_dir))
     except OSError as exc:
@@ -60,15 +67,14 @@ def apply_runtime_layout_if_needed() -> list[str]:
 
 
 def load_runtime_bundle(*, data_root: str | None = None, vault_path: str | None = None) -> RuntimeBundle:
-    global_paths = ensure_data_paths(str(data_root).strip() if str(data_root or '').strip() else None)
+    global_paths = _resolved_data_paths(data_root=data_root)
     loaded = load_config(global_paths)
     if loaded is None:
         loaded = AppConfig(vault_path='', data_root=str(global_paths.global_root))
 
     override_vault = normalize_vault_path(vault_path)
     active_vault = override_vault or normalize_vault_path(loaded.vault_path)
-    active_data_root = str(data_root or loaded.data_root or global_paths.global_root).strip() or str(global_paths.global_root)
-    paths = ensure_data_paths(active_data_root, active_vault or None)
+    paths = _resolved_data_paths(data_root=str(global_paths.global_root), vault_path=active_vault or None)
 
     language_code = normalize_language(loaded.ui_language)
     theme_code = normalize_ui_theme(loaded.ui_theme)
@@ -98,7 +104,7 @@ def create_headless_context(
     vault_path: str | None = None,
     apply_runtime_updates: bool = True,
 ) -> HeadlessContext:
-    applied_components = tuple(apply_runtime_layout_if_needed()) if apply_runtime_updates else ()
+    applied_components = tuple(apply_runtime_layout_if_needed(data_root)) if apply_runtime_updates else ()
     bundle = load_runtime_bundle(data_root=data_root, vault_path=vault_path)
     configure_file_logging(bundle.paths, bundle.config)
     service = OmniClipService(bundle.config, bundle.paths)

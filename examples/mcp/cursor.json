@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "omniclip": {
-      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.1\\OmniClipRAG-MCP.exe",
+      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.2\\OmniClipRAG-MCP.exe",
       "args": [],
       "env": {}
     }

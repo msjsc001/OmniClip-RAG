@@ -8,7 +8,7 @@ import threading
 import sys
 from pathlib import Path
 
-from .config import AppConfig, DataPaths, DEFAULT_LOG_FILE_SIZE_MB, ensure_data_paths, normalize_log_file_size_mb
+from .config import AppConfig, DataPaths, DEFAULT_LOG_FILE_SIZE_MB, normalize_log_file_size_mb
 
 
 LOG_FILE_NAME = 'omniclip.log'
@@ -60,18 +60,11 @@ def configure_file_logging(paths: DataPaths, config: AppConfig | None = None) ->
 
 
 def install_exception_logging(paths: DataPaths | None = None, config: AppConfig | None = None) -> logging.Logger:
-    resolved_paths = paths
-    if resolved_paths is None:
-        try:
-            resolved_paths = ensure_data_paths()
-        except Exception:
-            resolved_paths = None
-    if resolved_paths is None:
-        return logging.getLogger(_LOGGER_NAME)
-    resolved_config = config or AppConfig(vault_path='', data_root=str(resolved_paths.global_root))
-    logger = configure_file_logging(resolved_paths, resolved_config)
     _install_exception_hooks()
-    return logger
+    if paths is None:
+        return logging.getLogger(_LOGGER_NAME)
+    resolved_config = config or AppConfig(vault_path='', data_root=str(paths.global_root))
+    return configure_file_logging(paths, resolved_config)
 
 
 def clear_log_files(paths: DataPaths, config: AppConfig | None = None) -> None:

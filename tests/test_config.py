@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import shutil
 import unittest
 from unittest.mock import patch
@@ -7,14 +8,35 @@ from omniclip_rag import config as config_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FALLBACK_ROOT = ROOT / '.tmp' / 'config_fallback'
-TEMP_FALLBACK_ROOT = ROOT / '.tmp' / 'config_temp_fallback'
 CUSTOM_ROOT = ROOT / '.tmp' / 'config_custom'
 
 
 class ConfigTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._env = patcher = patch.dict(
+            os.environ,
+            {
+                'APPDATA': str((ROOT / '.tmp' / 'config_appdata').resolve()),
+                'LOCALAPPDATA': str((ROOT / '.tmp' / 'config_localappdata').resolve()),
+                'TEMP': str((ROOT / '.tmp' / 'config_temp').resolve()),
+                'TMP': str((ROOT / '.tmp' / 'config_temp').resolve()),
+                'USERPROFILE': str((ROOT / '.tmp' / 'config_profile').resolve()),
+                'HOME': str((ROOT / '.tmp' / 'config_profile').resolve()),
+                'OMNICLIP_STRICT_TEST_ROOT': str((ROOT / '.tmp').resolve()),
+            },
+            clear=False,
+        )
+        patcher.start()
+
     def tearDown(self) -> None:
-        for path in (FALLBACK_ROOT, TEMP_FALLBACK_ROOT, CUSTOM_ROOT):
+        self._env.stop()
+        for path in (
+            ROOT / '.tmp' / 'config_appdata',
+            ROOT / '.tmp' / 'config_localappdata',
+            ROOT / '.tmp' / 'config_temp',
+            ROOT / '.tmp' / 'config_profile',
+            CUSTOM_ROOT,
+        ):
             if path.exists():
                 shutil.rmtree(path)
 
@@ -43,8 +65,8 @@ class ConfigTests(unittest.TestCase):
 
     def test_legacy_workspace_cache_and_logs_migrate_to_shared_area(self) -> None:
         vault = ROOT / 'vault_migrate'
-        workspace_id = config_module.workspace_id_for_vault(vault)
-        legacy_workspace = CUSTOM_ROOT / 'workspaces' / workspace_id
+        initial_paths = config_module.ensure_data_paths(str(CUSTOM_ROOT), str(vault))
+        legacy_workspace = initial_paths.root
         legacy_cache_file = legacy_workspace / 'cache' / 'models' / 'stub.bin'
         legacy_log_file = legacy_workspace / 'logs' / 'run.log'
         legacy_cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -59,51 +81,38 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse((legacy_workspace / 'cache').exists())
         self.assertFalse((legacy_workspace / 'logs').exists())
 
-    def test_falls_back_to_local_appdata_when_default_root_is_not_writable(self) -> None:
-        blocked = Path('blocked_root')
-        local_candidate = Path('local_candidate')
-        temp_candidate = Path('temp_candidate')
-        original = config_module._create_data_paths
+    def test_default_data_root_uses_rag_default_suffix(self) -> None:
+        self.assertEqual(
+            config_module.default_data_root(),
+            (ROOT / '.tmp' / 'config_appdata' / 'OmniClip RAG-default').resolve(),
+        )
 
-        def side_effect(root: Path, vault_path=None):
-            if root == blocked:
-                raise PermissionError('denied')
-            if root == local_candidate:
-                return original(FALLBACK_ROOT.resolve(), vault_path=vault_path)
-            if root == temp_candidate:
-                raise AssertionError('temp fallback should not be used when local appdata is writable')
-            return original(root, vault_path=vault_path)
+    def test_probe_data_root_distinguishes_new_invalid_and_existing_states(self) -> None:
+        empty_root = CUSTOM_ROOT / 'empty_root'
+        empty_root.mkdir(parents=True, exist_ok=True)
+        file_root = CUSTOM_ROOT / 'file_root'
+        file_root.parent.mkdir(parents=True, exist_ok=True)
+        file_root.write_text('not a directory', encoding='utf-8')
+        plain_root = CUSTOM_ROOT / 'plain_root'
+        plain_root.mkdir(parents=True, exist_ok=True)
+        (plain_root / 'notes.txt').write_text('plain directory', encoding='utf-8')
+        broken_root = CUSTOM_ROOT / 'broken_root'
+        broken_root.mkdir(parents=True, exist_ok=True)
+        (broken_root / 'shared').mkdir(parents=True, exist_ok=True)
+        (broken_root / 'config.json').write_text('{}', encoding='utf-8')
+        legacy_root = CUSTOM_ROOT / 'legacy_root'
+        legacy_root.mkdir(parents=True, exist_ok=True)
+        (legacy_root / 'shared').mkdir(parents=True, exist_ok=True)
+        (legacy_root / 'workspaces').mkdir(parents=True, exist_ok=True)
+        (legacy_root / 'config.json').write_text('{}', encoding='utf-8')
 
-        with patch.object(config_module, 'default_data_root', return_value=blocked), \
-             patch.object(config_module, 'default_local_data_root', return_value=local_candidate), \
-             patch.object(config_module, 'temp_data_root', return_value=temp_candidate), \
-             patch.object(config_module, '_create_data_paths', side_effect=side_effect):
-            paths = config_module.ensure_data_paths()
-
-        self.assertEqual(paths.global_root, FALLBACK_ROOT.resolve())
-        self.assertTrue(paths.config_file.parent.exists())
-
-    def test_falls_back_to_temp_when_appdata_roots_are_not_writable(self) -> None:
-        blocked_roaming = Path('blocked_roaming')
-        blocked_local = Path('blocked_local')
-        temp_candidate = Path('temp_candidate')
-        original = config_module._create_data_paths
-
-        def side_effect(root: Path, vault_path=None):
-            if root in {blocked_roaming, blocked_local}:
-                raise PermissionError('denied')
-            if root == temp_candidate:
-                return original(TEMP_FALLBACK_ROOT.resolve(), vault_path=vault_path)
-            return original(root, vault_path=vault_path)
-
-        with patch.object(config_module, 'default_data_root', return_value=blocked_roaming), \
-             patch.object(config_module, 'default_local_data_root', return_value=blocked_local), \
-             patch.object(config_module, 'temp_data_root', return_value=temp_candidate), \
-             patch.object(config_module, '_create_data_paths', side_effect=side_effect):
-            paths = config_module.ensure_data_paths()
-
-        self.assertEqual(paths.global_root, TEMP_FALLBACK_ROOT.resolve())
-        self.assertTrue(paths.config_file.parent.exists())
+        self.assertEqual(config_module.probe_data_root(empty_root, allow_create=True).state, 'new')
+        self.assertEqual(config_module.probe_data_root(file_root, allow_create=True).state, 'invalid_not_directory')
+        self.assertEqual(config_module.probe_data_root(plain_root, allow_create=True).state, 'invalid_not_environment')
+        self.assertEqual(config_module.probe_data_root(broken_root, allow_create=True).state, 'invalid_broken_environment')
+        legacy_probe = config_module.probe_data_root(legacy_root, allow_create=True)
+        self.assertEqual(legacy_probe.state, 'existing')
+        self.assertTrue(legacy_probe.legacy_environment)
 
     def test_ui_preferences_are_normalized_when_saved(self) -> None:
         vault = ROOT / 'vault_ui'
