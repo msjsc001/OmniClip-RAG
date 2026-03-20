@@ -2,37 +2,66 @@
 
 # 🌌 方寸引 · OmniClip RAG
 
-**方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。**
-（V0.3.3版后支持1290种格式，V0.4.1版开始提供 MCP Registry / MCPB 发布线）
-<img alt="image" src="https://github.com/user-attachments/assets/48321106-26fd-4b18-a4e4-df7be106bd92" />
+<p align="center"><strong>方寸之间，牵引万卷。你的私人笔记与满天繁星（AI）之间的静默引力场。</strong></p>
+<p align="center">（V0.3.3版后支持1290种格式，V0.4.1版开始提供 MCP Registry / MCPB 发布线）</p>
 
-[![Version](https://img.shields.io/badge/version-v0.4.2-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-首次使用建议) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+<img alt="方寸引宇宙" src="https://github.com/user-attachments/assets/48321106-26fd-4b18-a4e4-df7be106bd92" />
+
+<br/>
+
+[![Version](https://img.shields.io/badge/version-v0.4.2-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md) | [官网](https://msjsc001.github.io/OmniClip-RAG/)
 
-</div>
 <br/>
 
+<details>
+<summary>📖 <b>目录 / Table of Contents</b> (点击展开)</summary>
+
+- [引言与快速入口](#-mcp-快速入口)
+- [核心理念与无价边界](#-核心理念与无价边界)
+- [核心特性](#-核心特性)
+- [快速上手与工作流](#-快速上手与工作流)
+- [MCP 怎么用](#-mcp-怎么用)
+- [高阶心智模型与终极工作流](#-高阶心智模型与终极工作流)
+- [极简克制的系统架构](#-极简克制的系统架构)
+- [极客与开发者入口点](#-极客与开发者入口点)
+- [近期版本动态](#-近期重点版本回顾)
+- [相关文档导航](#-相关文档导航)
+- [开源致谢与许可证](#-开源致谢)
+
+</details>
+
+</div>
+
+<br/>
+
+> [!TIP]
 > **MCP 快速入口**
 >
 > 如果你想把方寸引接到 Jan.ai、OpenClaw、Claude Desktop、Cursor 或其他支持 MCP 的客户端，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
 > 从 `v0.4.2` 起，MCP 线除了继续提供手动 ZIP 外，也同步跟上了新的环境根目录、恢复模式与共享启动链，继续提供面向官方 MCP Registry / MCPB 客户端的标准发布物。
 
- **它是什么？** 它是本地 Markdown 语义搜索软件、本地 RAG 知识库，并且现在具备只读的 MCP 检索接口。
-  **怎么用？** 你只需要打开程序输入你的 Markdown 笔记路径再点建库，就能搭建好你的本地 RAG 知识库，建库后你就可以用它来语义搜索你的笔记，搜索的内容你可以复制发给任意 AI 进行深度研讨，也可以供自己深度研读。 
-  **好处是什么？** 无须把你的任何资料上传，也不会被任何软件捆绑，它无须任何复杂的配置，搭建，且它具备热更新能力，新笔记写入会自动进入RAG库！新笔记也可以是你和AI的历史对话整理，这样变相的为AI提供了永久记忆。
+---
 
+**它是什么？** 它是本地 Markdown 语义搜索软件、本地 RAG 知识库，并且现在具备只读的 MCP 检索接口。
+
+**怎么用？** 你只需要打开程序输入你的 Markdown 笔记路径再点建库，就能搭建好你的本地 RAG 知识库，建库后你就可以用它来语义搜索你的笔记，搜索的内容你可以复制发给任意 AI 进行深度研讨，也可以供自己深度研读。
+
+**好处是什么？** 无须把你的任何资料上传，也不会被任何软件捆绑，它无须任何复杂的配置，搭建，且它具备热更新能力，新笔记写入会自动进入RAG库！新笔记也可以是你和AI的历史对话整理，这样变相的为AI提供了永久记忆。
+
+> [!NOTE]
 > **引言：AI 时代，我们正在交出我们的“赛博底裤”！**
+> 
 > **方寸引(OC-RAG) 独创性的做到了 既要、又要、还要！**
->
-> **既要**:我们的 Markdown 笔记还是我们自己的。
-> **又要**:任意 AI 在我们允许且可监督的范围深度参与其中，笔记库与AI深度解藕且又可深度交互。
-> **还要**:开箱即用，无任何繁琐步骤，且具备稳健的热更新能力，新笔记写入会自动进入RAG库！新笔记也可以是你和AI的历史对话整理，这样变相的为AI提供了永久记忆。
-
+> 
+> - **既要**:我们的 Markdown 笔记还是我们自己的。
+> - **又要**:任意 AI 在我们允许且可监督的范围深度参与其中，笔记库与AI深度解藕且又可深度交互。
+> - **还要**:开箱即用，无任何繁琐步骤，且具备稳健的热更新能力，新笔记写入会自动进入RAG库！新笔记也可以是你和AI的历史对话整理，这样变相的为AI提供了永久记忆。
+> 
 > 在 AI 时代，我们越依赖大模型，交出的个人隐私就越多。市面上大多知识库RAG类工具，要么配置极为繁琐搞的像服务器 Docker、Python 环境搞半天，要么是一套复杂的课程要我们付出太多的时间成本，要么就是非得强行的捆绑一个臃肿的聊天界面，要么笔记就需要完全上传才能使用，都在试图把你的数据锁死在它的产品里，让你永远离不开它们。
-
+> 
 > 为了让我的笔记和思想真正属于自己，我花时间思考对比了大量的可能方案，最终确定下来，并手搓了这个纯本地的语义检索工具——**方寸引（OmniClip RAG）**，并把它的核心功能做了极致的强化，让它**既**能跑在大多电脑上的**又**同时也具备较专业的水准。它就像一道本地知识防火墙，让你可以有所保留地让 AI 深度读取你的“第二大脑”，又不用担心数据被任何云端或本地软件绑架。
-
 
 <br/>
 
@@ -42,43 +71,74 @@
 
 <br/>
 
+---
+
 ## 🎯 核心理念与无价边界
 
 **方寸引** 是一个专为 Markdown 笔记生态打造的、极度解耦的“隐私防火墙”与“手动端本地 RAG 搜索引擎”（兼容 Logseq、Obsidian、Typora、MarkText、Zettlr 等任意纯文本层工具）。
 
 它只做一件事：在本地基于强大语义向量引擎（`BAAI/bge-m3` 等）和结构化索引为你检索上万页笔记，把高质量的相关片段精美打包——让你手动复制给任意外部顶配级 AI（ChatGPT、Claude、Kimi 等）进行深度干涉研讨。换句话说，只要你的素材是 md 格式，这个引擎就可以视为你的万能“第二大脑永久记忆提取器”。
 
-**为什么我要做成这样？（核心设计理念）**
+<details>
+<summary><b>👉 点击查看：为什么我要做成这样？（核心设计理念）</b></summary>
+
+<br/>
 
 - **绝对的隐私隔离**：AI 工具只能通过你在本地监督下主动打包好并贴过去的信息作为锚点推理上下文。它们无权访问、更不能“云打包”你其余任何无关笔记历史。你的绝对隐私主权在此不可侵犯。
 - **高解耦的“脑机接口”**：坚决不捆绑任何 AI 聊天界面。今天 Claude 代码能力强你粘给 Claude 调试，明天 GPT-5 大幅升级你抛给 GPT-5 润色。工具和笔记本身高度生发物理隔断，你不需要做任何额外配置绑定。
 - **追逐“强林迪效应”**：我希望这是一座很久都不会过时的记忆灯塔。世界变幻再快，只要纯文本与 Markdown 格式不变，你就能随时凭借这套轻巧干净的检索引擎，捞起你甚至早已忘记的思想沉淀。
 
+</details>
+
+<br/>
+
 ---
 
-## 💡 高阶心智模型与终极工作流
+## ✨ 核心特性
 
-> **极客心智**：不要把方寸引当“另一个 AI 软件”，而要把它当成你和任意顶尖 AI 之间的**“本地知识路由器 / 证据分发器”**。AI 不仅仅是在陪你聊天，而是在**基于你的长期沉淀做推理**。
+方寸引不靠花哨界面取胜，它真正下功夫的地方是：让你的本地资料在**不上传、不锁定、不折腾环境**的前提下，仍然能获得靠谱、可解释、可长期维护的语义检索能力。
 
-站在架构与知识管理的视角，我们强烈推荐以下几种能产生真实杠杆效应（Leverage）的高阶用法：
+<table width="100%">
+  <tr>
+    <td width="50%" valign="top">
+      <ul>
+        <li><b>本地优先，资料不出门</b>：默认把索引、日志、缓存和运行时都在 <code>%APPDATA%\OmniClip RAG</code> 一侧管理，不污染笔记库原文件，也不要求把资料上传云端。</li>
+        <li><b>Markdown / Logseq 深度理解</b>：理解 Logseq 风格的页面属性、块属性、块引用和层级结构，检索结果更贴近真实上下文。</li>
+        <li><b>真正可用的混合检索</b>：不是简单关键字搜索，而是把 <code>SQLite + FTS5 + 结构得分 + LanceDB</code> 组合，既能抓原词，也能抓语义。</li>
+        <li><b>扩展格式物理隔离</b>：Markdown、PDF、Tika 扩展格式各自用独立索引运行，互不污染，再由统一层标注来源。</li>
+        <li><b>查询结果可解释、可追踪</b>：结果带来源标签、相关性评分和最近状态提示，方便你判断“为什么命中它”，而非一堆黑盒。</li>
+      </ul>
+    </td>
+    <td width="50%" valign="top">
+      <ul>
+        <li><b>Tika 全格式大目录暴露</b>：当前已支持 <b>1290</b> 种扩展格式；推荐、未知、未测试分层提示，方便按风险逐步启用。</li>
+        <li><b>发布版轻量，Runtime 独立管理</b>：EXE 包不强塞极大体积 AI 运行栈；支持共享 AppData 根与跨版本复用组件。</li>
+        <li><b>建库跑得稳，且讲清楚在做什么</b>：预检、全量建库、增量监听、自动安装等阶段都会给出进度和异常原因，拒绝盲等。</li>
+        <li><b>出错时优先降级，不优先崩溃</b>：对坏文件、空文件、极端大文件、显存不足等情况都有隔离或重试策略，保证主进程可用。</li>
+        <li><b>标准 MCP Server 接口</b>：<code>OmniClipRAG-MCP.exe</code> 把检索能力以只读 MCP 的方式暴露，支持 MCP 的 AI 获取极客接入。</li>
+      </ul>
+    </td>
+  </tr>
+</table>
 
-### 1. 跨模型认知套利流 (Cross-Model Cognitive Arbitrage)
-将方寸引作为“单一事实来源（SSOT）”。既然 UI 物理隔离，你可以把同一份检索出的高浓度上下文包（Context Pack）**并行投喂**给不同的引擎：
-让 Claude 3.5 Sonnet 基于切片写核心代码，同时让 O1 做边界漏洞推演，再推给专注长文本的模型写复盘报告。利用本地检索引擎的定力，对云端大模型进行“资源套利”，规避单一模型的思维盲区。
+<br/>
 
-### 2. 被动式情报集散中心 & 证据层隔离
-彻底榨干对 PDF 与 Tika（`1290` 种格式）的支持。把 Markdown 当成你的**“认知主链”（存放自己的理解与判断）**，把 PDF / EML / DOCX 等当成**“原始资料证据仓”**。
-日常收集资料无需整理，只需扔进本地对应目录。需要查证时，有意识地区分：想看“我怎么想的”搜 Markdown；想看“证据怎么说”搜 PDF / Tika。通过 MCP 对 AI 说：*“检索最近一季度的研报证据，并与我的思考笔记交叉比对”*，你的电脑秒变离线私域参谋部。
+<div align="center">
+  <table width="100%" border="0">
+    <tr>
+      <td width="50%" align="center">
+        <img alt="配置与状态" src="https://github.com/user-attachments/assets/d75af49d-54c2-403b-ba9a-476b6f637fcb" width="100%" /><br/>
+        <em>⚙️ 运行配置与状态把控</em>
+      </td>
+      <td width="50%" align="center">
+        <img alt="深色模式体验" src="https://github.com/user-attachments/assets/b9952b8f-4535-4d2b-843e-a23fca5c41ca" width="100%" /><br/>
+        <em>🌙 极其沉浸的深色工作模式</em>
+      </td>
+    </tr>
+  </table>
+</div>
 
-### 3. 项目上下文压缩器与“影子脑暴”网络
-针对复杂长线项目，把需求、方案、废弃草稿、会议记录全部沉淀。推进卡住时，不要自己翻找，立刻盲搜模糊的“判断句”或“冲突对”（如：`这个项目当初为什么这么定` 或 `开发效率 和 绝对隐私`）。
-利用向量引擎的“模糊语义关联”，它可能把你两年前写的某段随笔与当下的项目架构匹配在一起，瞬间催生真正的“意外灵感（Serendipity）”，大幅降低“重复思考已经想过的东西”的内耗。
-
-### 4. 自演化的“永久记忆海马体”与绝对隐私防火墙
-遇到极其实用的棘手问题，让某个 AI 推演出绝佳方案后，立刻将其摘要为一份 Markdown 存入本地 Vault。毫秒级热重载机制会让它瞬间进入 LanceDB 和 FTS5 检索池。
-未来，这等同于物理层面为任何接入的 AI 挂载了一个连续增量、私有且受完全监督的“永久记忆”。资料长期留本地，**你交出的只是“最小必要上下文”**，绝不上传金矿本身，实现最极致的隐私安全。
-
-> 🌟 **终极建议**：写长文、深聊或重大决策前 —— **先搜，不先聊**。方寸引最强的用法，不是替你思考，而是把你已经思考过、看过、积累过的东西，以刚好够用的方式重新交还给你和当前的顶级 AI。
+<br/>
 
 ---
 
@@ -106,7 +166,120 @@
   <img alt="智能检索与预览" src="https://github.com/user-attachments/assets/84fe1bd6-5dcf-40c0-89e7-4fc8b393fd50" width="800" />
 </div>
 
-### 💡 附：与 AI 对话时的推荐提示词
+<br/>
+
+---
+
+## 🔌 MCP 怎么用
+
+`OmniClip RAG MCP Server` 的作用，是把方寸引现有的本地检索能力，通过标准 MCP 协议提供给支持 MCP 的 AI 客户端使用。
+
+你可以把它理解成：
+- 桌面版 `OmniClipRAG.exe` 负责正常建库、维护和可视化使用
+- `OmniClipRAG-MCP.exe` 负责安静地在后台给 AI 提供“只读搜索接口”
+
+从 `v0.4.2` 开始，MCP 这条线会同时提供两种分发形态：
+- `OmniClipRAG-MCP-v0.4.2-win64.zip`：给手动配置 `stdio` 的用户
+- `omniclip-rag-mcp-win-x64-v0.4.2.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
+
+> [!CAUTION]
+> **使用前要先做什么？**
+> MCP 版只是给 AI 调用的无头接口，不负责建库。你**必须先用桌面版把你的知识库建好**。
+> 平时建库、重建、维护索引，还是用桌面版完成。如果知识库还没建好，MCP 不会假装可用，而是会明确返回类似 `index_not_ready` 的提示。
+
+<details>
+<summary><b>🛠️ 展开查看：官方生态路线与传统手动接入指引</b></summary>
+
+<br/>
+
+### 官方生态路线（Registry / MCPB）
+
+方寸引从 `v0.4.1` 起就保持一条面向官方 MCP Registry / MCPB 的标准发布线；后续支持官方 Registry / MCPB 安装流的标准客户端，可以优先走这条更贴近官方生态的接入方式。
+
+- 如果客户端已经支持从 Registry 发现 MCP Server，请直接搜索或添加：
+  - `io.github.msjsc001/omniclip-rag-mcp`
+- 如果客户端支持官方 MCPB 安装流，请优先使用 Release 中的：
+  - `omniclip-rag-mcp-win-x64-v0.4.2.mcpb`
+- 更详细的官方发布线、MCPB 与 ZIP 的区别、以及不同客户端的接入说明，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
+
+### 传统手动路线（Jan.ai / OpenClaw）
+
+如果你下载的是 ZIP 手动包，或者客户端尚不支持官方 MCPB 格式，请使用下面这种传统的“绝对路径 + stdio”配置法。
+
+#### Jan.ai 配置参考
+在 Jan.ai 中，你可以按下面这样配置：
+- `服务器名称`：`OmniClip RAG`
+- `Transport Type`：选择 `STDIO`
+- `命令`：填 `OmniClipRAG-MCP.exe` 的完整路径（如 `D:\...\OmniClipRAG-MCP.exe`）
+- `参数`：留空
+- `环境变量`：默认留空
+
+#### OpenClaw 配置方式
+修改 `%USERPROFILE%\.openclaw\openclaw.json`，在 `mcpServers` 中加入：
+```json
+{
+  "mcpServers": {
+    "omniclip-rag": {
+      "transport": "stdio",
+      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.2\\OmniClipRAG-MCP.exe",
+      "args": []
+    }
+  }
+}
+```
+保存后，重启 OpenClaw 或它的 gateway 进程，让配置重新加载。
+
+### 接上后 AI 能做什么
+MCP 第一版故意做得很克制，只开放两个只读工具：
+- `omniclip.status`: 查看当前本地知识库是否就绪，告诉 AI 当前是在完整 `hybrid` 模式，还是降级成了 `lexical_only`。
+- `omniclip.search`: 搜索你的本地知识库，返回带来源标签的结果（比如 `Markdown · xxx.md`、`PDF · xxx.pdf · 第 N 页`）。
+
+### 你可以怎么和 AI 说
+接入 MCP 后，不需要你自己手动调工具，通常直接自然语言说就行，例如：
+- `请用 OmniClip 搜索我本地知识库里关于“项目路线图”的内容，并整理成要点。`
+- `先调用 omniclip.status，告诉我我的本地知识库现在是否就绪。`
+- `请只搜索 OmniClip 里的 PDF 结果，关键词是“attention mechanism”。`
+- `请在 OmniClip 里找和“我的思维模型”相关的内容，并给我最相关的 5 条切片和来源。`
+
+</details>
+
+<br/>
+
+---
+
+## 💡 高阶心智模型与终极工作流
+
+<details>
+<summary><b>🔥 展开进阶心智：发掘方寸引最极致的玩法与 Prompt 提示词</b></summary>
+
+<br/>
+
+> [!IMPORTANT]
+> **极客心智**：不要把方寸引当“另一个 AI 软件”，而要把它当成你和任意顶尖 AI 之间的**“本地知识路由器 / 证据分发器”**。AI 不仅仅是在陪你聊天，而是在**基于你的长期沉淀做推理**。
+
+站在架构与知识管理的视角，我们强烈推荐以下几种能产生真实杠杆效应（Leverage）的高阶用法：
+
+### 1. 跨模型认知套利流 (Cross-Model Cognitive Arbitrage)
+将方寸引作为“单一事实来源（SSOT）”。既然 UI 物理隔离，你可以把同一份检索出的高浓度上下文包（Context Pack）**并行投喂**给不同的引擎：
+让 Claude 3.5 Sonnet 基于切片写核心代码，同时让 O1 做边界漏洞推演，再推给专注长文本的模型写复盘报告。利用本地检索引擎的定力，对云端大模型进行“资源套利”，规避单一模型的思维盲区。
+
+### 2. 被动式情报集散中心 & 证据层隔离
+彻底榨干对 PDF 与 Tika（`1290` 种格式）的支持。把 Markdown 当成你的**“认知主链”（存放自己的理解与判断）**，把 PDF / EML / DOCX 等当成**“原始资料证据仓”**。
+日常收集资料无需整理，只需扔进本地对应目录。需要查证时，有意识地区分：想看“我怎么想的”搜 Markdown；想看“证据怎么说”搜 PDF / Tika。通过 MCP 对 AI 说：*“检索最近一季度的研报证据，并与我的思考笔记交叉比对”*，你的电脑秒变离线私域参谋部。
+
+### 3. 项目上下文压缩器与“影子脑暴”网络
+针对复杂长线项目，把需求、方案、废弃草稿、会议记录全部沉淀。推进卡住时，不要自己翻找，立刻盲搜模糊的“判断句”或“冲突对”（如：`这个项目当初为什么这么定` 或 `开发效率 和 绝对隐私`）。
+利用向量引擎的“模糊语义关联”，它可能把你两年前写的某段随笔与当下的项目架构匹配在一起，瞬间催生真正的“意外灵感（Serendipity）”，大幅降低“重复思考已经想过的东西”的内耗。
+
+### 4. 自演化的“永久记忆海马体”与绝对隐私防火墙
+遇到极其实用的棘手问题，让某个 AI 推演出绝佳方案后，立刻将其摘要为一份 Markdown 存入本地 Vault。毫秒级热重载机制会让它瞬间进入 LanceDB 和 FTS5 检索池。
+未来，这等同于物理层面为任何接入的 AI 挂载了一个连续增量、私有且受完全监督的“永久记忆”。资料长期留本地，**你交出的只是“最小必要上下文”**，绝不上传金矿本身，实现最极致的隐私安全。
+
+> 🌟 **终极建议**：写长文、深聊或重大决策前 —— **先搜，不先聊**。方寸引最强的用法，不是替你思考，而是把你已经思考过、看过、积累过的东西，以刚好够用的方式重新交还给你和当前的顶级 AI。
+
+---
+
+### 💬 附：与 AI 对话时的推荐提示词 (Prompt Injection)
 
 当你把检索到的切片复制给 AI 时，为了让 AI 更好地理会你的意图并避免它仅仅是“复读”或“总结”你的笔记，我们推荐你在对话的系统提示词（System Prompt）或第一次前置对话中加入以下说明：
 
@@ -123,169 +296,9 @@
 		- 如果查看切片时发现关键内容被截断了，你可以直接叫我提供完整笔记页面
 ```
 
----
+</details>
 
-## ✨ 核心特性
-
-方寸引不靠花哨界面取胜，它真正下功夫的地方是：让你的本地资料在**不上传、不锁定、不折腾环境**的前提下，仍然能获得靠谱、可解释、可长期维护的语义检索能力。
-
-- **本地优先，资料不出门**：默认把索引、日志、缓存和运行时都放在 `%APPDATA%\\OmniClip RAG` 一侧管理，不污染你的笔记库原文件，也不要求把资料上传到云端。
-- **Markdown / Logseq 深度理解**：不仅能读普通 Markdown，还能理解 Logseq 风格的页面属性、块属性、块引用、嵌入和层级结构，因此检索结果更贴近你真实写作时的上下文。
-- **真正可用的混合检索**：不是简单关键字搜索，而是把 `SQLite + FTS5 + 结构得分 + LanceDB 向量检索` 组合起来，既能抓住原词，也能抓住语义相近的内容。
-- **扩展格式物理隔离**：Markdown、PDF、Tika 扩展格式各自用独立索引和状态域运行，互不污染，再由统一查询层把结果融合回来并明确标注来源。
-- **Tika 全格式大目录暴露**：当前已经可选择 `1290` 种扩展格式；推荐、未知、未测试、兼容性差会分层提示，方便你按风险逐步启用。
-- **发布版保持轻量，Runtime 独立管理**：EXE 包不强塞大体积本地 AI 运行栈；需要时再下载 Runtime 组件，而且现在支持共享 AppData 安装根、旧版本 Runtime 复用、组件级修复与清理。
-- **建库能跑得稳，也能讲清楚自己在做什么**：预检、全量建库、增量监听、扩展格式建库、Tika 自动安装都尽量给出阶段、进度和异常原因，而不是让用户盲等。
-- **查询结果可解释、可追踪**：结果会带来源标签、页码/格式身份、相关性评分和最近状态提示，方便你判断“为什么命中它”，而不只是得到一堆黑盒片段。
-- **出错时优先降级，不优先崩溃**：对坏文件、空文件、临时离线目录、极端大文件、Runtime 缺项、显存不足等情况都有隔离、跳过、重试或降级策略，尽量保证主程序继续可用。
-- **同一检索内核的标准 MCP 接口**：`OmniClipRAG-MCP.exe` 把现有本地检索能力以只读 MCP Server 的方式暴露出来，让支持 MCP 的 AI 客户端也能安全使用你的本地知识库，而不是只能依赖桌面界面。
-
-<div align="center">
-  <img alt="配置与状态" src="https://github.com/user-attachments/assets/d75af49d-54c2-403b-ba9a-476b6f637fcb" width="400" />
-  <img alt="深色模式体验" src="https://github.com/user-attachments/assets/b9952b8f-4535-4d2b-843e-a23fca5c41ca" width="400" />
-</div>
-
----
-
-## 🔄 V0.4.2 重点更新
-
-`v0.4.2` 的重点，是把最近完成的一系列“底层收口”真正落成用户可以感知的稳定产品行为：数据目录不再只是保存路径，而是当前环境的唯一根；GUI 在目录损坏时也能进入恢复壳；桌面端细节也同步收紧。
-
-- 🗂 **数据目录升级为当前环境根目录**：配置、日志、缓存、模型、主 Runtime、Tika Runtime 与工作区状态，现在统一跟随当前激活的数据目录，不再让 GUI、Runtime、启动链各自猜真相。
-- 🚧 **坏目录不再把用户挡在门外**：当前数据目录不可用时，GUI 会进入受限恢复模式，用人话告诉你发生了什么，并允许你重试或切换到另一个已保存环境。
-- 🔁 **已保存数据目录真正变成环境切换器**：现在可以在多个环境根之间切换、清理坏路径列表，并通过受控重启稳定完成整套环境切换，而不是半热切换出一堆残留状态。
-- 🧰 **桌面体验补齐一轮收口**：查询台支持紧凑折叠，配置页增加经典主题，图标链统一到新的应用图标，GUI 的可用性和一致性都比上一版更完整。
-- 🌐 **官网已正式上线**：GitHub Pages 官网现在可以直接访问：[msjsc001.github.io/OmniClip-RAG](https://msjsc001.github.io/OmniClip-RAG/)
-
----
-
-## 🔄 V0.4.1 重点更新
-
-`v0.4.1` 的重点，不是再造新的查询后端，而是把已经落地的 MCP 线真正收口成可被官方 MCP Registry 消费的标准发布物。
-
-- 🚀 **MCP 官方发现路径正式转向 Registry**：仓库现在补上了正式 `server.json`，不再把已停止维护的 `modelcontextprotocol/servers` README 当成主战线。
-- 📦 **新增标准 `.mcpb` 发布资产**：在原有手动 ZIP 之外，`omniclip-rag-mcp-win-x64-v0.4.1.mcpb` 成为面向 Registry 与 MCPB 客户端的标准分发形态。
-- 🧭 **文档门面按“陌生开发者 30 秒看懂”收口**：英文 README 顶部补了 MCP Quickstart，中文 README 只做轻量引导而不打散原有叙事，`MCP_SETUP.md` 也明确解释了 `ZIP` 与 `.mcpb` 的区别。
-- 🛠 **首次 Registry 发布刻意保持手动**：`0.4.1` 被保留为第一发 Registry 版本，用来验证 Release、哈希、元数据与 Registry 发布链路，后续再考虑自动化。
-
----
-
-## 🔄 V0.4.0 重点更新
-
-`v0.4.0` 首次引入了独立的只读 MCP 壳与同一检索内核下的无头发布线：方寸引不再只是桌面软件，也开始具备可被外部 AI 客户端调用的标准 MCP Server 形态。
-
----
-
-## 🔌 MCP 怎么用
-
-`OmniClip RAG MCP Server` 的作用，是把方寸引现有的本地检索能力，通过标准 MCP 协议提供给支持 MCP 的 AI 客户端使用。
-
-从 `v0.4.2` 开始，MCP 这条线会同时提供两种分发形态：
-
-- `OmniClipRAG-MCP-v0.4.2-win64.zip`：给手动配置 `stdio` 的用户
-- `omniclip-rag-mcp-win-x64-v0.4.2.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
-
-你可以把它理解成：
-
-- 桌面版 `OmniClipRAG.exe` 负责正常建库、维护和可视化使用
-- `OmniClipRAG-MCP.exe` 负责安静地在后台给 AI 提供“只读搜索接口”
-
-### 使用前要先做什么
-
-1. 先用桌面版把你的知识库建好。
-2. 平时建库、重建、维护索引，还是用桌面版完成。
-3. MCP 版只是给 AI 调用的无头接口，不负责建库。
-
-如果知识库还没建好，MCP 不会假装可用，而是会明确返回类似 `index_not_ready` 的提示。
-
-### 官方生态路线（Registry / MCPB）
-
-方寸引从 `v0.4.1` 起就保持一条面向官方 MCP Registry / MCPB 的标准发布线；后续支持官方 Registry / MCPB 安装流的标准客户端，可以优先走这条更贴近官方生态的接入方式。
-
-- 如果客户端已经支持从 Registry 发现 MCP Server，请直接搜索或添加：
-  - `io.github.msjsc001/omniclip-rag-mcp`
-- 如果客户端支持官方 MCPB 安装流，请优先使用 Release 中的：
-- `omniclip-rag-mcp-win-x64-v0.4.2.mcpb`
-- 更详细的官方发布线、MCPB 与 ZIP 的区别、以及不同客户端的接入说明，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
-
-### 传统手动路线（Jan.ai / OpenClaw）
-
-如果你下载的是 ZIP 手动包，或者客户端尚不支持官方 MCPB 格式，请使用下面这种传统的“绝对路径 + stdio”配置法。
-
-### Jan.ai 配置参考
-
-在 Jan.ai 中，你可以按下面这样配置：
-
-- `服务器名称`：`OmniClip RAG`
-- `Transport Type`：选择 `STDIO`
-- `命令`：填 `OmniClipRAG-MCP.exe` 的完整路径
-- `参数`：留空
-- `环境变量`：默认留空
-
-命令路径示例：
-
-```text
-D:\软件编写\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.2\OmniClipRAG-MCP.exe
-```
-
-大多数用户不需要额外填写环境变量。只有你把 Runtime 或数据目录手动改到了别处，才需要进一步自定义。
-
-### OpenClaw 配置方式
-
-OpenClaw 的接法和 Jan.ai 不太一样。它通常不是在图形界面里逐项填写，而是直接在配置文件里登记 MCP Server：
-
-```text
-%USERPROFILE%\.openclaw\openclaw.json
-```
-
-在这个文件里加入类似下面的 `mcpServers` 配置即可：
-
-```json
-{
-  "mcpServers": {
-    "omniclip-rag": {
-      "transport": "stdio",
-      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.2\\OmniClipRAG-MCP.exe",
-      "args": []
-    }
-  }
-}
-```
-
-保存后，重启 OpenClaw 或它的 gateway 进程，让配置重新加载。
-
-如果你的 `openclaw.json` 里原本已经有别的配置，不要整份覆盖，只需要把 `mcpServers.omniclip-rag` 这一段合并进去即可。
-
-### 接上后 AI 能做什么
-
-MCP 第一版故意做得很克制，只开放两个只读工具：
-
-- `omniclip.status`
-  - 查看当前本地知识库是否就绪
-  - 告诉 AI 当前是在完整 `hybrid` 模式，还是降级成了 `lexical_only`
-- `omniclip.search`
-  - 搜索你的本地知识库
-  - 返回带来源标签的结果，比如 `Markdown · xxx.md`、`PDF · xxx.pdf · 第 N 页`
-
-### 你可以怎么和 AI 说
-
-接入 MCP 后，不需要你自己手动调工具，通常直接自然语言说就行，例如：
-
-- `请用 OmniClip 搜索我本地知识库里关于“项目路线图”的内容，并整理成要点。`
-- `先调用 omniclip.status，告诉我我的本地知识库现在是否就绪。`
-- `请只搜索 OmniClip 里的 PDF 结果，关键词是“attention mechanism”。`
-- `请在 OmniClip 里找和“我的思维模型”相关的内容，并给我最相关的 5 条切片和来源。`
-
-### 实用建议
-
-如果你希望 AI 搜得更准，最好直接告诉它这些信息：
-
-- 你要找的主题词
-- 笔记标题片段
-- 只想搜 `markdown`、`pdf` 还是 `tika`
-- 你想要“简短总结”还是“带来源的原文切片”
-
-更详细的说明和示例配置，请看 [MCP_SETUP.md](MCP_SETUP.md)。
+<br/>
 
 ---
 
@@ -310,6 +323,8 @@ flowchart LR
 
 所有高体积运行时依赖（如 Torch 相关栈）仍旧以外挂方式存在，不会被硬塞进 EXE；现在它们会优先收口到共享的 AppData runtime 根目录中（见 [RUNTIME_SETUP.md](RUNTIME_SETUP.md)），同时继续兼容旧版本 runtime 的跨版本复用，因此发布版既保持轻量，也不再要求版本一更新就整包重下。
 
+<br/>
+
 ---
 
 ## 💻 极客与开发者入口点
@@ -317,6 +332,11 @@ flowchart LR
 方寸引已经在 GitHub 上完全开源。无论你对代码感兴趣，或者你也对个人数据主权存在高要求，或者由于笔记库已膨胀至传统编辑器自带搜索完全罢工，你随时可以深入把控它。
 
 目前所有的源代码及分发包，都已经过了严酷的单元测试和冒烟截击：
+
+<details>
+<summary><b>💻 展开查看开发者构建与启动命令</b></summary>
+
+<br/>
 
 **启动桌面版：**
 ```powershell
@@ -338,6 +358,41 @@ python launcher_mcp.py --mcp-selfcheck
 .\scripts\run.ps1 status
 .\scripts\run.ps1 query "你的问题"
 ```
+
+</details>
+
+<br/>
+
+---
+
+## 🔄 近期重点版本回顾
+
+<details>
+<summary><b>📦 展开查看 V0.4+ 系列的核心演进（数据底座升级与 MCP 接入）</b></summary>
+
+<br/>
+
+### V0.4.2 重点更新
+`v0.4.2` 的重点，是把最近完成的一系列“底层收口”真正落成用户可以感知的稳定产品行为：数据目录不再只是保存路径，而是当前环境的唯一根；GUI 在目录损坏时也能进入恢复壳；桌面端细节也同步收紧。
+- 🗂 **数据目录升级为当前环境根目录**：配置、日志、缓存、模型、主 Runtime、Tika Runtime 与工作区状态，现在统一跟随当前激活的数据目录，不再让 GUI、Runtime、启动链各自猜真相。
+- 🚧 **坏目录不再把用户挡在门外**：当前数据目录不可用时，GUI 会进入受限恢复模式，用人话告诉你发生了什么，并允许你重试或切换到另一个已保存环境。
+- 🔁 **已保存数据目录真正变成环境切换器**：现在可以在多个环境根之间切换、清理坏路径列表，并通过受控重启稳定完成整套环境切换，而不是半热切换出一堆残留状态。
+- 🧰 **桌面体验补齐一轮收口**：查询台支持紧凑折叠，配置页增加经典主题，图标链统一到新的应用图标，GUI 的可用性和一致性都比上一版更完整。
+- 🌐 **官网已正式上线**：GitHub Pages 官网现在可以直接访问：[msjsc001.github.io/OmniClip-RAG](https://msjsc001.github.io/OmniClip-RAG/)
+
+### V0.4.1 重点更新
+`v0.4.1` 的重点，不是再造新的查询后端，而是把已经落地的 MCP 线真正收口成可被官方 MCP Registry 消费的标准发布物。
+- 🚀 **MCP 官方发现路径正式转向 Registry**：仓库现在补上了正式 `server.json`，不再把已停止维护的 `modelcontextprotocol/servers` README 当成主战线。
+- 📦 **新增标准 `.mcpb` 发布资产**：在原有手动 ZIP 之外，`omniclip-rag-mcp-win-x64-v0.4.1.mcpb` 成为面向 Registry 与 MCPB 客户端的标准分发形态。
+- 🧭 **文档门面按“陌生开发者 30 秒看懂”收口**：英文 README 顶部补了 MCP Quickstart，中文 README 只做轻量引导而不打散原有叙事，`MCP_SETUP.md` 也明确解释了 `ZIP` 与 `.mcpb` 的区别。
+- 🛠 **首次 Registry 发布刻意保持手动**：`0.4.1` 被保留为第一发 Registry 版本，用来验证 Release、哈希、元数据与 Registry 发布链路，后续再考虑自动化。
+
+### V0.4.0 重点更新
+`v0.4.0` 首次引入了独立的只读 MCP 壳与同一检索内核下的无头发布线：方寸引不再只是桌面软件，也开始具备可被外部 AI 客户端调用的标准 MCP Server 形态。
+
+</details>
+
+<br/>
 
 ---
 
@@ -361,41 +416,30 @@ python launcher_mcp.py --mcp-selfcheck
 
 *(点击 Release 可查看自 V0.1.0 到新版本的详细特性演进历程)*
 
+<br/>
+
 ---
 
 ## 🙏 开源致谢
 
 方寸引今天能走到这里，离不开这些开源项目打下的地基。我们当前直接集成、明确依赖或用于构建/测试的核心开源项目包括：
 
-- **Python**：整个桌面程序与工具链的基础运行环境。
-- **Qt / PySide6 / Shiboken6**：当前桌面 GUI 的主要界面框架。
-- **SQLite**：本地元数据、FTS、状态与索引权威存储。
-- **LanceDB**：本地向量检索存储层。
-- **Apache Arrow / PyArrow**：向量与表结构数据的底层支撑。
-- **PyTorch**：本地语义模型与 CUDA/CPU 推理基础。
-- **sentence-transformers**：本地嵌入与交叉编码能力的主桥接层。
-- **Transformers / Hugging Face Hub**：模型加载、缓存与本地化管理能力来源。
-- **BAAI/bge-m3**：当前主语义嵌入模型路线。
-- **BAAI/bge-reranker-v2-m3**：当前可选 reranker 路线。
-- **PyPDF**：PDF 独立解析链的基础组件。
-- **Apache Tika**：扩展格式统一解析 sidecar 路线。
-- **Eclipse Temurin / Adoptium**：Tika 运行时所需的 JRE 分发来源。
-- **watchdog**：文件监听能力基础。
-- **PyInstaller**：Windows 绿色版打包链。
-- **pytest**：自动化测试主框架。
-- **ONNX Runtime**：CPU 优先的本地推理执行层与便携运行时闭环。
-- **MCP Python SDK / Model Context Protocol**：官方 MCP Server 协议实现与发布链基础。
-
-感谢这些项目及其维护者长期的开放协作与工程投入。
+> `Python`, `Qt / PySide6 / Shiboken6`, `SQLite`, `LanceDB`, `Apache Arrow / PyArrow`, `PyTorch`, `sentence-transformers`, `Transformers / Hugging Face Hub`, `BAAI/bge-m3`, `BAAI/bge-reranker-v2-m3`, `PyPDF`, `Apache Tika`, `Eclipse Temurin / Adoptium`, `watchdog`, `PyInstaller`, `pytest`, `ONNX Runtime`, `MCP Python SDK / Model Context Protocol`.
+> 
+> 感谢这些项目及其维护者长期的开放协作与工程投入。
 
 ## 📜 许可证
 
 本项目采用 [MIT License](LICENSE)。
 
----
+<br/>
 
-> ⚠️ **免责声明与协议限制 (Disclaimer)** ⚠️
-> 
+<details>
+<summary>⚠️ <b>点击查看 免责声明与协议限制 (Disclaimer)</b></summary>
+
+<br/>
+
+> [!WARNING]
 > 方寸引 / OmniClip RAG 以“按现状提供”和“按可用状态提供”为原则发布，不附带任何明示或默示担保，包括但不限于适销性、特定用途适用性、不侵权、持续可用性、无错误或无中断运行等担保。
 > 
 > **你需要自行负责以下事项：**
@@ -411,6 +455,8 @@ python launcher_mcp.py --mcp-selfcheck
 > 在适用法律允许的最大范围内，项目维护者与贡献者不对任何直接、间接、附带、后果性、特殊、惩罚性损害承担责任，也不对因使用或误用本项目而导致的数据丢失、停机、模型误用、隐私事件、业务中断或决策后果承担责任。
 > 
 > 本仓库中提及的所有第三方产品名、模型名、平台名与商标，均归其各自权利人所有；出现这些名称不代表本项目与其存在隶属、官方认可、认证或合作关系。
+
+</details>
 
 <br/>
 

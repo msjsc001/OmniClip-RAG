@@ -2,40 +2,67 @@
 
 # 🌌 OmniClip RAG
 
-**A silent gravity field between your private notes and the universe of AI.**
-*(Supports 1290 formats since V0.3.3, and ships an MCP Registry / MCPB line since V0.4.1)*
+<p align="center"><strong>A silent gravity field between your private notes and the universe of AI.</strong></p>
+<p align="center"><em>(Supports 1290 formats since V0.3.3, and ships an MCP Registry / MCPB line since V0.4.1)</em></p>
 
-<img alt="image" src="https://github.com/user-attachments/assets/2ca47563-138b-4138-8b62-05e14f294cd4" />
+<img alt="OmniClip RAG Universe" src="https://github.com/user-attachments/assets/2ca47563-138b-4138-8b62-05e14f294cd4" />
 
-[![Version](https://img.shields.io/badge/version-v0.4.2-1d7467)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f)](#-quick-start) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b)](#-core-philosophy) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32)](LICENSE)
+<br/>
+
+[![Version](https://img.shields.io/badge/version-v0.4.2-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-quick-start--workflow) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-core-philosophy--priceless-boundaries) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500?style=flat-square)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md) | [MCP Setup](MCP_SETUP.md) | [Website](https://msjsc001.github.io/OmniClip-RAG/)
+
+<br/>
+
+<details>
+<summary>📖 <b>Table of Contents</b> (Click to expand)</summary>
+
+- [TL;DR: MCP Quickstart](#-mcp-usage)
+- [Core Philosophy & Priceless Boundaries](#-core-philosophy--priceless-boundaries)
+- [Core Features](#-core-features)
+- [Quick Start & Workflow](#-quick-start--workflow)
+- [MCP Usage](#-mcp-usage)
+- [High-Leverage Mental Models & Workflows](#-high-leverage-mental-models--workflows)
+- [Minimalist & Restrained Architecture](#-minimalist--restrained-architecture)
+- [Geek & Developer Entry Points](#-geek--developer-entry-points)
+- [Recent Version Trace](#-recent-key-updates)
+- [Documentation Hub](#-documentation-hub)
+- [Open Source Thanks & License](#-open-source-thanks)
+
+</details>
 
 </div>
 
 <br/>
 
+> [!TIP]
 > **TL;DR: MCP Quickstart**
 >
 > OmniClip RAG now ships a **read-only local-first MCP server** for searching private Markdown, PDF, and Tika-backed knowledge bases on Windows.
 > Download `OmniClipRAG-MCP-v0.4.2-win64.zip` for manual `stdio` setup or `omniclip-rag-mcp-win-x64-v0.4.2.mcpb` for the official MCP Registry / MCPB path.
 > Point your MCP client at `OmniClipRAG-MCP.exe`, then ask the AI to call `omniclip.status` first and `omniclip.search` for the actual retrieval flow. Full details: [MCP_SETUP.md](MCP_SETUP.md).
 
- **What is it?** It is a local Markdown semantic search software, a local RAG knowledge base, and now a read-only MCP retrieval server. (V0.4.2 **already supports semantic retrieval for 1290 formats, a standard MCP interface, a Registry-ready MCPB package line, and unified environment-root data storage**)
- **How to use it?** Just open the application, input your Markdown notes path, and click "Build Knowledge Base" to set up your local RAG vault. Once built, you can use it to semantically search your notes. The retrieved content can be copied and sent to any AI for in-depth discussion, or used for your own deep reading.
- **What are the benefits?** No need to upload any of your data, and no vendor lock-in. It requires no complex configuration or setup. Moreover, it features hot-reloading—newly written notes automatically enter the RAG vault! New notes can also be an organized collection of your historical conversations with AIs, which in turn implicitly provides a permanent memory for them.
+---
 
+**What is it?** It is a local Markdown semantic search software, a local RAG knowledge base, and now a read-only MCP retrieval server. 
+
+**How to use it?** Just open the application, input your Markdown notes path, and click "Build Knowledge Base" to set up your local RAG vault. Once built, you can use it to semantically search your notes. The retrieved content can be copied and sent to any AI for in-depth discussion, or used for your own deep reading.
+
+**What are the benefits?** No need to upload any of your data, and no vendor lock-in. It requires no complex configuration or setup. Moreover, it features hot-reloading—newly written notes automatically enter the RAG vault! New notes can also be an organized collection of your historical conversations with AIs, which in turn implicitly provides a permanent memory for them.
+
+> [!NOTE]
 > **Introduction: Handing Over Our "Cyber-Underwear" in the AI Era!**
+> 
 > **OmniClip RAG uniquely achieves the impossible: You can have it all!**
 >
-> **We Demand**: Our Markdown notes remain completely ours.
-> **We Also Demand**: Any AI to deeply participate within our permitted and supervised scope. The note vault and the AI must be deeply decoupled yet highly interactive.
-> **And We Demand**: An out-of-the-box experience without any tedious setup, featuring a robust hot-reload capability so new notes automatically enter the RAG semantic pool! It can even compile your historical AI conversations, granting your LLMs a permanent, rolling memory.
-
+> - **We Demand**: Our Markdown notes remain completely ours.
+> - **We Also Demand**: Any AI to deeply participate within our permitted and supervised scope. The note vault and the AI must be deeply decoupled yet highly interactive.
+> - **And We Demand**: An out-of-the-box experience without any tedious setup, featuring a robust hot-reload capability so new notes automatically enter the RAG semantic pool! It can even compile your historical AI conversations, granting your LLMs a permanent, rolling memory.
+>
 > In the AI era, the more we rely on large models, the more personal privacy we surrender. Most knowledge base RAG tools on the market are either agonizingly complex to configure (involving server-like Docker or Python environments), demand a steep learning curve that costs too much time, forcibly tether you to a bloated chat interface, or require you to upload your notes completely. They all attempt to lock your data into their products, making it impossible for you to ever leave them.
-
+>
 > To ensure my notes and thoughts genuinely remain mine, I spent considerable time thinking through and comparing numerous possibilities before finalizing and hand-crafting this pure local semantic retrieval tool—**OmniClip RAG**. I pushed its core functionalities to the absolute limit, ensuring that it **both** runs smoothly on most computers **and** maintains professional-grade capabilities. It functions as a local knowledge firewall, allowing you to selectively let AI deeply read your "second brain" without worrying about your data being hijacked by any cloud or local software.
-
 
 <br/>
 
@@ -45,22 +72,184 @@
 
 <br/>
 
+---
+
 ## 🎯 Core Philosophy & Priceless Boundaries
 
 **OmniClip RAG** is a radically decoupled "privacy firewall" and "manual-transfer local RAG search engine" meticulously crafted for the Markdown note ecosystem (natively compatible with Logseq, Obsidian, Typora, MarkText, Zettlr, and any plain text application).
 
 It exclusively performs one highly refined task: it semantic-searches tens of thousands of pages locally via embedded vector algorithms (e.g., `BAAI/bge-m3`) and structural indexing, meticulously packs the most high-value contextual snippets, and lets you **manually clip and paste them into any external top-tier AI** (such as ChatGPT, Claude, Kimi, etc.) for profound interactions. In short: As long as your materials are in Markdown formats, this engine acts as the ultimate "second brain permanent memory extractor."
 
-**Why Was It Built This Way? (Core Philosophy)**
+<details>
+<summary><b>👉 Click to expand: Why Was It Built This Way? (Core Philosophy)</b></summary>
+
+<br/>
 
 - **Absolute Privacy Isolation**: External AIs can *only* leverage the contextual fragments you explicitly bundle and offer via the semantic engine under your supervision. They have zero access to the rest of your vault. Your absolute data sovereignty is inviolable here.
 - **A Highly Decoupled "Brain-Machine Interface"**: It binds to no single AI chat UI. If Claude handles complex code better today, you clip content to Claude. If GPT-5 transforms logic modeling tomorrow, you feed the same snippet there. This ensures physical independence between the tool and note content, freeing you from setup locking and platform binding.
 - **Pursuing the "Strong Lindy Effect"**: I hope this serves as a memory lighthouse that won't become obsolete in the distant future. As long as the concept of plain text and Markdown persists, you will be able to summon faded historical insights you’ve personally forgotten, powered tightly by this clean and lightweight engine.
 
+</details>
+
+<br/>
+
+---
+
+## ✨ Core Features
+
+OmniClip is intentionally not trying to win with flashy UI tricks. The real work went into making local knowledge retrieval dependable, explainable, and maintainable without forcing users into cloud upload or environment chaos.
+
+<table width="100%">
+  <tr>
+    <td width="50%" valign="top">
+      <ul>
+        <li><b>Local-first by default</b>: indexes, logs, caches, and runtime payloads are managed under <code>%APPDATA%\OmniClip RAG</code> instead of polluting your source notes or requiring a cloud round-trip.</li>
+        <li><b>Deep Markdown / Logseq understanding</b>: beyond plain Markdown, the parser understands Logseq-style page properties, block properties, block refs, and embeds, so retrieval stays closer to how you actually write.</li>
+        <li><b>Real hybrid retrieval</b>: combines <code>SQLite + FTS5 + structure-aware scoring + LanceDB vector search</code> so it can catch both exact terms and semantically related ideas.</li>
+        <li><b>Physically isolated extension formats</b>: Markdown, PDF, and Tika-backed formats keep separate indexes and states, returning unified results with explicit source labels.</li>
+        <li><b>Traceable query results</b>: results carry source labels, page/format identity, score hints, and state messaging so users can understand why something was returned instead of trusting a black box.</li>
+      </ul>
+    </td>
+    <td width="50%" valign="top">
+      <ul>
+        <li><b>Large Tika format exposure</b>: exposes <b>1290</b> extension formats with clear risk tiers for recommended, unknown, untested, and poor-compatibility items.</li>
+        <li><b>Lean packaged app, external Runtime</b>: the EXE stays lightweight while Runtime components are managed separately, with shared AppData installation and legacy-runtime reuse.</li>
+        <li><b>Build flows that explain themselves</b>: preflight, rebuild, incremental watch, and Tika auto-install surface stage, progress, and failure reasons instead of leaving users staring at a frozen screen.</li>
+        <li><b>Degrade before crashing</b>: damaged files, empty files, offline paths, missing runtime pieces, and GPU pressure are all handled with skip/retry/fallback strategies wherever possible.</li>
+        <li><b>A standard MCP interface</b>: <code>OmniClipRAG-MCP.exe</code> exposes the same local search kernel through a read-only MCP server, so MCP-capable AI clients can query your private knowledge base.</li>
+      </ul>
+    </td>
+  </tr>
+</table>
+
+<br/>
+
+<div align="center">
+  <table width="100%" border="0">
+    <tr>
+      <td width="50%" align="center">
+        <img alt="Configuration and Indexing UI" src="https://github.com/user-attachments/assets/b622c336-73b8-4324-95eb-f9c8011c25c6" width="100%" /><br/>
+        <em>⚙️ Configuration and Indexing UI</em>
+      </td>
+      <td width="50%" align="center">
+        <img alt="Dark Mode Aesthetics" src="https://github.com/user-attachments/assets/d133f782-1864-427a-8773-ee9333cf6fdd" width="100%" /><br/>
+        <em>🌙 Dark Mode Aesthetics</em>
+      </td>
+    </tr>
+  </table>
+</div>
+
+<br/>
+
+---
+
+## 🚀 Quick Start & Workflow
+
+OmniClip perfectly integrates smoothly into your workflow:
+1. Continue writing quietly in your local Markdown vault for extended periods.
+2. Double click the OmniClip app—it will transparently and silently maintain a mixed-search index of your vault.
+3. When searching for insights, punch in keywords or short sentences. OmniClip will extract and assemble unparalleled fragments in a single click.
+4. **Paste that rich context bundle directly into the smartest AI model available at the moment.**
+
+### First-Time Use Guide
+
+The foundation is built as a single portable green EXE. No complicated scripting or dev environments are needed. Just pure **"Download, double-click, and run"**:
+
+1. Launch the desktop app interface.
+2. Select the root folder of your note vault.
+3. Confirm the data directory (OmniClip refuses to soil or modify your raw notes).
+4. *(First run)* Initiate the **space-and-time precheck** to estimate load constraints.
+5. *(First run)* Start a **one-click model bootstrap (downloads and caches the local model)**.
+6. Finally, trigger a **Full Build** (index once, run forever via hot reload tracking).
+7. **Once built, start searching!** Find brilliant slices, click to copy snippets, and send them to your favorite LLMs.
+
+<div align="center">
+  <img alt="Smart Search and Result Review" src="https://github.com/user-attachments/assets/e537ebfc-53cf-44cc-8598-9019b2fcae02" width="800" />
+</div>
+
+<br/>
+
+---
+
+## 🔌 MCP Usage
+
+`OmniClip RAG MCP Server` lets MCP-capable AI clients search your local knowledge base through the same read-only retrieval core that powers the desktop app.
+
+From `v0.4.2`, the MCP line is packaged in two parallel distribution forms:
+- `OmniClipRAG-MCP-v0.4.2-win64.zip` for manual file-based setup
+- `omniclip-rag-mcp-win-x64-v0.4.2.mcpb` for the official MCP Registry and MCPB-aware clients
+
+> [!CAUTION]
+> **What You Need First**
+> Use `OmniClipRAG-MCP.exe` only as the headless read-only bridge for AI clients. It does not build knowledge bases. You MUST **build or install your knowledge base from the desktop app first**. 
+> If your index has not been built yet, the MCP side will return an explicit `index_not_ready` style error instead of silently pretending everything is fine.
+
+<details>
+<summary><b>🛠️ Click to expand: Official Route & Traditional Setup Guide</b></summary>
+
+<br/>
+
+### Official Route (Registry / MCPB)
+
+Since `v0.4.1`, OmniClip RAG keeps a first-class MCP Registry / MCPB line, so clients that support Registry discovery or MCPB installation can use that path first.
+- If your client supports Registry discovery, look for: `io.github.msjsc001/omniclip-rag-mcp`
+- If your client supports MCPB installation, prefer the Release asset: `omniclip-rag-mcp-win-x64-v0.4.2.mcpb`
+
+For the full Registry/MCPB explanation and client-specific setup notes, see [MCP_SETUP.md](MCP_SETUP.md).
+
+### Traditional Manual Route (Jan.ai / OpenClaw)
+
+If you downloaded the ZIP package manually, or your client does not support the official MCPB format yet, use the traditional absolute-path `stdio` setup.
+
+#### Jan.ai Reference Setup
+In Jan.ai, create a new MCP server with the following values:
+- `Server Name`: `OmniClip RAG`
+- `Transport Type`: `STDIO`
+- `Command`: the full path to `OmniClipRAG-MCP.exe` (e.g. `D:\software\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.2\OmniClipRAG-MCP.exe`)
+- `Arguments`: leave empty
+- `Environment Variables`: leave empty by default
+
+#### OpenClaw Example
+Register the MCP server in OpenClaw's config file (`%USERPROFILE%\.openclaw\openclaw.json`):
+```json
+{
+  "mcpServers": {
+    "omniclip-rag": {
+      "transport": "stdio",
+      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.2\\OmniClipRAG-MCP.exe",
+      "args": []
+    }
+  }
+}
+```
+Then restart OpenClaw or its gateway process so it reloads the config.
+
+### What The AI Can Do Through MCP
+V1 intentionally keeps the MCP surface very small and stable:
+- `omniclip.status`: checks whether your local search environment is ready, tells the AI whether it is running in `hybrid` mode or a degraded `lexical_only` mode.
+- `omniclip.search`: searches your local knowledge base, returns explicit source labels such as `Markdown · xxx.md` or `PDF · xxx.pdf · Page N`.
+
+### How To Ask The AI
+Once the MCP server is connected, you can simply speak to the AI in natural language. These prompts work well:
+- `"Use OmniClip to search my local knowledge base for 'project roadmap' and summarize the most useful points."`
+- `"First call omniclip.status, then tell me whether my local knowledge base is ready."`
+- `"Search only PDF results in OmniClip for 'attention mechanism'."`
+- `"Find notes related to 'my thinking model' in OmniClip and show me the most relevant 5 snippets with sources."`
+
+</details>
+
+<br/>
+
 ---
 
 ## 💡 High-Leverage Mental Models & Workflows
 
+<details>
+<summary><b>🔥 Click to expand: The Ultimate Mental Models & Prompt Injection</b></summary>
+
+<br/>
+
+> [!IMPORTANT]
 > **Core Philosophy**: Stop thinking of OmniClip RAG as "just another AI software". Instead, treat it as the ultimate **"Local Knowledge Router & Context Dispenser"** sitting between you and any state-of-the-art AI. The AI is no longer just chatting with you out of thin air; it is **reasoning based on your lifetime of accumulated insights**.
 
 From an architecture and knowledge-management perspective, we highly recommend the following high-leverage workflows to unlock emergent abilities:
@@ -85,31 +274,7 @@ Over time, you physically mount a continuously-growing, strictly supervised "pas
 
 ---
 
-## 🚀 Quick Start & Workflow
-
-OmniClip perfectly integrates smoothly into your workflow:
-1. Continue writing quietly in your local Markdown vault for extended periods.
-2. Double click the OmniClip app—it will transparently and silently maintain a mixed-search index of your vault.
-3. When searching for insights, punch in keywords or short sentences. OmniClip will extract and assemble unparalleled fragments in a single click.
-4. Paste that rich context bundle directly into the smartest AI model available at the moment.
-
-### First-Time Use Guide
-
-The foundation is built as a single portable green EXE. No complicated scripting or dev environments are needed. Just pure **"Download, double-click, and run"**:
-
-1. Launch the desktop app interface.
-2. Select the root folder of your note vault.
-3. Confirm the data directory (OmniClip refuses to soil or modify your raw notes).
-4. *(First run)* Initiate the **space-and-time precheck** to estimate load constraints.
-5. *(First run)* Start a **one-click model bootstrap (downloads and caches the local model)**.
-6. Finally, trigger a **Full Build** (index once, run forever via hot reload tracking).
-7. **Once built, start searching!** Find brilliant slices, click to copy snippets, and send them to your favorite LLMs.
-
-<div align="center">
-  <img alt="Smart Search and Result Review" src="https://github.com/user-attachments/assets/e537ebfc-53cf-44cc-8598-9019b2fcae02" width="800" />
-</div>
-
-### 💡 Appendix: Recommended Prompt for AI
+### 💬 Appendix: Recommended Prompt for AI (Prompt Injection)
 
 When pasting your retrieved context packs to an AI, you may want the AI to utilize the knowledge effectively without just "summarizing" or "parroting" your notes. We highly recommend including the following guidelines in your System Prompt or initial message to the AI:
 
@@ -126,164 +291,9 @@ When pasting your retrieved context packs to an AI, you may want the AI to utili
 		- If you find that key content is truncated when reviewing a snippet, you can directly ask me to provide the complete note page.
 ```
 
----
+</details>
 
-## ✨ Core Features
-
-OmniClip is intentionally not trying to win with flashy UI tricks. The real work went into making local knowledge retrieval dependable, explainable, and maintainable without forcing users into cloud upload or environment chaos.
-
-- **Local-first by default**: indexes, logs, caches, and runtime payloads are managed under `%APPDATA%\\OmniClip RAG` instead of polluting your source notes or requiring a cloud round-trip.
-- **Deep Markdown / Logseq understanding**: beyond plain Markdown, the parser understands Logseq-style page properties, block properties, block refs, embeds, and hierarchy, so retrieval stays closer to how you actually think and write.
-- **Real hybrid retrieval**: this is not a basic keyword finder. OmniClip combines `SQLite + FTS5 + structure-aware scoring + LanceDB vector search` so it can catch both exact terms and semantically related ideas.
-- **Physically isolated extension formats**: Markdown, PDF, and Tika-backed formats keep separate indexes and states, then meet again through a broker layer that returns unified results with explicit source labels.
-- **Large Tika format exposure**: the current picker exposes `1290` extension formats with clear risk tiers for recommended, unknown, untested, and poor-compatibility items.
-- **Lean packaged app, external Runtime**: the EXE stays lightweight while Runtime components are managed separately, with shared AppData installation, legacy-runtime reuse, and component-level repair/cleanup.
-- **Build flows that explain themselves**: preflight, rebuild, incremental watch, extension indexing, and Tika auto-install are designed to surface stage, progress, and failure reasons instead of leaving users staring at a frozen screen.
-- **Traceable query results**: results carry source labels, page/format identity, score hints, and state messaging so users can understand why something was returned instead of trusting a black box.
-- **Degrade before crashing**: damaged files, empty files, offline paths, extreme document size, missing runtime pieces, and GPU pressure are all handled with skip/isolation/retry/fallback strategies wherever possible.
-- **A standard MCP interface over the same retrieval core**: `OmniClipRAG-MCP.exe` exposes the same local search kernel through a read-only MCP server, so MCP-capable AI clients can query your private knowledge base without the desktop GUI being the only entry point.
-
-<div align="center">
-  <img alt="Configuration and Indexing UI" src="https://github.com/user-attachments/assets/b622c336-73b8-4324-95eb-f9c8011c25c6" width="400" />
-  <img alt="Dark Mode Aesthetics" src="https://github.com/user-attachments/assets/d133f782-1864-427a-8773-ee9333cf6fdd" width="400" />
-</div>
-
----
-
-## 🔄 V0.4.2 Key Updates
-
-`v0.4.2` is the release that turns OmniClip's recent internal convergence work into a publishable product line: data-root truth is now unified, GUI recovery can repair broken environments without silent fallback, and the desktop shell is cleaner to operate day to day.
-
-- 🗂 **Data root is now treated as the active environment root**: config, logs, cache, models, main Runtime, Tika Runtime, and workspaces now follow the same active data root contract instead of letting GUI, Runtime, and launcher guess separately.
-- 🚧 **Broken data roots now enter a recovery shell instead of trapping users outside the app**: when the active environment is unavailable, the GUI starts in a restricted recovery mode, explains the problem in plain language, and lets the user retry or switch to another saved environment.
-- 🔁 **Saved data-root switching is now a real environment switcher**: the GUI can keep multiple saved roots, forget invalid ones from the list, and switch whole environments through a controlled restart instead of partial hot state drift.
-- 🧰 **Desktop polish landed on top of the architecture work**: the query desk can collapse into a compact one-line form, classic UI themes were added, and the app icon chain was unified so runtime assets and packaged Windows builds stop drifting apart.
-- 🌐 **The documentation surface now includes a public website**: the GitHub Pages site is live at [msjsc001.github.io/OmniClip-RAG](https://msjsc001.github.io/OmniClip-RAG/), and the top-level docs now point to it directly.
-
----
-
-## 🔄 V0.4.1 Key Updates
-
-`v0.4.1` turned the new MCP line from "a working second shell" into "a Registry-ready delivery line" so OmniClip could be published through the official MCP Registry instead of living only as a raw manual ZIP.
-
-- 🚀 **Official Registry route is now the primary discovery strategy**: the project now ships a formal `server.json` metadata file for MCP Registry publishing instead of targeting the deprecated `modelcontextprotocol/servers` README list.
-- 📦 **A standard MCPB package is now part of the release story**: `omniclip-rag-mcp-win-x64-v0.4.1.mcpb` becomes the Registry/MCPB-aware distribution asset, while the old ZIP remains for manual users.
-- 🧭 **README and MCP docs are now split for strangers, not just existing users**: the English README now exposes a first-screen MCP quickstart, the Chinese README keeps its original voice with a lighter MCP entry point, and `MCP_SETUP.md` now explains `ZIP vs .mcpb` explicitly.
-- 🛠 **The first Registry publish path is intentionally manual**: `0.4.1` is reserved as the first clean MCP Registry version so hash, metadata, and release assets can be verified before later automation.
-
----
-
-## 🔄 V0.4.0 Key Updates
-
-`v0.4.0` introduced the first dedicated read-only MCP shell on top of the existing retrieval core, turning OmniClip from a desktop-only app into a standard MCP-capable local search engine.
-
----
-
-## 🔌 MCP Usage
-
-`OmniClip RAG MCP Server` lets MCP-capable AI clients search your local knowledge base through the same read-only retrieval core that powers the desktop app.
-
-From `v0.4.2`, the MCP line is packaged in two parallel distribution forms:
-
-- `OmniClipRAG-MCP-v0.4.2-win64.zip` for manual file-based setup
-- `omniclip-rag-mcp-win-x64-v0.4.2.mcpb` for the official MCP Registry and MCPB-aware clients
-
-### What You Need First
-
-1. Build or install your knowledge base from the desktop app first.
-2. Keep using the normal desktop app for indexing and maintenance.
-3. Use `OmniClipRAG-MCP.exe` only as the headless read-only bridge for AI clients.
-
-If your index has not been built yet, the MCP side will return an explicit `index_not_ready` style error instead of silently pretending everything is fine.
-
-### Official Route (Registry / MCPB)
-
-Since `v0.4.1`, OmniClip RAG keeps a first-class MCP Registry / MCPB line, so clients that support Registry discovery or MCPB installation can use that path first.
-
-- If your client supports Registry discovery, look for:
-  - `io.github.msjsc001/omniclip-rag-mcp`
-- If your client supports MCPB installation, prefer the Release asset:
-- `omniclip-rag-mcp-win-x64-v0.4.2.mcpb`
-- For the full Registry/MCPB explanation and client-specific setup notes, see [MCP_SETUP.md](MCP_SETUP.md).
-
-### Traditional Manual Route (Jan.ai / OpenClaw)
-
-If you downloaded the ZIP package manually, or your client does not support the official MCPB format yet, use the traditional absolute-path `stdio` setup below.
-
-### Jan.ai Reference Setup
-
-In Jan.ai, create a new MCP server with the following values:
-
-- `Server Name`: `OmniClip RAG`
-- `Transport Type`: `STDIO`
-- `Command`: the full path to `OmniClipRAG-MCP.exe`
-- `Arguments`: leave empty
-- `Environment Variables`: leave empty by default
-
-Example command path:
-
-```text
-D:\software\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.2\OmniClipRAG-MCP.exe
-```
-
-If you moved your Runtime or data root to a custom location, you may optionally add environment variables later, but most users do not need this.
-
-### OpenClaw Example
-
-OpenClaw is configured differently from Jan.ai. Instead of a visual MCP form, you usually register MCP servers in OpenClaw's config file:
-
-```text
-%USERPROFILE%\.openclaw\openclaw.json
-```
-
-Add an `mcpServers` entry like this:
-
-```json
-{
-  "mcpServers": {
-    "omniclip-rag": {
-      "transport": "stdio",
-      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.2\\OmniClipRAG-MCP.exe",
-      "args": []
-    }
-  }
-}
-```
-
-Then restart OpenClaw or its gateway process so it reloads the config.
-
-If your `openclaw.json` already contains other settings, only merge the `mcpServers.omniclip-rag` block into the existing file instead of replacing the whole config.
-
-### What The AI Can Do Through MCP
-
-V1 intentionally keeps the MCP surface very small and stable:
-
-- `omniclip.status`
-  - checks whether your local search environment is ready
-  - tells the AI whether it is running in `hybrid` mode or a degraded `lexical_only` mode
-- `omniclip.search`
-  - searches your local knowledge base
-  - returns explicit source labels such as `Markdown · xxx.md` or `PDF · xxx.pdf · Page N`
-
-### How To Ask The AI
-
-Once the MCP server is connected, you can simply speak to the AI in natural language. These prompts work well:
-
-- `Use OmniClip to search my local knowledge base for "project roadmap" and summarize the most useful points.`
-- `First call omniclip.status, then tell me whether my local knowledge base is ready.`
-- `Search only PDF results in OmniClip for "attention mechanism".`
-- `Find notes related to "my thinking model" in OmniClip and show me the most relevant 5 snippets with sources.`
-
-### Practical Tip
-
-OmniClip works best when you tell the AI exactly what kind of material you want:
-
-- topic words
-- note title fragments
-- whether you want `markdown`, `pdf`, or `tika`
-- whether you want a short answer or quoted source-backed snippets
-
-For more details and JSON examples, see [MCP_SETUP.md](MCP_SETUP.md).
+<br/>
 
 ---
 
@@ -297,7 +307,7 @@ flowchart LR
     C --> E["Hybrid Retrieval"]
     D --> E
     E --> F["Context Pack"]
-    F --> G["Any AI"]
+    F --> G["Any AI / MCP Client"]
 ```
 
 ### 🗄️ Surgical Data Storage Isolation
@@ -308,6 +318,8 @@ By default, data generation sits securely in `%APPDATA%\OmniClip RAG`. Under pro
 
 External heavy runtime payloads (e.g., native Torch environments) stay outside the packaged EXE and are now designed to converge into a shared AppData sidecar root after user-authorized installation (see [RUNTIME_SETUP.md](RUNTIME_SETUP.md)). Lean releases remain clean, while healthy legacy runtimes can still be reused across packaged version folders.
 
+<br/>
+
 ---
 
 ## 💻 Geek & Developer Entry Points
@@ -315,6 +327,11 @@ External heavy runtime payloads (e.g., native Torch environments) stay outside t
 OmniClip is completely open-sourced on GitHub. Whether you're interested in the code repository, demand high standards for personal data sovereignty, or your note vault is simply too vast to traverse natively, you can dive deeply into its control at any time.
 
 Currently, all source code and distribution packages have survived rigorous unit testing and smoke protocols:
+
+<details>
+<summary><b>💻 Click to expand: Development Build & Launch Commands</b></summary>
+
+<br/>
 
 **Start the Desktop GUI:**
 ```powershell
@@ -337,6 +354,43 @@ python launcher_mcp.py --mcp-selfcheck
 .\scripts\run.ps1 query "your question"
 ```
 
+</details>
+
+<br/>
+
+---
+
+## 🔄 Recent Key Updates
+
+<details>
+<summary><b>📦 Click to expand: V0.4+ Architecture & Release Evolution</b></summary>
+
+<br/>
+
+### V0.4.2 Key Updates
+`v0.4.2` is the release that turns OmniClip's recent internal convergence work into a publishable product line: data-root truth is now unified, GUI recovery can repair broken environments without silent fallback, and the desktop shell is cleaner to operate day to day.
+- 🗂 **Data root is now treated as the active environment root**: config, logs, cache, models, main Runtime, Tika Runtime, and workspaces now follow the same active data root contract instead of letting GUI, Runtime, and launcher guess separately.
+- 🚧 **Broken data roots now enter a recovery shell instead of trapping users outside the app**: when the active environment is unavailable, the GUI starts in a restricted recovery mode, explains the problem in plain language, and lets the user retry or switch to another saved environment.
+- 🔁 **Saved data-root switching is now a real environment switcher**: the GUI can keep multiple saved roots, forget invalid ones from the list, and switch whole environments through a controlled restart instead of partial hot state drift.
+- 🧰 **Desktop polish landed on top of the architecture work**: the query desk can collapse into a compact one-line form, classic UI themes were added, and the app icon chain was unified so runtime assets and packaged Windows builds stop drifting apart.
+- 🌐 **The documentation surface now includes a public website**: the GitHub Pages site is live at [msjsc001.github.io/OmniClip-RAG](https://msjsc001.github.io/OmniClip-RAG/), and the top-level docs now point to it directly.
+
+### V0.4.1 Key Updates
+`v0.4.1` turned the new MCP line from "a working second shell" into "a Registry-ready delivery line" so OmniClip could be published through the official MCP Registry instead of living only as a raw manual ZIP.
+- 🚀 **Official Registry route is now the primary discovery strategy**: the project now ships a formal `server.json` metadata file for MCP Registry publishing instead of targeting the deprecated `modelcontextprotocol/servers` README list.
+- 📦 **A standard MCPB package is now part of the release story**: `omniclip-rag-mcp-win-x64-v0.4.1.mcpb` becomes the Registry/MCPB-aware distribution asset, while the old ZIP remains for manual users.
+- 🧭 **README and MCP docs are now split for strangers, not just existing users**: the English README now exposes a first-screen MCP quickstart, the Chinese README keeps its original voice with a lighter MCP entry point, and `MCP_SETUP.md` now explains `ZIP vs .mcpb` explicitly.
+- 🛠 **The first Registry publish path is intentionally manual**: `0.4.1` is reserved as the first clean MCP Registry version so hash, metadata, and release assets can be verified before later automation.
+
+### V0.4.0 Key Updates
+`v0.4.0` introduced the first dedicated read-only MCP shell on top of the existing retrieval core, turning OmniClip from a desktop-only app into a standard MCP-capable local search engine.
+
+*(See Releases page for historical version update notes from V0.1.0 to the present).*
+
+</details>
+
+<br/>
+
 ---
 
 ## 📁 Documentation Hub
@@ -357,7 +411,7 @@ python launcher_mcp.py --mcp-selfcheck
 - [Retrieval Optimization Plan](plans/检索优化计划.md)
 - [Build Performance Plan](plans/建库性能优化计划.md)
 
-*(See Releases page for historical version update notes from V0.1.0 to the present).*
+<br/>
 
 ---
 
@@ -365,35 +419,22 @@ python launcher_mcp.py --mcp-selfcheck
 
 OmniClip stands on a serious amount of open-source work. The core projects that are directly integrated, explicitly relied on, or used in build/test flows today include:
 
-- **Python** for the main application/runtime foundation
-- **Qt / PySide6 / Shiboken6** for the desktop GUI
-- **SQLite** for authoritative local metadata, FTS, and state storage
-- **LanceDB** for local vector retrieval storage
-- **Apache Arrow / PyArrow** for table/vector data plumbing
-- **PyTorch** for local model execution on CPU / CUDA
-- **sentence-transformers** for embedding and cross-encoder integration
-- **Transformers / Hugging Face Hub** for model loading and cache orchestration
-- **BAAI/bge-m3** for the main embedding route
-- **BAAI/bge-reranker-v2-m3** for the optional reranker route
-- **PyPDF** for the dedicated PDF parsing path
-- **Apache Tika** for the extension-format sidecar parsing route
-- **Eclipse Temurin / Adoptium** for JRE distribution used by the Tika runtime path
-- **watchdog** for filesystem watch support
-- **PyInstaller** for Windows portable packaging
-- **pytest** for automated regression coverage
-- **ONNX Runtime** for CPU-first local inference execution and portable runtime closure
-- **MCP Python SDK / Model Context Protocol** for the official MCP server contract and tooling surface
-
-Thanks to these projects and their maintainers for the long-term engineering work that makes a tool like this possible.
+> `Python`, `Qt / PySide6 / Shiboken6`, `SQLite`, `LanceDB`, `Apache Arrow / PyArrow`, `PyTorch`, `sentence-transformers`, `Transformers / Hugging Face Hub`, `BAAI/bge-m3`, `BAAI/bge-reranker-v2-m3`, `PyPDF`, `Apache Tika`, `Eclipse Temurin / Adoptium`, `watchdog`, `PyInstaller`, `pytest`, `ONNX Runtime`, `MCP Python SDK / Model Context Protocol`.
+> 
+> Thanks to these projects and their maintainers for the long-term engineering work that makes a tool like this possible.
 
 ## 📜 License
 
 This project is released under the [MIT License](LICENSE).
 
----
+<br/>
 
-> ⚠️ **Disclaimer** ⚠️
-> 
+<details>
+<summary>⚠️ <b>Click to expand: Disclaimer</b></summary>
+
+<br/>
+
+> [!WARNING]
 > OmniClip RAG / 方寸引 is provided on an "as is" and "as available" basis, without warranties of any kind, whether express or implied, including but not limited to merchantability, fitness for a particular purpose, non-infringement, uninterrupted operation, or error-free behavior.
 > 
 > **You are solely responsible for:**
@@ -409,6 +450,8 @@ This project is released under the [MIT License](LICENSE).
 > The maintainers and contributors are not liable for any direct, indirect, incidental, consequential, special, exemplary, or punitive damages, or for any data loss, downtime, model misuse, privacy incident, operational interruption, or decision made based on the use or misuse of this project, to the maximum extent permitted by applicable law.
 > 
 > All third-party product names, model names, platforms, and trademarks mentioned in this repository remain the property of their respective owners. Their appearance here does not imply affiliation, endorsement, certification, or partnership.
+
+</details>
 
 <br/>
 
