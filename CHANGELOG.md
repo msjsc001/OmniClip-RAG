@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## V0.4.3 - 2026-03-23
+
+### Added
+
+- Added [RELEASE_NOTES_v0.4.3](releases/RELEASE_NOTES_v0.4.3.md) for the semantic-query honesty, active-data-root download, and release-hardening update.
+- Added a dedicated `OmniClipRAG-MCP.spec` packaging target so the formal `GUI + MCP ZIP + MCPB` release chain can be rebuilt from the repository without depending on an external missing file.
+- Added a visible multi-source model/reranker download chain for China-first environments, including ModelScope-first automatic download, live terminal output, heartbeat logging, and delete-model controls.
+
+### Changed
+
+- Changed visible app/package/release metadata to `v0.4.3` across the desktop app, MCP line, README badges, MCP setup examples, release notes, and Registry-facing release URLs.
+- Changed semantic bootstrap behavior so a healthy local semantic stack can automatically restore `vector_backend=lancedb`, while the overview chips explicitly distinguish lexical-only readiness from missing semantic vectors.
+- Changed GUI/MCP query honesty so `vector_backend=disabled`, missing vector tables, and degraded semantic fallback are surfaced as explicit warnings instead of being silently presented like full hybrid retrieval.
+- Changed automatic model and reranker downloads so target directories, logs, and runtime/model side effects always follow the current active data root instead of falling back to the default AppData root.
+
+### Fixed
+
+- Fixed the false "Markdown vector index missing" query warning when the real problem was that semantic retrieval had been disabled in config instead of the index being absent.
+- Fixed the packaged download worker crash in frozen EXE mode where ModelScope/tqdm could fail with `'NoneType' object has no attribute 'write'` when stdio streams were unavailable.
+- Fixed the release-chain drift where `build.py` expected `OmniClipRAG-MCP.spec` but the repository no longer carried the file, leaving MCP EXE and MCPB builds structurally incomplete.
+- Fixed remaining public-doc hygiene issues by removing tracked personal absolute-path examples from architecture/planning records before the next GitHub push.
+
 ## V0.4.2 - 2026-03-20
 
 ### Added
@@ -518,6 +540,5 @@
 - The current stable default remains `torch + bge-m3`.
 - ONNX remains a future optimization path, not the default production route for `V0.1.0`.
 - CLI remains available for debugging and automation, but GUI is now the primary workflow.
-
 
 

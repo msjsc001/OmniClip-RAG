@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-v0.4.2-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.3-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md) | [官网](https://msjsc001.github.io/OmniClip-RAG/)
 
@@ -40,7 +40,7 @@
 > **MCP 快速入口**
 >
 > 如果你想把方寸引接到 Jan.ai、OpenClaw、Claude Desktop、Cursor 或其他支持 MCP 的客户端，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
-> 从 `v0.4.2` 起，MCP 线除了继续提供手动 ZIP 外，也同步跟上了新的环境根目录、恢复模式与共享启动链，继续提供面向官方 MCP Registry / MCPB 客户端的标准发布物。
+> 从 `v0.4.3` 起，MCP 线在继续提供手动 ZIP 的同时，也已经把共享环境根、诚实降级提示、标准 MCPB 发布物和仓库内可复现构建链全部收紧到同一版发布面。
 
 ---
 
@@ -178,9 +178,9 @@
 - 桌面版 `OmniClipRAG.exe` 负责正常建库、维护和可视化使用
 - `OmniClipRAG-MCP.exe` 负责安静地在后台给 AI 提供“只读搜索接口”
 
-从 `v0.4.2` 开始，MCP 这条线会同时提供两种分发形态：
-- `OmniClipRAG-MCP-v0.4.2-win64.zip`：给手动配置 `stdio` 的用户
-- `omniclip-rag-mcp-win-x64-v0.4.2.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
+从 `v0.4.3` 开始，MCP 这条线会同时提供两种分发形态：
+- `OmniClipRAG-MCP-v0.4.3-win64.zip`：给手动配置 `stdio` 的用户
+- `omniclip-rag-mcp-win-x64-v0.4.3.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
 
 > [!CAUTION]
 > **使用前要先做什么？**
@@ -199,7 +199,7 @@
 - 如果客户端已经支持从 Registry 发现 MCP Server，请直接搜索或添加：
   - `io.github.msjsc001/omniclip-rag-mcp`
 - 如果客户端支持官方 MCPB 安装流，请优先使用 Release 中的：
-  - `omniclip-rag-mcp-win-x64-v0.4.2.mcpb`
+  - `omniclip-rag-mcp-win-x64-v0.4.3.mcpb`
 - 更详细的官方发布线、MCPB 与 ZIP 的区别、以及不同客户端的接入说明，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
 
 ### 传统手动路线（Jan.ai / OpenClaw）
@@ -221,7 +221,7 @@
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.2\\OmniClipRAG-MCP.exe",
+      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.3\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -371,6 +371,14 @@ python launcher_mcp.py --mcp-selfcheck
 <summary><b>📦 展开查看 V0.4+ 系列的核心演进（数据底座升级与 MCP 接入）</b></summary>
 
 <br/>
+
+### V0.4.3 重点更新
+`v0.4.3` 的重点，是把最近这轮 hotfix 从“能跑”收口成“对用户说真话、对发布链也说真话”的正式版本：语义搜索状态不再伪装、模型下载真正跟随当前环境、MCP 与打包链重新回到仓库内可复现状态。
+- 🧠 **语义检索状态终于诚实了**：如果 `vector_backend` 被关掉，或者当前库还没补建向量表，桌面端和 MCP 都会明确告诉你现在是词法降级态，而不是继续假装已经在跑完整混合检索。
+- 📁 **模型 / 重排模型 / Runtime 的目标目录真正统一跟随当前环境根**：下载、修复、删除、日志、缓存都锁到当前 active data root，不再悄悄回落到默认 `%APPDATA%` 根。
+- 🌏 **国内环境下的自动下载链更稳了**：现在优先 `ModelScope 国内源 -> HF 镜像 -> 官方源`，同时有终端实时输出、心跳日志和失败切换提示，不会再像黑箱一样一直停着。
+- 🧭 **索引状态提示更能指导下一步操作**：配置页会区分“索引已就绪但只有词法检索”与“语义后端已启用但还没补建向量表”，让用户知道到底该重建什么。
+- 🛠 **正式发布链补回仓库内闭环**：`OmniClipRAG-MCP.spec` 已重新纳入仓库，`GUI ZIP + MCP ZIP + MCPB` 三件套现在能从同一套源码版本直接重建。
 
 ### V0.4.2 重点更新
 `v0.4.2` 的重点，是把最近完成的一系列“底层收口”真正落成用户可以感知的稳定产品行为：数据目录不再只是保存路径，而是当前环境的唯一根；GUI 在目录损坏时也能进入恢复壳；桌面端细节也同步收紧。

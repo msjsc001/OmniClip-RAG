@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import omniclip_rag  # noqa: F401
+import omniclip_rag.ui_next_qt.config_workspace as config_workspace_module
 from PySide6 import QtCore, QtWidgets
 
 from omniclip_rag.app_entry.desktop import launch_desktop, main as desktop_main
@@ -20,7 +22,8 @@ from omniclip_rag.errors import BuildCancelledError
 from omniclip_rag.models import QueryInsights, QueryResult, SearchHit, SpaceEstimate
 from omniclip_rag.ui_i18n import data_root_reason_text, text
 from omniclip_rag.preflight import estimate_storage_for_vault
-from omniclip_rag.vector_index import get_local_model_dir
+from omniclip_rag.vector_index import get_local_model_dir, hf_repo_cache_dir
+from omniclip_rag.reranker import get_local_reranker_dir, get_local_reranker_repo_cache_dir
 from omniclip_rag.ui_next_qt.config_workspace import ConfigWorkspace
 from omniclip_rag.ui_next_qt.filter_models import PageBlocklistTableModel
 from omniclip_rag.ui_next_qt.main_window import MainWindow
@@ -189,7 +192,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             self.assertTrue(workspace.search_copy_button.isHidden())
@@ -289,6 +292,23 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_query_workspace_update_runtime_clears_stale_runtime_warning_hint(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._query_runtime_warnings = ('markdown_vector_index_missing',)
+            workspace._refresh_query_runtime_hint()
+            self.assertFalse(workspace.query_runtime_hint_label.isHidden())
+            workspace.update_runtime(config=config, paths=paths)
+            self.assertEqual(workspace._query_runtime_warnings, ())
+            self.assertTrue(workspace.query_runtime_hint_label.isHidden())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_query_workspace_snapshot_restores_source_filters(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -378,7 +398,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             workspace._current_query_text = '测试问题'
@@ -398,7 +418,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             workspace.resize(1400, 900)
@@ -432,7 +452,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             self.assertEqual(workspace.sub_tabs.tabText(workspace.sub_tabs.indexOf(workspace.runtime_page)), text('zh-CN', 'left_tab_runtime'))
@@ -449,7 +469,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         with patch('omniclip_rag.ui_next_qt.config_workspace.detect_acceleration', side_effect=AssertionError('should not be called during init')):
             workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
@@ -462,7 +482,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         scheduled: list[tuple[str, object]] = []
         try:
@@ -482,7 +502,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         seen_preferences: list[tuple[str, int]] = []
         workspace.uiPreferencesChanged.connect(lambda code, scale: seen_preferences.append((code, scale)))
@@ -514,7 +534,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         window = MainWindow(config=config, paths=paths, language_code='zh-CN', theme=theme, version='0.2.0')
         try:
             self.assertIsInstance(window.config_workspace, ConfigWorkspace)
@@ -562,7 +582,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         seen_busy: list[bool] = []
         try:
@@ -580,7 +600,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             workspace._busy = True
@@ -602,7 +622,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             labels = [label.text().strip() for label in workspace.quick_steps_widget.findChildren(QtWidgets.QLabel)]
@@ -619,7 +639,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             self.assertTrue(workspace.query_edit.toolTip())
@@ -636,7 +656,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         opened_log: list[bool] = []
         workspace.showQueryLogRequested.connect(lambda: opened_log.append(True))
@@ -682,7 +702,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         states: list[tuple[bool, str, str]] = []
         workspace.queryBlockStateChanged.connect(lambda blocked, title, detail: states.append((blocked, title, detail)))
@@ -728,7 +748,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         states: list[tuple[bool, str, str]] = []
         workspace.queryBlockStateChanged.connect(lambda blocked, title, detail: states.append((blocked, title, detail)))
@@ -751,7 +771,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             (paths.state_dir / 'index_state.json').write_text(json.dumps({
@@ -770,7 +790,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             workspace._refresh_status_summary({
@@ -782,6 +802,44 @@ class QtUiTests(unittest.TestCase):
             })
             workspace._refresh_extension_overview()
             self.assertEqual(workspace.index_chip.text(), text('zh-CN', 'index_ready'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_auto_enables_semantic_backend_when_local_model_is_ready(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'auto_enable_semantic_backend'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled', vector_model='BAAI/bge-m3')
+        save_config(config, paths)
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        status_messages: list[str] = []
+        workspace.statusMessageChanged.connect(status_messages.append)
+        try:
+            snapshot = {
+                'stats': {'files': 3, 'chunks': 7, 'refs': 1},
+                'index_state': 'ready',
+                'index_ready': True,
+                'watch_allowed': True,
+                'query_allowed': True,
+                'vector_table_ready': False,
+            }
+            with patch('omniclip_rag.ui_next_qt.config_workspace.is_local_model_ready', return_value=True), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.runtime_dependency_issue', return_value=None):
+                updated_config, updated_snapshot, auto_enabled = workspace._maybe_auto_enable_semantic_backend(config, paths, snapshot)
+            self.assertTrue(auto_enabled)
+            self.assertEqual(updated_config.vector_backend, 'lancedb')
+            loaded = load_config(paths)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.vector_backend, 'lancedb')
+            self.assertEqual(workspace.backend_combo.currentText(), 'lancedb')
+            self.assertIsNotNone(updated_snapshot)
+            assert updated_snapshot is not None
+            self.assertEqual(updated_snapshot.get('vector_backend'), 'lancedb')
+            workspace._refresh_status_summary(updated_snapshot)
+            self.assertEqual(workspace.index_chip.text(), text('zh-CN', 'index_ready_semantic_missing'))
+            self.assertEqual(status_messages[-1], text('zh-CN', 'status_semantic_backend_auto_enabled_rebuild', model='BAAI/bge-m3'))
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -1338,6 +1396,7 @@ class QtUiTests(unittest.TestCase):
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         install_script = TEST_ROOT / 'runtime_auto_repair_smoke' / 'InstallRuntime.ps1'
+        runtime_root = TEST_ROOT / 'runtime_auto_repair_smoke' / 'custom_runtime'
         install_script.parent.mkdir(parents=True, exist_ok=True)
         install_script.write_text('Write-Host runtime smoke', encoding='utf-8')
         try:
@@ -1345,6 +1404,7 @@ class QtUiTests(unittest.TestCase):
                 'install_script': str(install_script),
                 'recommended_profile': 'cuda',
                 'app_dir': str(install_script.parent),
+                'preferred_runtime_dir': str(runtime_root),
             }), patch.object(workspace, '_powershell_executable', return_value='powershell.exe'), patch('omniclip_rag.ui_next_qt.config_workspace.subprocess.Popen') as popen_mock:
                 workspace._run_runtime_auto_repair(source='mirror', component='semantic-core')
             popen_mock.assert_called_once()
@@ -1361,6 +1421,7 @@ class QtUiTests(unittest.TestCase):
             self.assertIn('-Component', command)
             self.assertIn('semantic-core', command)
             self.assertEqual(popen_mock.call_args.kwargs['cwd'], str(install_script.parent))
+            self.assertEqual(popen_mock.call_args.kwargs['env']['OMNICLIP_RUNTIME_ROOT'], str(runtime_root))
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -1369,7 +1430,7 @@ class QtUiTests(unittest.TestCase):
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             workspace._after_rebuild({'status': {'stats': {'files': 0, 'chunks': 0, 'refs': 0}}, 'stats': {'files': 3, 'chunks': 7, 'refs': 11, 'duplicate_block_ids': 0}, 'blocked': False})
@@ -1461,7 +1522,7 @@ class QtUiTests(unittest.TestCase):
                  patch('omniclip_rag.ui_next_qt.config_workspace.ModelDownloadDialog') as dialog_cls:
                 dialog_instance = dialog_cls.return_value
                 result = workspace._choose_model_download_mode('下载模型', config, paths)
-            self.assertEqual(result, 'manual')
+            self.assertEqual(result, ('manual', None))
             dialog_cls.assert_called_once()
             kwargs = dialog_cls.call_args.kwargs
             self.assertIn('hf download', kwargs['context']['official_download_command'])
@@ -1469,6 +1530,243 @@ class QtUiTests(unittest.TestCase):
             self.assertIn('https://hf-mirror.com/BAAI/bge-m3', kwargs['context']['mirror_url'])
             self.assertIn(str(get_local_model_dir(config, paths)), kwargs['context']['plain_text'])
             dialog_instance.exec.assert_called_once()
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_auto_model_download_prompts_for_source_and_returns_selection(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_model='BAAI/bge-m3')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_ask_yes_no_cancel', return_value=QtWidgets.QMessageBox.StandardButton.Yes), \
+                 patch.object(workspace, '_ask_model_download_source', return_value='mirror'):
+                result = workspace._choose_model_download_mode('下载模型', config, paths)
+            self.assertEqual(result, ('auto', 'mirror'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_manual_reranker_download_opens_copyable_dialog(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'manual_reranker_dialog'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), reranker_enabled=True)
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_ask_yes_no_cancel', return_value=QtWidgets.QMessageBox.StandardButton.No), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.ModelDownloadDialog') as dialog_cls:
+                dialog_instance = dialog_cls.return_value
+                result = workspace._choose_reranker_download_mode('下载重排模型', config, paths)
+            self.assertEqual(result, ('manual', None))
+            dialog_cls.assert_called_once()
+            kwargs = dialog_cls.call_args.kwargs
+            self.assertIn('hf download', kwargs['context']['official_download_command'])
+            self.assertIn('https://huggingface.co/', kwargs['context']['official_url'])
+            self.assertIn('https://hf-mirror.com/', kwargs['context']['mirror_url'])
+            self.assertIn(str(get_local_reranker_dir(config, paths)), kwargs['context']['plain_text'])
+            dialog_instance.exec.assert_called_once()
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_auto_reranker_download_prompts_for_source_and_returns_selection(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'auto_reranker_source'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), reranker_enabled=True)
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_ask_yes_no_cancel', return_value=QtWidgets.QMessageBox.StandardButton.Yes), \
+                 patch.object(workspace, '_ask_reranker_download_source', return_value='mirror'):
+                result = workspace._choose_reranker_download_mode('下载重排模型', config, paths)
+            self.assertEqual(result, ('auto', 'mirror'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_runtime_manual_context_uses_explicit_runtime_root(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'runtime_manual_context_data'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        runtime_root = Path(paths.shared_root) / 'runtime'
+        try:
+            with patch.object(workspace, '_current_runtime_repair_context', return_value={
+                'preferred_runtime_dir': str(runtime_root),
+                'runtime_dir': str(runtime_root),
+                'disk_usage': '1 GB',
+                'download_usage': '512 MB',
+                'recommended_profile': 'cpu',
+            }):
+                context = workspace._runtime_manual_context('semantic-core')
+            self.assertEqual(context['runtime_dir'], str(runtime_root))
+            self.assertIn('OMNICLIP_RUNTIME_ROOT', context['official_install_command'])
+            self.assertIn(str(runtime_root), context['official_install_command'])
+            self.assertIn('OMNICLIP_RUNTIME_ROOT', context['mirror_install_command'])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_launch_download_log_terminal_runs_worker_in_powershell(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'download_terminal_launch'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        log_path = paths.logs_dir / 'downloads' / 'model.log'
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text('', encoding='utf-8')
+        try:
+            worker_command = ['python.exe', '-m', 'omniclip_rag.app_entry.desktop', '--download-worker']
+            with patch.object(workspace, '_powershell_executable', return_value='powershell.exe'), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.subprocess.Popen') as popen_mock:
+                workspace._launch_download_log_terminal(
+                    log_path=log_path,
+                    title='OmniClip RAG - test',
+                    worker_command=worker_command,
+                )
+            popen_mock.assert_called_once()
+            command = popen_mock.call_args.args[0]
+            self.assertEqual(command[0], 'powershell.exe')
+            self.assertIn('-NoExit', command)
+            self.assertIn('-Command', command)
+            self.assertIn('omniclip_rag.app_entry.desktop', command[-1])
+            self.assertIn('--download-worker', command[-1])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_run_bootstrap_model_passes_worker_download_metadata(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'bootstrap_model_source'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_model='BAAI/bge-m3')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_collect_config', return_value=(config, paths)), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.is_local_model_ready', return_value=False), \
+                 patch.object(workspace, '_create_download_log_file', return_value=paths.logs_dir / 'downloads' / 'model.log'), \
+                 patch.object(workspace, '_start_download_task') as start_mock:
+                workspace._run_bootstrap_model(download_source='mirror', followup=lambda: None)
+            kwargs = start_mock.call_args.kwargs
+            self.assertEqual(kwargs['download_kind'], 'vector')
+            self.assertEqual(kwargs['repo_id'], config.vector_model)
+            self.assertEqual(kwargs['download_source'], 'mirror')
+            self.assertEqual(kwargs['target_dir'], get_local_model_dir(config, paths))
+            self.assertEqual(kwargs['hf_home_dir'], paths.cache_dir / 'models' / '_hf_home')
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_run_bootstrap_reranker_passes_worker_download_metadata(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'bootstrap_reranker_source'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), reranker_enabled=True)
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_collect_config', return_value=(config, paths)), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.is_local_reranker_ready', return_value=False), \
+                 patch.object(workspace, '_choose_reranker_download_mode', return_value=('auto', 'mirror')), \
+                 patch.object(workspace, '_create_download_log_file', return_value=paths.logs_dir / 'downloads' / 'reranker.log'), \
+                 patch.object(workspace, '_start_download_task') as start_mock:
+                workspace._run_bootstrap_reranker()
+            kwargs = start_mock.call_args.kwargs
+            self.assertEqual(kwargs['download_kind'], 'reranker')
+            self.assertEqual(kwargs['repo_id'], config.reranker_model)
+            self.assertEqual(kwargs['download_source'], 'mirror')
+            self.assertEqual(kwargs['target_dir'], get_local_reranker_dir(config, paths))
+            self.assertEqual(kwargs['hf_home_dir'], paths.cache_dir / 'models' / '_hf_home')
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_download_supervisor_switches_to_official_after_stall(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'download_supervisor_stall'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_model='BAAI/bge-m3')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        log_path = paths.logs_dir / 'downloads' / 'model.log'
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text('', encoding='utf-8')
+        target_dir = get_local_model_dir(config, paths)
+        repo_cache_dir = hf_repo_cache_dir(paths.cache_dir / 'models' / '_hf_home', config.vector_model)
+        now = time.monotonic()
+        try:
+            log_path.write_text('[2026-03-23 15:40:00] 下载心跳：已用时 01:35；最近 5 秒暂无新增文件或字节。\n', encoding='utf-8')
+            workspace._download_task_state = config_workspace_module._DownloadTaskState(
+                label_key='bootstrap_button',
+                kind='vector',
+                repo_id=config.vector_model,
+                config=config,
+                paths=paths,
+                target_dir=target_dir,
+                hf_home_dir=paths.cache_dir / 'models' / '_hf_home',
+                repo_cache_dir=repo_cache_dir,
+                requested_source='mirror',
+                active_source='mirror',
+                log_path=log_path,
+                pid_path=log_path.with_suffix('.pid'),
+                result_path=log_path.with_suffix('.result.json'),
+                terminal_title='OmniClip RAG - test',
+                start_message='start',
+                local_files_only=False,
+                on_success=lambda _payload: None,
+                on_failure=lambda *_args: None,
+                success_payload_builder=lambda: {},
+                worker_pid=123,
+                log_offset=0,
+                last_log_size=0,
+                last_progress_at=now - 95.0,
+                last_material_progress_at=now - 95.0,
+                last_sample_at=now - 6.0,
+                started_at=now - 95.0,
+            )
+            with patch.object(workspace, '_is_download_worker_alive', return_value=True), \
+                 patch.object(workspace, '_terminate_download_worker') as terminate_mock, \
+                 patch.object(workspace, '_launch_download_worker_for_state', return_value=True) as launch_mock:
+                workspace._poll_download_task()
+            state = workspace._download_task_state
+            self.assertIsNotNone(state)
+            self.assertEqual(state.active_source, 'official')
+            self.assertTrue(state.source_switched)
+            terminate_mock.assert_called_once()
+            launch_mock.assert_called_once_with(state)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_delete_buttons_remove_only_selected_model_directories(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'delete_model_dirs'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), reranker_enabled=True)
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        model_dir = get_local_model_dir(config, paths)
+        reranker_dir = get_local_reranker_dir(config, paths)
+        model_cache_dir = hf_repo_cache_dir(paths.cache_dir / 'models' / '_hf_home', config.vector_model)
+        reranker_cache_dir = get_local_reranker_repo_cache_dir(config, paths)
+        model_dir.mkdir(parents=True, exist_ok=True)
+        reranker_dir.mkdir(parents=True, exist_ok=True)
+        model_cache_dir.mkdir(parents=True, exist_ok=True)
+        reranker_cache_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with patch('PySide6.QtWidgets.QMessageBox.question', return_value=QtWidgets.QMessageBox.StandardButton.Yes), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.release_process_vector_resources'), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.release_process_reranker_resources'):
+                workspace._delete_local_model()
+                workspace._delete_local_reranker()
+            self.assertFalse(model_dir.exists())
+            self.assertFalse(reranker_dir.exists())
+            self.assertFalse(model_cache_dir.exists())
+            self.assertFalse(reranker_cache_dir.exists())
+            self.assertIn(config.vector_model, workspace.delete_model_button.text())
+            self.assertIn(config.reranker_model, workspace.delete_reranker_button.text())
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -1947,14 +2245,3 @@ class QtUiTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
-
-
-
-
-
-
-
-
-
-

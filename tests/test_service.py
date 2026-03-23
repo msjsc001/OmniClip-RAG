@@ -268,16 +268,34 @@ class ServiceTests(unittest.TestCase):
 
     def test_markdown_query_degrades_to_lexical_when_vector_runtime_is_not_ready(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_runtime_degraded'))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), vector_backend='lancedb', reranker_enabled=False)
         service = OmniClipService(config, data_paths)
         service.vector_index = _StubVectorIndex()
         try:
-            service.rebuild_index()
+            with patch.object(service, '_ensure_vector_runtime_ready', return_value=None):
+                service.rebuild_index()
             with patch('omniclip_rag.service.runtime_dependency_issue', return_value='当前还不能开始本地语义建库或向量查询。'):
                 result = service.query('块嵌入', limit=5, score_threshold=0, allowed_families={'markdown'})
             self.assertTrue(result.hits)
             self.assertTrue(all(hit.source_family == 'markdown' for hit in result.hits))
             self.assertEqual(result.insights.runtime_warnings, ('markdown_vector_runtime_unavailable',))
+        finally:
+            service.close()
+
+    def test_markdown_query_does_not_report_missing_vector_index_when_backend_is_disabled(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_runtime_backend_disabled'))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        service = OmniClipService(config, data_paths)
+        try:
+            service.rebuild_index()
+            result = service.query('块嵌入', limit=5, score_threshold=0, allowed_families={'markdown'})
+            self.assertTrue(result.hits)
+            self.assertEqual(result.insights.runtime_warnings, ('markdown_vector_backend_disabled',))
+            self.assertFalse(bool(result.insights.query_plan.get('vector_enabled')))
+            self.assertEqual(result.insights.query_plan.get('seed_strategy'), 'lexical_only')
+            self.assertNotIn('Markdown 语义向量召回', tuple(result.insights.query_plan.get('expected_steps') or ()))
+            self.assertFalse(bool(result.insights.query_stage.get('vector_query_planned')))
+            self.assertNotIn('markdown_vector_index_missing', result.insights.runtime_warnings)
         finally:
             service.close()
 
@@ -359,7 +377,12 @@ class ServiceTests(unittest.TestCase):
                 reranker_cls.return_value.warmup.return_value = {'backend': 'cross-encoder', 'model': config.reranker_model, 'model_ready': True}
                 result = service.bootstrap_reranker()
             reranker_cls.assert_called_once()
-            reranker_cls.return_value.warmup.assert_called_once_with(allow_download=True)
+            reranker_cls.return_value.warmup.assert_called_once_with(
+                allow_download=True,
+                download_source='official',
+                download_log=None,
+                warmup_after_download=False,
+            )
             self.assertTrue(result['model_ready'])
         finally:
             service.close()
@@ -372,9 +395,50 @@ class ServiceTests(unittest.TestCase):
             with patch('omniclip_rag.service.prepare_local_model_snapshot', return_value={'model_ready': True, 'model': config.vector_model}) as prepare_mock, \
                  patch('omniclip_rag.service.runtime_dependency_issue', return_value='runtime missing') as runtime_mock:
                 result = service.bootstrap_model()
-            prepare_mock.assert_called_once_with(config, data_paths, allow_download=True)
+            prepare_mock.assert_called_once_with(
+                config,
+                data_paths,
+                allow_download=True,
+                download_source='official',
+                download_log=None,
+            )
             runtime_mock.assert_not_called()
             self.assertTrue(result['model_ready'])
+        finally:
+            service.close()
+
+    def test_bootstrap_model_forwards_requested_download_source(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'bootstrap_model_mirror'))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), vector_backend='lancedb')
+        service = OmniClipService(config, data_paths)
+        try:
+            with patch('omniclip_rag.service.prepare_local_model_snapshot', return_value={'model_ready': True, 'model': config.vector_model}) as prepare_mock:
+                service.bootstrap_model(download_source='mirror')
+            prepare_mock.assert_called_once_with(
+                config,
+                data_paths,
+                allow_download=True,
+                download_source='mirror',
+                download_log=None,
+            )
+        finally:
+            service.close()
+
+    def test_bootstrap_reranker_forwards_requested_download_source_and_log(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'bootstrap_reranker_mirror'))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), reranker_enabled=True)
+        service = OmniClipService(config, data_paths)
+        callback = lambda _message: None
+        try:
+            with patch('omniclip_rag.service.CrossEncoderReranker') as reranker_cls:
+                reranker_cls.return_value.warmup.return_value = {'backend': 'cross-encoder', 'model': config.reranker_model, 'model_ready': True}
+                service.bootstrap_reranker(download_source='mirror', download_log=callback)
+            reranker_cls.return_value.warmup.assert_called_once_with(
+                allow_download=True,
+                download_source='mirror',
+                download_log=callback,
+                warmup_after_download=False,
+            )
         finally:
             service.close()
 
@@ -1021,5 +1085,3 @@ class ServiceTests(unittest.TestCase):
             service.close()
 if __name__ == "__main__":
     unittest.main()
-
-

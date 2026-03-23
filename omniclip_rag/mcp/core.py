@@ -27,6 +27,7 @@ MCP_DEFAULT_SNIPPET_CHARS = 800
 MCP_MAX_SNIPPET_CHARS = 1200
 MCP_SELFTEST_QUERY = '我的思维'
 _DEGRADED_WARNING_CODES = {
+    'markdown_vector_backend_disabled',
     'markdown_vector_runtime_unavailable',
     'markdown_vector_index_missing',
     'markdown_vector_query_failed',

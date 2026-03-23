@@ -477,8 +477,13 @@ class QueryWorkspace(QtWidgets.QWidget):
     def update_runtime(self, *, config, paths) -> None:
         self._config = config
         self._paths = paths
+        self.clear_runtime_feedback()
         self._refresh_page_blocklist_summary()
         self._refresh_query_limit_hint()
+
+    def clear_runtime_feedback(self) -> None:
+        self._query_runtime_warnings = ()
+        self._refresh_query_runtime_hint()
 
     def set_runtime_snapshot_provider(self, provider: Callable[[], tuple[object, object]] | None) -> None:
         self._runtime_snapshot_provider = provider
@@ -1073,4 +1078,3 @@ class QueryWorkspace(QtWidgets.QWidget):
         ]
         for column, width in enumerate(widths):
             self.table_view.setColumnWidth(column, width)
-

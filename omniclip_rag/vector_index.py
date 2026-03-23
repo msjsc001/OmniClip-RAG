@@ -1049,24 +1049,44 @@ def get_local_model_dir(config: AppConfig, paths: DataPaths) -> Path:
     return paths.cache_dir / "models" / _normalize_model_dir_name(config.vector_model)
 
 
+_MODEL_DOWNLOAD_IGNORE_PATTERNS = (
+    '.DS_Store',
+    '**/.DS_Store',
+    'Thumbs.db',
+    '**/Thumbs.db',
+    'imgs/*',
+    'imgs/**',
+)
+_MODEL_DOWNLOAD_MIRROR_ENDPOINT = 'https://hf-mirror.com'
+_MODELSCOPE_SUPPORTED_REPO_IDS = frozenset({
+    'BAAI/bge-m3',
+    'BAAI/bge-reranker-v2-m3',
+})
+
+
+def build_repo_download_guidance_context(repo_id: str, model_dir: Path, hf_home_dir: Path) -> dict[str, str]:
+    repo_name = str(repo_id or "BAAI/bge-m3").strip() or "BAAI/bge-m3"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    hf_home_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "model": repo_name,
+        "model_dir": str(model_dir),
+        "hf_home_dir": str(hf_home_dir),
+        "official_url": f"https://huggingface.co/{repo_name}",
+        "mirror_url": f"https://hf-mirror.com/{repo_name}",
+        "install_cli_command": 'PowerShell -ExecutionPolicy Bypass -NoProfile -Command "irm https://hf.co/cli/install.ps1 | iex"',
+        "official_download_command": _build_model_download_command(repo_name, model_dir, hf_home_dir, use_mirror=False),
+        "mirror_download_command": _build_model_download_command(repo_name, model_dir, hf_home_dir, use_mirror=True),
+    }
+
+
 def model_download_guidance_context(config: AppConfig, paths: DataPaths) -> dict[str, str]:
     model_name = str(config.vector_model or "BAAI/bge-m3").strip() or "BAAI/bge-m3"
     model_root = paths.cache_dir / "models"
     model_dir = get_local_model_dir(config, paths)
     hf_home_dir = model_root / "_hf_home"
     model_root.mkdir(parents=True, exist_ok=True)
-    model_dir.mkdir(parents=True, exist_ok=True)
-    hf_home_dir.mkdir(parents=True, exist_ok=True)
-    return {
-        "model": model_name,
-        "model_dir": str(model_dir),
-        "hf_home_dir": str(hf_home_dir),
-        "official_url": f"https://huggingface.co/{model_name}",
-        "mirror_url": f"https://hf-mirror.com/{model_name}",
-        "install_cli_command": 'PowerShell -ExecutionPolicy Bypass -NoProfile -Command "irm https://hf.co/cli/install.ps1 | iex"',
-        "official_download_command": _build_model_download_command(model_name, model_dir, hf_home_dir, use_mirror=False),
-        "mirror_download_command": _build_model_download_command(model_name, model_dir, hf_home_dir, use_mirror=True),
-    }
+    return build_repo_download_guidance_context(model_name, model_dir, hf_home_dir)
 
 
 def is_local_model_ready(config: AppConfig, paths: DataPaths) -> bool:
@@ -1080,6 +1100,8 @@ def prepare_local_model_snapshot(
     paths: DataPaths,
     *,
     allow_download: bool = True,
+    download_source: str = 'official',
+    download_log: Callable[[str], None] | None = None,
 ) -> dict[str, object]:
     if is_canary_vector_model(config.vector_model):
         return {
@@ -1098,15 +1120,17 @@ def prepare_local_model_snapshot(
     hf_home_dir.mkdir(parents=True, exist_ok=True)
     _configure_huggingface_environment(hf_home_dir)
 
+    if is_local_model_ready(config, paths):
+        _emit_model_download_log(download_log, f'本地模型目录已就绪，跳过下载：{local_model_dir}')
     if allow_download and not is_local_model_ready(config, paths):
-        try:
-            from huggingface_hub import snapshot_download
-        except ImportError as exc:
-            raise RuntimeDependencyError("当前还缺少 huggingface-hub 运行时，暂时不能下载模型缓存。") from exc
-        snapshot_download(
-            repo_id=config.vector_model,
-            local_dir=str(local_model_dir),
-            local_files_only=config.vector_local_files_only,
+        download_hf_repo_snapshot(
+            repo_id=str(config.vector_model or '').strip() or 'BAAI/bge-m3',
+            local_dir=local_model_dir,
+            hf_home_dir=hf_home_dir,
+            local_files_only=bool(config.vector_local_files_only),
+            download_source=download_source,
+            download_log=download_log,
+            missing_dependency_message="当前还缺少 huggingface-hub 运行时，暂时不能下载模型缓存。",
         )
 
     model_ready = is_local_model_ready(config, paths)
@@ -1115,6 +1139,7 @@ def prepare_local_model_snapshot(
             "本地模型目录存在，但内容不完整。请先重新运行下载模型，"
             "或清理 cache/models 后重新下载。"
         )
+    _emit_model_download_log(download_log, f'模型目录校验通过：{local_model_dir}')
 
     return {
         "backend": "model-cache",
@@ -1331,7 +1356,13 @@ def runtime_component_status(component_id: str) -> dict[str, object]:
     }
 
 
-def build_runtime_install_command(profile: str, *, source: str = 'official', component: str = 'all') -> str:
+def build_runtime_install_command(
+    profile: str,
+    *,
+    source: str = 'official',
+    component: str = 'all',
+    runtime_root: str | Path | None = None,
+) -> str:
     normalized_profile = (profile or 'cpu').strip().lower() or 'cpu'
     normalized_source = (source or 'official').strip().lower() or 'official'
     normalized_component = (component or 'all').strip().lower() or 'all'
@@ -1341,10 +1372,20 @@ def build_runtime_install_command(profile: str, *, source: str = 'official', com
         normalized_component = 'all'
     app_dir_literal = _powershell_literal(_application_root_dir())
     script_literal = _powershell_literal(_install_runtime_script_relative())
+    runtime_root_literal = ''
+    if runtime_root is not None and str(runtime_root).strip():
+        try:
+            runtime_root_value = Path(str(runtime_root)).expanduser().resolve(strict=False)
+        except OSError:
+            runtime_root_value = Path(str(runtime_root)).expanduser()
+        runtime_root_literal = _powershell_literal(runtime_root_value)
     command = (
         "PowerShell -ExecutionPolicy Bypass -NoProfile -Command "
-        f'\"Set-Location -LiteralPath {app_dir_literal}; & {script_literal} -Profile {normalized_profile} -Source {normalized_source} -WaitForProcessName OmniClipRAG'
+        f'\"Set-Location -LiteralPath {app_dir_literal}; '
     )
+    if runtime_root_literal:
+        command += f"$env:OMNICLIP_RUNTIME_ROOT = {runtime_root_literal}; "
+    command += f"& {script_literal} -Profile {normalized_profile} -Source {normalized_source} -WaitForProcessName OmniClipRAG"
     if normalized_component != 'all':
         command += f" -Component {normalized_component}"
     command += '\"'
@@ -2064,7 +2105,7 @@ def inspect_runtime_environment(runtime_dir: Path | None = None) -> dict[str, ob
         'runtime_complete': bool(layout['runtime_exists']) and bool(layout['runtime_has_content']) and not missing_items,
         'runtime_missing_items': missing_items,
         'active_runtime_dir': runtime_dir,
-        'preferred_runtime_dir': _preferred_runtime_dir_path(),
+        'preferred_runtime_dir': runtime_dir if runtime_dir is not None else _preferred_runtime_dir_path(),
     }
 
 
@@ -2565,9 +2606,19 @@ def runtime_guidance_context(
     extra_detail: str = '',
     acceleration_payload: dict[str, object] | None = None,
     runtime_state: dict[str, object] | None = None,
+    runtime_root: str | Path | None = None,
 ) -> dict[str, object]:
     acceleration = dict(acceleration_payload or detect_acceleration(force_refresh=force_refresh))
-    runtime_state = dict(runtime_state or inspect_runtime_environment())
+    normalized_runtime_root: Path | None = None
+    if runtime_root is not None and str(runtime_root).strip():
+        try:
+            normalized_runtime_root = Path(str(runtime_root)).expanduser().resolve(strict=False)
+        except OSError:
+            normalized_runtime_root = Path(str(runtime_root)).expanduser()
+    runtime_state = dict(runtime_state or inspect_runtime_environment(runtime_dir=normalized_runtime_root))
+    if normalized_runtime_root is not None:
+        runtime_state['preferred_runtime_dir'] = normalized_runtime_root
+        runtime_state.setdefault('active_runtime_dir', normalized_runtime_root)
     requested = (device_name or 'auto').strip().lower() or 'auto'
     runtime_name = (runtime_name or 'torch').strip().lower() or 'torch'
     wants_gpu = requested in {'auto', 'gpu', 'cuda'} and bool(acceleration.get('gpu_present'))
@@ -2577,8 +2628,8 @@ def runtime_guidance_context(
     install_target_dir = Path(runtime_state.get('preferred_runtime_dir') or runtime_dir)
     install_script = _install_runtime_script_path()
     source_urls = runtime_install_sources()
-    official_command = build_runtime_install_command(recommended_profile, source='official', component='all')
-    mirror_command = build_runtime_install_command(recommended_profile, source='mirror', component='all')
+    official_command = build_runtime_install_command(recommended_profile, source='official', component='all', runtime_root=install_target_dir)
+    mirror_command = build_runtime_install_command(recommended_profile, source='mirror', component='all', runtime_root=install_target_dir)
     command = official_command
     gpu_name = str(acceleration.get('gpu_name') or acceleration.get('cuda_name') or '').strip()
     nvcc_version = str(acceleration.get('nvcc_version') or '').strip()
@@ -2922,6 +2973,208 @@ def _powershell_literal(value: str | Path) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _model_download_endpoint(download_source: str) -> str | None:
+    normalized_source = (download_source or 'official').strip().lower() or 'official'
+    return _MODEL_DOWNLOAD_MIRROR_ENDPOINT if normalized_source == 'mirror' else None
+
+
+def hf_repo_cache_dir(hf_home_dir: Path, repo_id: str, *, repo_type: str = 'model') -> Path:
+    normalized_type = (repo_type or 'model').strip().lower() or 'model'
+    prefix = {
+        'model': 'models',
+        'dataset': 'datasets',
+        'space': 'spaces',
+    }.get(normalized_type, 'models')
+    repo_key = re.sub(r'[\\/]+', '--', str(repo_id or '').strip()).strip('-') or 'repo'
+    return Path(hf_home_dir) / 'hub' / f'{prefix}--{repo_key}'
+
+
+def _supports_modelscope_repo(repo_id: str) -> bool:
+    normalized_repo_id = str(repo_id or '').strip()
+    return normalized_repo_id in _MODELSCOPE_SUPPORTED_REPO_IDS
+
+
+def _model_download_attempt_chain(download_source: str, repo_id: str) -> tuple[str, ...]:
+    normalized_source = (download_source or 'official').strip().lower() or 'official'
+    if normalized_source == 'official':
+        return ('hf-official',)
+    attempts: list[str] = []
+    if _supports_modelscope_repo(repo_id):
+        attempts.append('modelscope')
+    attempts.append('hf-mirror')
+    attempts.append('hf-official')
+    return tuple(dict.fromkeys(attempts))
+
+
+def _model_download_attempt_label(attempt: str) -> str:
+    normalized_attempt = (attempt or '').strip().lower()
+    if normalized_attempt == 'modelscope':
+        return 'ModelScope 国内源'
+    if normalized_attempt == 'hf-mirror':
+        return 'HF 镜像源'
+    return 'Hugging Face 官方源'
+
+
+def model_download_attempt_labels(download_source: str, repo_id: str) -> tuple[str, ...]:
+    return tuple(_model_download_attempt_label(item) for item in _model_download_attempt_chain(download_source, repo_id))
+
+
+def _download_repo_snapshot_via_huggingface(
+    *,
+    repo_id: str,
+    local_dir: Path,
+    local_files_only: bool,
+    download_log: Callable[[str], None] | None = None,
+    endpoint: str | None = None,
+    missing_dependency_message: str,
+) -> str:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeDependencyError(missing_dependency_message) from exc
+    snapshot_kwargs = {
+        'repo_id': repo_id,
+        'local_dir': str(local_dir),
+        'local_files_only': bool(local_files_only),
+        'ignore_patterns': list(_MODEL_DOWNLOAD_IGNORE_PATTERNS),
+        'local_dir_use_symlinks': False,
+    }
+    tqdm_class = _build_snapshot_download_tqdm_class(download_log, repo_id)
+    if tqdm_class is not None:
+        snapshot_kwargs['tqdm_class'] = tqdm_class
+    snapshot_download(endpoint=endpoint, **snapshot_kwargs)
+    return str(local_dir)
+
+
+def _download_repo_snapshot_via_modelscope(
+    *,
+    repo_id: str,
+    local_dir: Path,
+    local_files_only: bool,
+    missing_dependency_message: str,
+) -> str:
+    try:
+        from modelscope.hub.snapshot_download import snapshot_download as modelscope_snapshot_download
+    except ImportError as exc:
+        raise RuntimeDependencyError(
+            '当前还缺少 ModelScope 下载运行时，暂时不能使用国内推荐源自动下载模型。'
+        ) from exc
+    try:
+        return str(
+            modelscope_snapshot_download(
+                model_id=repo_id,
+                local_dir=str(local_dir),
+                local_files_only=bool(local_files_only),
+                ignore_patterns=list(_MODEL_DOWNLOAD_IGNORE_PATTERNS),
+            )
+        )
+    except RuntimeDependencyError:
+        raise
+    except Exception as exc:
+        raise exc
+
+
+def download_hf_repo_snapshot(
+    *,
+    repo_id: str,
+    local_dir: Path,
+    hf_home_dir: Path,
+    local_files_only: bool,
+    download_source: str = 'official',
+    download_log: Callable[[str], None] | None = None,
+    missing_dependency_message: str,
+) -> str:
+    local_dir.parent.mkdir(parents=True, exist_ok=True)
+    hf_home_dir.mkdir(parents=True, exist_ok=True)
+    _configure_huggingface_environment(hf_home_dir)
+    repo_cache_dir = hf_repo_cache_dir(hf_home_dir, repo_id)
+    normalized_download_source = (download_source or 'official').strip().lower() or 'official'
+    attempt_chain = _model_download_attempt_chain(normalized_download_source, repo_id)
+    _emit_model_download_log(download_log, f'准备下载 Hugging Face 仓库：{repo_id}')
+    _emit_model_download_log(download_log, f'目标目录：{local_dir}')
+    _emit_model_download_log(download_log, f'HF 缓存目录：{repo_cache_dir}')
+    _emit_model_download_log(download_log, f'下载源：{_model_download_source_label(normalized_download_source)}')
+    _emit_model_download_log(download_log, '开始拉取文件清单并写入本地缓存…')
+    if len(attempt_chain) > 1:
+        _emit_model_download_log(
+            download_log,
+            '当前推荐链路：' + ' -> '.join(_model_download_attempt_label(item) for item in attempt_chain),
+        )
+    last_exc: Exception | None = None
+    for index, attempt in enumerate(attempt_chain):
+        attempt_label = _model_download_attempt_label(attempt)
+        _emit_model_download_log(download_log, f'开始尝试 {attempt_label}…')
+        try:
+            if attempt == 'modelscope':
+                _download_repo_snapshot_via_modelscope(
+                    repo_id=repo_id,
+                    local_dir=local_dir,
+                    local_files_only=bool(local_files_only),
+                    missing_dependency_message=missing_dependency_message,
+                )
+            else:
+                _download_repo_snapshot_via_huggingface(
+                    repo_id=repo_id,
+                    local_dir=local_dir,
+                    local_files_only=bool(local_files_only),
+                    download_log=download_log,
+                    endpoint=_MODEL_DOWNLOAD_MIRROR_ENDPOINT if attempt == 'hf-mirror' else None,
+                    missing_dependency_message=missing_dependency_message,
+                )
+            if attempt != attempt_chain[-1]:
+                _emit_model_download_log(download_log, f'{attempt_label} 已成功完成下载。')
+            break
+        except Exception as exc:
+            last_exc = exc
+            remaining = attempt_chain[index + 1:]
+            if not remaining:
+                _emit_model_download_log(download_log, f'下载失败：{exc.__class__.__name__}: {exc}')
+                raise
+            next_label = _model_download_attempt_label(remaining[0])
+            _emit_model_download_log(
+                download_log,
+                f'{attempt_label} 失败，准备切换到 {next_label}：{exc.__class__.__name__}: {exc}',
+            )
+            continue
+    if last_exc is not None and not local_dir.exists():
+        raise last_exc
+    _emit_model_download_log(download_log, f'下载完成：{local_dir}')
+    return str(local_dir)
+
+
+def _should_retry_model_download_via_official(
+    download_source: str,
+    exc: BaseException,
+    *,
+    local_files_only: bool,
+) -> bool:
+    if local_files_only or _model_download_endpoint(download_source) is None:
+        return False
+    hub_http_error_type = None
+    request_exception_type = None
+    try:
+        from huggingface_hub.errors import HfHubHTTPError
+
+        hub_http_error_type = HfHubHTTPError
+    except Exception:
+        hub_http_error_type = None
+    try:
+        from requests import RequestException
+
+        request_exception_type = RequestException
+    except Exception:
+        request_exception_type = None
+    retryable_types = tuple(
+        item for item in (hub_http_error_type, request_exception_type) if isinstance(item, type)
+    )
+    if retryable_types and isinstance(exc, retryable_types):
+        return True
+    detail = f'{exc.__class__.__name__}: {exc}'.lower()
+    return 'hf-mirror.com' in detail and any(
+        token in detail for token in ('403', '404', 'forbidden', 'http', 'connection', 'timeout', 'ssl')
+    )
+
+
 def _build_model_download_command(repo_id: str, model_dir: Path, hf_home_dir: Path, *, use_mirror: bool) -> str:
     command_parts = [
         f"$target = {_powershell_literal(model_dir)}",
@@ -2930,10 +3183,84 @@ def _build_model_download_command(repo_id: str, model_dir: Path, hf_home_dir: Pa
         "$env:HF_HOME = $hfHome",
     ]
     if use_mirror:
-        command_parts.append("$env:HF_ENDPOINT = 'https://hf-mirror.com'")
-    command_parts.append(f"hf download {_powershell_literal(repo_id)} --local-dir $target")
+        command_parts.append(f"$env:HF_ENDPOINT = {_powershell_literal(_MODEL_DOWNLOAD_MIRROR_ENDPOINT)}")
+    exclude_args = " ".join(_powershell_literal(pattern) for pattern in _MODEL_DOWNLOAD_IGNORE_PATTERNS)
+    command_parts.append(f"hf download {_powershell_literal(repo_id)} --local-dir $target --exclude {exclude_args}")
     command = "; ".join(command_parts)
     return f'PowerShell -ExecutionPolicy Bypass -NoProfile -Command "{command}"'
+
+
+def _emit_model_download_log(download_log: Callable[[str], None] | None, message: str) -> None:
+    if download_log is None:
+        return
+    text_value = str(message or '').strip()
+    if text_value:
+        download_log(text_value)
+
+
+def _model_download_source_label(download_source: str) -> str:
+    return '镜像源（推荐）' if _model_download_endpoint(download_source) else '官方源'
+
+
+def _build_snapshot_download_tqdm_class(
+    download_log: Callable[[str], None] | None,
+    repo_id: str,
+):
+    if download_log is None:
+        return None
+    try:
+        from tqdm.auto import tqdm as _base_tqdm
+    except Exception:
+        return None
+
+    class _LoggingTqdm(_base_tqdm):
+        def __init__(self, *args, **kwargs):
+            self._omniclip_last_logged_percent = -1
+            self._omniclip_last_logged_at = 0.0
+            self._omniclip_last_signature = ''
+            super().__init__(*args, **kwargs)
+            self._omniclip_log(force=True)
+
+        def update(self, n=1):
+            result = super().update(n)
+            self._omniclip_log()
+            return result
+
+        def refresh(self, *args, **kwargs):
+            result = super().refresh(*args, **kwargs)
+            self._omniclip_log()
+            return result
+
+        def close(self):
+            self._omniclip_log(force=True, completed=True)
+            return super().close()
+
+        def _omniclip_log(self, *, force: bool = False, completed: bool = False) -> None:
+            now = time.time()
+            desc = str(getattr(self, 'desc', '') or '').strip() or repo_id
+            total = getattr(self, 'total', None)
+            current = int(getattr(self, 'n', 0) or 0)
+            if completed:
+                download_log(f'[{desc}] 已结束')
+                self._omniclip_last_logged_at = now
+                return
+            if isinstance(total, (int, float)) and float(total) > 0:
+                total_value = max(int(total), 1)
+                percent = max(0, min(int((current / max(total_value, 1)) * 100), 100))
+                should_log = force or percent >= 100 or percent == 0 or percent // 10 != self._omniclip_last_logged_percent // 10
+                if not should_log and now - self._omniclip_last_logged_at < 5.0:
+                    return
+                self._omniclip_last_logged_percent = percent
+                download_log(f'[{desc}] {current}/{total_value} ({percent}%)')
+            else:
+                signature = f'{desc}:{current}'
+                if not force and signature == self._omniclip_last_signature and now - self._omniclip_last_logged_at < 5.0:
+                    return
+                self._omniclip_last_signature = signature
+                download_log(f'[{desc}] 已处理 {current}')
+            self._omniclip_last_logged_at = now
+
+    return _LoggingTqdm
 
 
 def _is_model_dir_ready(path: Path, runtime: str) -> bool:
@@ -3012,11 +3339,6 @@ def _wait_for_controls(pause_event: threading.Event | None, cancel_event: thread
         if pause_event is None or not pause_event.is_set():
             return
         time.sleep(0.12)
-
-
-
-
-
 
 
 

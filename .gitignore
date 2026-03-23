@@ -21,6 +21,7 @@ dist/
 dist_smoke/
 *.spec
 !OmniClipRAG.spec
+!OmniClipRAG-MCP.spec
 
 # Local app data / databases / logs
 /cache/
@@ -37,6 +38,7 @@ local_appdata/
 *.db-shm
 *.log
 *.lance/
+*.mcpb
 
 # Editor / OS noise
 .vscode/

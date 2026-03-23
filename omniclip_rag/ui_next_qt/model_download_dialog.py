@@ -53,15 +53,15 @@ class ModelDownloadDialog(QtWidgets.QDialog):
         self._add_cli_install_card(body_layout)
         self._add_source_card(
             body_layout,
-            title=self._tr('model_manual_dialog_official_title'),
-            url=self._value('official_url'),
-            command=self._value('official_download_command'),
-        )
-        self._add_source_card(
-            body_layout,
             title=self._tr('model_manual_dialog_mirror_title'),
             url=self._value('mirror_url'),
             command=self._value('mirror_download_command'),
+        )
+        self._add_source_card(
+            body_layout,
+            title=self._tr('model_manual_dialog_official_title'),
+            url=self._value('official_url'),
+            command=self._value('official_download_command'),
         )
         self._add_finish_card(body_layout)
         body_layout.addStretch(1)

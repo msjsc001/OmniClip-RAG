@@ -15,7 +15,7 @@ from unittest.mock import patch
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import RuntimeDependencyError
 from omniclip_rag.canary_backend import CANARY_VECTOR_MODEL_ID
-from omniclip_rag.vector_index import LanceDbVectorIndex, _discover_active_runtime_dir, _preferred_runtime_dir_path, _probe_runtime_semantic_core_inprocess, _runtime_component_dependency_ids, _runtime_import_environment, _runtime_search_roots, build_runtime_install_command, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, probe_runtime_gpu_execution, refresh_runtime_capability_snapshot, runtime_dependency_issue, runtime_guidance_context, runtime_management_snapshot, probe_runtime_gpu_query_execution
+from omniclip_rag.vector_index import LanceDbVectorIndex, _MODEL_DOWNLOAD_IGNORE_PATTERNS, _discover_active_runtime_dir, _preferred_runtime_dir_path, _probe_runtime_semantic_core_inprocess, _runtime_component_dependency_ids, _runtime_import_environment, _runtime_search_roots, build_runtime_install_command, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, prepare_local_model_snapshot, probe_runtime_gpu_execution, refresh_runtime_capability_snapshot, runtime_dependency_issue, runtime_guidance_context, runtime_management_snapshot, probe_runtime_gpu_query_execution
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -339,6 +339,15 @@ class VectorIndexTests(unittest.TestCase):
         self.assertIn(r"& '.\InstallRuntime.ps1'", command)
         self.assertIn('-WaitForProcessName OmniClipRAG', command)
         self.assertIn('-Component semantic-core', command)
+
+    def test_build_runtime_install_command_injects_runtime_root_override_once(self) -> None:
+        expected_root = Path(r'D:/软件编写/OmniClip RAG/dist/OmniClipRAG-v0.2.4')
+        runtime_root = Path(r'D:/Users/test/AppData/Roaming/OmniClip RAG/shared/runtime')
+        with patch('omniclip_rag.vector_index._application_root_dir', return_value=expected_root), \
+             patch('omniclip_rag.vector_index._install_runtime_script_relative', return_value=r'.\InstallRuntime.ps1'):
+            command = build_runtime_install_command('cpu', source='official', component='all', runtime_root=runtime_root)
+        self.assertIn(f"$env:OMNICLIP_RUNTIME_ROOT = '{runtime_root}'", command)
+        self.assertEqual(command.count('OMNICLIP_RUNTIME_ROOT'), 1)
 
     def test_runtime_dependency_issue_returns_guidance_when_imports_are_missing(self) -> None:
         config = AppConfig(
@@ -1164,6 +1173,280 @@ class VectorIndexTests(unittest.TestCase):
         self.assertIn('hf download', result["official_download_command"])
         self.assertIn(result["model_dir"], result["official_download_command"])
         self.assertIn('HF_ENDPOINT', result["mirror_download_command"])
+        self.assertIn('--exclude', result["official_download_command"])
+        self.assertIn('--exclude', result["mirror_download_command"])
+        for pattern in _MODEL_DOWNLOAD_IGNORE_PATTERNS:
+            self.assertIn(pattern, result["official_download_command"])
+            self.assertIn(pattern, result["mirror_download_command"])
+
+    def test_prepare_local_model_snapshot_uses_hf_mirror_only_for_unsupported_repo(self) -> None:
+        mirror_paths = ensure_data_paths(str(TEST_DATA_ROOT / "mirror_bootstrap"))
+        official_paths = ensure_data_paths(str(TEST_DATA_ROOT / "official_bootstrap"))
+        mirror_config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(mirror_paths.global_root),
+            vector_model="Example/custom-model",
+        )
+        official_config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(official_paths.global_root),
+            vector_model="Example/custom-model",
+        )
+        calls: list[dict[str, object]] = []
+
+        def fake_snapshot_download(**kwargs):
+            calls.append(dict(kwargs))
+            local_dir = Path(str(kwargs["local_dir"]))
+            local_dir.mkdir(parents=True, exist_ok=True)
+            (local_dir / "modules.json").write_text("{}", encoding="utf-8")
+            (local_dir / "config.json").write_text("{}", encoding="utf-8")
+            (local_dir / "pytorch_model.bin").write_bytes(b"ok")
+            return str(local_dir)
+
+        fake_hub = types.ModuleType("huggingface_hub")
+        fake_hub.snapshot_download = fake_snapshot_download
+        fake_hub.constants = types.SimpleNamespace(
+            HF_HOME="",
+            hf_cache_home="",
+            HF_HUB_CACHE="",
+            HUGGINGFACE_HUB_CACHE="",
+            HUGGINGFACE_ASSETS_CACHE="",
+            HF_XET_CACHE="",
+            HF_HUB_DISABLE_XET=False,
+        )
+
+        with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
+            prepare_local_model_snapshot(mirror_config, mirror_paths, allow_download=True, download_source='mirror')
+            prepare_local_model_snapshot(official_config, official_paths, allow_download=True, download_source='official')
+
+        self.assertEqual(calls[0]["endpoint"], 'https://hf-mirror.com')
+        self.assertIsNone(calls[1]["endpoint"])
+        self.assertEqual(tuple(calls[0]["ignore_patterns"]), _MODEL_DOWNLOAD_IGNORE_PATTERNS)
+        self.assertEqual(tuple(calls[1]["ignore_patterns"]), _MODEL_DOWNLOAD_IGNORE_PATTERNS)
+        self.assertFalse(calls[0]["local_dir_use_symlinks"])
+        self.assertFalse(calls[1]["local_dir_use_symlinks"])
+
+    def test_prepare_local_model_snapshot_prefers_modelscope_for_supported_repo(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "modelscope_bootstrap"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_model="BAAI/bge-m3",
+        )
+        hf_calls: list[dict[str, object]] = []
+        modelscope_calls: list[dict[str, object]] = []
+
+        def fake_ms_snapshot_download(**kwargs):
+            modelscope_calls.append(dict(kwargs))
+            local_dir = Path(str(kwargs["local_dir"]))
+            local_dir.mkdir(parents=True, exist_ok=True)
+            (local_dir / "modules.json").write_text("{}", encoding="utf-8")
+            (local_dir / "config.json").write_text("{}", encoding="utf-8")
+            (local_dir / "pytorch_model.bin").write_bytes(b"ok")
+            return str(local_dir)
+
+        def fake_hf_snapshot_download(**kwargs):
+            hf_calls.append(dict(kwargs))
+            raise AssertionError('huggingface_hub should not be used when ModelScope succeeds first')
+
+        fake_hub = types.ModuleType("huggingface_hub")
+        fake_hub.snapshot_download = fake_hf_snapshot_download
+        fake_hub.constants = types.SimpleNamespace(
+            HF_HOME="",
+            hf_cache_home="",
+            HF_HUB_CACHE="",
+            HUGGINGFACE_HUB_CACHE="",
+            HUGGINGFACE_ASSETS_CACHE="",
+            HF_XET_CACHE="",
+            HF_HUB_DISABLE_XET=False,
+        )
+        fake_modelscope = types.ModuleType("modelscope")
+        fake_modelscope_hub = types.ModuleType("modelscope.hub")
+        fake_modelscope_snapshot = types.ModuleType("modelscope.hub.snapshot_download")
+        fake_modelscope_snapshot.snapshot_download = fake_ms_snapshot_download
+
+        with patch.dict(
+            sys.modules,
+            {
+                "huggingface_hub": fake_hub,
+                "modelscope": fake_modelscope,
+                "modelscope.hub": fake_modelscope_hub,
+                "modelscope.hub.snapshot_download": fake_modelscope_snapshot,
+            },
+        ):
+            result = prepare_local_model_snapshot(config, data_paths, allow_download=True, download_source='mirror')
+
+        self.assertTrue(result["model_ready"])
+        self.assertEqual(len(modelscope_calls), 1)
+        self.assertEqual(modelscope_calls[0]["model_id"], "BAAI/bge-m3")
+        self.assertEqual(tuple(modelscope_calls[0]["ignore_patterns"]), _MODEL_DOWNLOAD_IGNORE_PATTERNS)
+        self.assertEqual(hf_calls, [])
+
+    def test_prepare_local_model_snapshot_emits_download_log_and_progress_lines(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "download_log_bootstrap"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_model="BAAI/bge-m3",
+        )
+        logs: list[str] = []
+
+        def fake_snapshot_download(**kwargs):
+            tqdm_class = kwargs.get("tqdm_class")
+            if tqdm_class is not None:
+                bar = tqdm_class(total=100, desc='weights.bin')
+                bar.update(50)
+                bar.update(50)
+                bar.close()
+            local_dir = Path(str(kwargs["local_dir"]))
+            local_dir.mkdir(parents=True, exist_ok=True)
+            (local_dir / "modules.json").write_text("{}", encoding="utf-8")
+            (local_dir / "config.json").write_text("{}", encoding="utf-8")
+            (local_dir / "pytorch_model.bin").write_bytes(b"ok")
+            return str(local_dir)
+
+        fake_hub = types.ModuleType("huggingface_hub")
+        fake_hub.snapshot_download = fake_snapshot_download
+        fake_hub.constants = types.SimpleNamespace(
+            HF_HOME="",
+            hf_cache_home="",
+            HF_HUB_CACHE="",
+            HUGGINGFACE_HUB_CACHE="",
+            HUGGINGFACE_ASSETS_CACHE="",
+            HF_XET_CACHE="",
+            HF_HUB_DISABLE_XET=False,
+        )
+
+        with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
+            prepare_local_model_snapshot(
+                config,
+                data_paths,
+                allow_download=True,
+                download_source='mirror',
+                download_log=logs.append,
+            )
+
+        self.assertTrue(any('准备下载 Hugging Face 仓库' in line for line in logs))
+        self.assertTrue(any('目标目录：' in line for line in logs))
+        self.assertTrue(any('镜像源（推荐）' in line for line in logs))
+        self.assertTrue(any('weights.bin' in line for line in logs))
+        self.assertTrue(any('模型目录校验通过' in line for line in logs))
+
+    def test_prepare_local_model_snapshot_retries_official_when_hf_mirror_rejects_nonessential_file(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "mirror_retry_bootstrap"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_model="Example/custom-model",
+        )
+        calls: list[dict[str, object]] = []
+
+        class FakeHfHubHTTPError(Exception):
+            pass
+
+        def fake_snapshot_download(**kwargs):
+            calls.append(dict(kwargs))
+            if len(calls) == 1:
+                raise FakeHfHubHTTPError(
+                    '403 Forbidden: Cannot access content at: '
+                    'https://hf-mirror.com/api/resolve-cache/models/BAAI/bge-m3/imgs%2F.DS_Store'
+                )
+            local_dir = Path(str(kwargs["local_dir"]))
+            local_dir.mkdir(parents=True, exist_ok=True)
+            (local_dir / "modules.json").write_text("{}", encoding="utf-8")
+            (local_dir / "config.json").write_text("{}", encoding="utf-8")
+            (local_dir / "pytorch_model.bin").write_bytes(b"ok")
+            return str(local_dir)
+
+        fake_hub = types.ModuleType("huggingface_hub")
+        fake_hub.snapshot_download = fake_snapshot_download
+        fake_hub.constants = types.SimpleNamespace(
+            HF_HOME="",
+            hf_cache_home="",
+            HF_HUB_CACHE="",
+            HUGGINGFACE_HUB_CACHE="",
+            HUGGINGFACE_ASSETS_CACHE="",
+            HF_XET_CACHE="",
+            HF_HUB_DISABLE_XET=False,
+        )
+        fake_hub_errors = types.ModuleType("huggingface_hub.errors")
+        fake_hub_errors.HfHubHTTPError = FakeHfHubHTTPError
+
+        with patch.dict(sys.modules, {"huggingface_hub": fake_hub, "huggingface_hub.errors": fake_hub_errors}):
+            result = prepare_local_model_snapshot(config, data_paths, allow_download=True, download_source='mirror')
+
+        self.assertTrue(result["model_ready"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["endpoint"], 'https://hf-mirror.com')
+        self.assertIsNone(calls[1]["endpoint"])
+        self.assertEqual(tuple(calls[0]["ignore_patterns"]), _MODEL_DOWNLOAD_IGNORE_PATTERNS)
+        self.assertEqual(tuple(calls[1]["ignore_patterns"]), _MODEL_DOWNLOAD_IGNORE_PATTERNS)
+        self.assertFalse(calls[0]["local_dir_use_symlinks"])
+        self.assertFalse(calls[1]["local_dir_use_symlinks"])
+
+    def test_prepare_local_model_snapshot_falls_back_from_modelscope_to_hf_mirror_and_official(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "modelscope_fallback_bootstrap"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_model="BAAI/bge-m3",
+        )
+        hf_calls: list[dict[str, object]] = []
+        modelscope_calls: list[dict[str, object]] = []
+
+        class FakeModelScopeError(Exception):
+            pass
+
+        class FakeHfHubHTTPError(Exception):
+            pass
+
+        def fake_ms_snapshot_download(**kwargs):
+            modelscope_calls.append(dict(kwargs))
+            raise FakeModelScopeError('modelscope ssl failed')
+
+        def fake_hf_snapshot_download(**kwargs):
+            hf_calls.append(dict(kwargs))
+            if len(hf_calls) == 1:
+                raise FakeHfHubHTTPError('403 Forbidden: Cannot access content at: https://hf-mirror.com/api/models/BAAI/bge-m3')
+            local_dir = Path(str(kwargs["local_dir"]))
+            local_dir.mkdir(parents=True, exist_ok=True)
+            (local_dir / "modules.json").write_text("{}", encoding="utf-8")
+            (local_dir / "config.json").write_text("{}", encoding="utf-8")
+            (local_dir / "pytorch_model.bin").write_bytes(b"ok")
+            return str(local_dir)
+
+        fake_hub = types.ModuleType("huggingface_hub")
+        fake_hub.snapshot_download = fake_hf_snapshot_download
+        fake_hub.constants = types.SimpleNamespace(
+            HF_HOME="",
+            hf_cache_home="",
+            HF_HUB_CACHE="",
+            HUGGINGFACE_HUB_CACHE="",
+            HUGGINGFACE_ASSETS_CACHE="",
+            HF_XET_CACHE="",
+            HF_HUB_DISABLE_XET=False,
+        )
+        fake_modelscope = types.ModuleType("modelscope")
+        fake_modelscope_hub = types.ModuleType("modelscope.hub")
+        fake_modelscope_snapshot = types.ModuleType("modelscope.hub.snapshot_download")
+        fake_modelscope_snapshot.snapshot_download = fake_ms_snapshot_download
+
+        with patch.dict(
+            sys.modules,
+            {
+                "huggingface_hub": fake_hub,
+                "modelscope": fake_modelscope,
+                "modelscope.hub": fake_modelscope_hub,
+                "modelscope.hub.snapshot_download": fake_modelscope_snapshot,
+            },
+        ):
+            result = prepare_local_model_snapshot(config, data_paths, allow_download=True, download_source='mirror')
+
+        self.assertTrue(result["model_ready"])
+        self.assertEqual(len(modelscope_calls), 1)
+        self.assertEqual(len(hf_calls), 2)
+        self.assertEqual(hf_calls[0]["endpoint"], 'https://hf-mirror.com')
+        self.assertIsNone(hf_calls[1]["endpoint"])
 
     def test_default_embedder_downloads_model_into_local_cache_without_symlink(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "bootstrap"))
@@ -1219,6 +1502,9 @@ class VectorIndexTests(unittest.TestCase):
         runtime = calls["sentence_transformer"]
         self.assertEqual(snapshot["repo_id"], "BAAI/bge-m3")
         self.assertFalse(snapshot["local_files_only"])
+        self.assertIsNone(snapshot["endpoint"])
+        self.assertEqual(tuple(snapshot["ignore_patterns"]), _MODEL_DOWNLOAD_IGNORE_PATTERNS)
+        self.assertFalse(snapshot["local_dir_use_symlinks"])
         self.assertEqual(runtime["model_name_or_path"], snapshot["local_dir"])
         self.assertTrue(runtime["local_files_only"])
         self.assertEqual(runtime["backend"], "torch")
@@ -1404,6 +1690,3 @@ class VectorIndexTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-

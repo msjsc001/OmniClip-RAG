@@ -113,12 +113,26 @@ Why: the storage convention is correct, and it also prevents personal data, test
 Current model/cache policy:
 
 - `HF_HOME` is redirected into the app-owned cache area,
+- vector model / reranker download, delete, log, and validation targets always follow the current active `data_root`,
+- changing `data_root` itself still requires `Save + restart`; the product must not start writing model files into a preview-only root before that switch is active,
 - model files are downloaded into explicit local model directories,
+- automatic and manual model download flows share the same exclude list for non-essential assets such as `imgs/.DS_Store`,
+- vector model and reranker automatic downloads run in a dedicated headless worker subprocess of the same EXE/Python entrypoint, not inside the main GUI thread,
+- the separate Windows terminal must show the real worker stdout for live download progress and faults, while the GUI follows the same per-download log file for status updates instead of reusing the generic task progress card,
+- the recommended source chain for `BAAI/bge-m3` and `BAAI/bge-reranker-v2-m3` is now `ModelScope -> HF mirror -> Hugging Face official`, so China-mainland users are not forced to start from the public HF endpoint,
+- the download worker emits an immediate heartbeat and then a fixed-interval heartbeat with byte/file deltas for both the target model directory and repo cache, so users can tell the difference between "still waiting for remote response" and "bytes are actively growing",
+- the frozen EXE download worker must synthesize writable `stdout/stderr` streams before entering third-party download stacks such as ModelScope/tqdm, otherwise progress-bar initialization can crash with `'NoneType' object has no attribute 'write'`,
+- GUI stall supervision must treat heartbeat-only log lines as visibility signals, not as real download progress; automatic source switching is based on substantive log events or byte growth,
+- mirror-source automatic downloads are supervised by the GUI; if the recommended path shows no substantive progress and no byte growth for a sustained window, the app kills that worker and retries the next fallback source once,
+- mirror-source model downloads may retry once against the official Hugging Face endpoint when the mirror rejects repo-specific junk files,
+- reranker bootstrap from the settings UI is download-only; model warmup stays lazy and happens later on actual query/runtime use,
+- deleting a local model or reranker must remove both the visible model directory and that repo's `_hf_home/hub` cache subtree after releasing in-process handles,
 - Xet transport is disabled,
 - default user cache assumptions are avoided,
 - local-only mode is supported for bootstrap/query/index flows.
 
 Why: the default Windows cache path is too easy to corrupt with permission issues, symlink edge cases, and partial downloads.
+Mirrors are also less tolerant of repository-side junk files than the official endpoint, so the product must keep all four download paths aligned instead of letting `auto/manual` or `mirror/official` silently diverge.
 
 ### 8. Unreadable Markdown files must be skippable, not fatal
 
@@ -257,6 +271,8 @@ Current data-root policy:
 - the bootstrap file is only a locator and may remember multiple known roots, but it does not store user data,
 - the real environment lives entirely under the selected `data_root`,
 - config, workspaces, logs, cache, models, main Runtime, and Tika Runtime all derive from that same root,
+- Runtime install / repair commands must explicitly target `<active data_root>/shared/runtime` instead of relying on installer-side default-root fallback,
+- model bootstrap and manual model staging must always point to the cache tree under the current active `data_root`,
 - the legacy `%APPDATA%\OmniClip RAG` environment remains switchable and recognizable,
 - switching data roots means switching environments, not migrating data.
 
@@ -1417,7 +1433,7 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - 2026-03-16 RCA 进展补充：Phase 2 的四模式自检已经在最小临时工作区和真实工作区的源码入口上跑通。真实工作区固定 query `我的思维` 当前表现为：`lexical-only` 候选数为 0，而 `vector-only / hybrid_no_rerank / hybrid` 都是 `vector_query_planned=true` 但 `vector_query_executed=false`，并落到 `fallback_reason=vector_runtime_unavailable`。Why：这再次证明当前必须先区分 capability healthy、runtime root 对齐和 query-time vector 实际执行，而不能再把 Runtime UI 状态当成查询已经用上高级搜索的证据。
 
 ## 2026-03-16 Markdown 主查询 RCA 关键突破
-- 真实工作区 `D:\8 L-Logseq\l-phone-logseq` 上的固定 query `我的思维` 已经通过四模式主链对照证明：问题不再是“Runtime 看起来没装好”，而是 query-time vector adapter 真正执行时的两处错误。
+- 真实用户工作区 `<user-logseq-vault>` 上的固定 query `我的思维` 已经通过四模式主链对照证明：问题不再是“Runtime 看起来没装好”，而是 query-time vector adapter 真正执行时的两处错误。
 - 第一处错误是 runtime 导入优先级：`semantic-core` 组件导入时如果同时存在 legacy flat `runtime/` 根目录，会被根目录里残留的坏 `transformers` 抢占，导致健康探测和真实查询看到不同模块源。修复方式是：`_runtime_import_environment()` 与 `_probe_runtime_semantic_core()` 统一让 `semantic-core` 自动携带 `vector-store` 依赖，并保证 `semantic-core` 的路径优先级高于 flat runtime。
 - 第二处错误是 LanceDB 查询输入类型：`LanceDbVectorIndex.search()` 之前会把 `_encode()` 返回的 `numpy.ndarray` 直接传给 `table.search(...)`，在真实运行时触发 `TypeError: Unsupported query type: <class 'numpy.ndarray'>`。修复方式是 query-time 与写入时保持一致，在 `search()` 前先调用 `_coerce_vector()` 转成 `list[float]`。
 - 修复后，同一条真实主链已经验证：
@@ -1440,7 +1456,12 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - 这意味着当前构建版主链的真正剩余问题已经缩小到**中文 lexical/FTS 命中策略**，而不是 Runtime 安装、健康探测或 query-time vector 执行本身。
 
 ## 2026-03-16 构建版 suite 复验记忆
-- 已直接对验收构建物 `dist/OmniClipRAG-v0.2.4/OmniClipRAG.exe` 执行 `--selfcheck-query --query-mode suite`，目标工作区固定为 `D:\8 L-Logseq\l-phone-logseq`，query 固定为 `我的思维`，阈值 `0`，条数 `30`。
+- 已直接对验收构建物 `dist/OmniClipRAG-v0.2.4/OmniClipRAG.exe` 执行 `--selfcheck-query --query-mode suite`，目标工作区固定为 `<user-logseq-vault>`，query 固定为 `我的思维`，阈值 `0`，条数 `30`。
+
+## 2026-03-23 v0.4.3 发布链硬化与公开仓库净化
+- `v0.4.3` 这轮不是做新子系统，而是把最近积累的热修全部收成一条可以公开发布的稳定版本线：语义后端状态必须诚实、模型与 reranker 下载必须严格跟随当前 active data root、MCP 的降级语义必须和桌面端一致。
+- 发布链层面重新补回了缺失的 `OmniClipRAG-MCP.spec`。Why：`build.py` 已经把 `GUI ZIP + MCP ZIP + MCPB` 视为同一条正式发布链，如果根仓库缺这个 spec，MCP EXE 和 `.mcpb` 的重建能力只是“看起来支持”，不是可复现事实。
+- 对公开仓库做了一轮路径净化：追踪文档中涉及真实用户绝对路径的记录改写成 `<user-logseq-vault>`、`%USERPROFILE%\\Downloads\\sample-tika-corpus` 这类占位路径。Why：架构记忆应该保留“问题类型和决策”，不应该把真实个人目录当成永久公开元数据。
 - 本次复验不再依赖源码态入口，实际产物写出到 `.tmp_dist_runtime_diag_packaged_suite.json`。Why：以后讨论“构建版到底有没有真的跑高级搜索”，必须先看 frozen EXE 自己的 suite 证据，而不是混用源码态结果。
 - 复验结果再次确认：
   - `lexical-only=0`
@@ -1528,3 +1549,14 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - 查询台折叠按钮不再使用悬浮覆盖式布局，而是放进查询核心行并继续持久化 `qt_query_controls_collapsed`。Why：覆盖式按钮在窄窗口下容易错位，内联结构更稳。
 - 桌面图标资产现在以 `icon/image.png` 为唯一源图，`resources/app_icon.png`、`resources/app_icon_32.png`、`resources/app_icon.ico` 只保留为派生交付资源。Why：运行时窗口图标、资源图标和打包 EXE 图标必须统一，不再允许多套旧图标真相并存。
 - Windows 图标链现在同时绑定 `AppUserModelID`、`QApplication` 级图标、启动窗图标、主窗口图标和 frozen EXE 图标，并优先使用 `.ico`。Why：只换资源图片不足以保证任务栏图标更新，Windows 还依赖进程级身份与窗口级图标绑定链。
+
+## 2026-03-23 Markdown 向量告警判定收口
+- `service.py::query()` 现在只有在 `vector_backend` 真正启用时，才允许把 Markdown 查询计划进语义召回、`QUERY_PLAN.vector_enabled=true`、以及 `markdown_vector_index_missing` 这类向量告警。Why：之前只要 query profile 倾向语义检索，就算当前后端是 `disabled` 也会被误判成“缺少向量索引”，从而在已经完成普通建库后继续错误提示“请重新全量建库”。
+- `QueryWorkspace` 的 runtime hint 现在在 runtime/config 同步后会主动清空旧的 `_query_runtime_warnings`。`ConfigWorkspace` 也会在模型准备完成、全量建库完成、清理完成后重新广播 live runtime snapshot。Why：这条黄条是“上一次查询的运行时诊断”，不是永久真相；当索引或模型状态已经被修复，再继续显示旧告警会制造假故障感。
+
+## 2026-03-23 语义后端关闭态显式化与自动纠偏
+- 真实用户数据排查确认过一条高频误导链：`config.json` 里 `vector_backend='disabled'` 时，Markdown 主索引依然可以是 `ready`，模型和 reranker 也都可以已经下载完成，但查询仍只会走 SQLite 字面检索。Why：旧 UI 把“模型已就绪”和“索引已建立”都显示成绿色，却没有把“语义后端其实还关着”显式说出来，用户会自然误以为语义召回已经参与查询。
+- `service.status_snapshot()` 现在额外暴露 `vector_table_ready` / `vector_runtime_ready`，`ConfigWorkspace` 的索引芯片也分成三种稳定语义：`索引已建立`、`索引已建立（仅字面）`、`索引已建立（待补建语义向量）`。Why：Markdown 工作区的“索引 ready”不再等价于“语义 ready”；必须把字面层 ready 和语义层 ready 拆开呈现。
+- `service.query()` 在 `vector_backend` 被关闭时会直接写入 `markdown_vector_backend_disabled` 诊断，而不是静默退回纯字面检索。Why：这类场景的正确解释是“后端被关了”，不是“没命中结果”也不是“缺少向量索引”；查询页必须把根因直接告诉用户。
+- `ConfigWorkspace` 现在会在状态刷新 / 启动状态加载 / 模型下载完成后自动检查：如果本地语义模型已经就绪、runtime 也满足语义执行，但保存配置里还残留 `vector_backend='disabled'`，就会自动把后端切到 `lancedb` 并落盘。Why：用户主动下载了 `BAAI/bge-m3` 却仍然停留在 disabled，多半不是有意关闭语义，而是被旧默认值和旧 UI 误导；这类配置要自动纠偏，而不是继续让用户手动排雷。
+- 自动纠偏后，如果当前工作区已经有 Markdown 普通索引但还没有 LanceDB 表，状态和日志会明确提示“还需要再执行一次全量建库，语义向量索引才会写入”。Why：下载模型只能补齐 runtime / 权重，不能倒推出现有工作区已经有向量表；用户需要知道下一步是“补建语义向量”，不是重复下载模型。

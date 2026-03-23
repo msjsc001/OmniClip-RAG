@@ -1,11 +1,15 @@
 from __future__ import annotations
 import json
+import os
+import stat
 import sys
 import time
 import logging
+import gc
 import shutil
 import subprocess
-from dataclasses import replace
+import traceback
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -38,8 +42,8 @@ from ..preflight import estimate_model_cache_bytes
 from ..service import WATCHDOG_AVAILABLE, OmniClipService
 from ..ui_i18n import data_root_probe_summary_text, data_root_reason_text, text, tooltip
 from ..ui_shared import merge_page_filter_defaults
-from ..vector_index import build_runtime_install_command, detect_acceleration, get_local_model_dir, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, refresh_runtime_capability_snapshot, resolve_vector_device, runtime_component_catalog, runtime_component_status, runtime_component_usage, runtime_dependency_issue, runtime_guidance_context, runtime_install_sources, runtime_management_snapshot
-from ..reranker import get_local_reranker_dir, is_local_reranker_ready
+from ..vector_index import build_runtime_install_command, detect_acceleration, get_local_model_dir, hf_repo_cache_dir, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, refresh_runtime_capability_snapshot, release_process_vector_resources, resolve_vector_device, runtime_component_catalog, runtime_component_status, runtime_component_usage, runtime_dependency_issue, runtime_guidance_context, runtime_install_sources, runtime_management_snapshot
+from ..reranker import get_local_reranker_dir, get_local_reranker_repo_cache_dir, is_local_reranker_ready, release_process_reranker_resources, reranker_download_guidance_context
 from ..extensions.models import (
     ExtensionDirectoryState,
     ExtensionIndexState,
@@ -60,6 +64,42 @@ from .tika_format_dialog import TikaFormatDialog
 from .workers import FunctionWorker, ProgressFunctionWorker, ServiceTaskWorker, WatchWorker
 REPO_URL = 'https://github.com/msjsc001/OmniClip-RAG'
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _DownloadTaskState:
+    label_key: str
+    kind: str
+    repo_id: str
+    config: AppConfig
+    paths: Any
+    target_dir: Path
+    hf_home_dir: Path
+    repo_cache_dir: Path
+    requested_source: str
+    active_source: str
+    log_path: Path
+    pid_path: Path
+    result_path: Path
+    terminal_title: str
+    start_message: str
+    local_files_only: bool
+    on_success: Any
+    on_failure: Any
+    success_payload_builder: Any
+    launcher_process: subprocess.Popen | None = None
+    worker_pid: int | None = None
+    log_offset: int = 0
+    last_log_size: int = 0
+    last_target_bytes: int = 0
+    last_cache_bytes: int = 0
+    last_material_progress_at: float = 0.0
+    last_progress_at: float = 0.0
+    last_sample_at: float = 0.0
+    started_at: float = 0.0
+    source_switched: bool = False
+
+
 class ConfigWorkspace(QtWidgets.QWidget):
     statusMessageChanged = QtCore.Signal(str)
     resultSummaryChanged = QtCore.Signal(str)
@@ -134,6 +174,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._task_last_eta_text = self._tr('task_eta_idle')
         self._latest_task_progress: dict[str, object] | None = None
         self._active_task_key: str | None = None
+        self._download_task_state: _DownloadTaskState | None = None
+        self._download_log_path: Path | None = None
+        self._download_monitor_timer = QtCore.QTimer(self)
+        self._download_monitor_timer.setInterval(1000)
+        self._download_monitor_timer.timeout.connect(self._poll_download_task)
         self._watch_worker: WatchWorker | None = None
         self._acceleration_payload: dict[str, object] | None = None
         self._device_probe_worker: FunctionWorker | None = None
@@ -206,6 +251,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.model_edit.textChanged.connect(self._on_model_text_changed)
         self.reranker_enabled_check.toggled.connect(self._on_live_runtime_preferences_changed)
         self.export_ai_check.toggled.connect(self._on_live_runtime_preferences_changed)
+        self.reranker_model_edit.textChanged.connect(self._on_reranker_model_text_changed)
         self.reranker_model_edit.textChanged.connect(self._on_live_runtime_preferences_changed)
         self.reranker_batch_cpu_edit.textChanged.connect(self._on_live_runtime_preferences_changed)
         self.reranker_batch_cuda_edit.textChanged.connect(self._on_live_runtime_preferences_changed)
@@ -367,6 +413,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
         return self._normalized_data_root(getattr(self._paths, 'global_root', default_data_root()))
     def _selected_data_root(self) -> str:
         return self._normalized_data_root(self.data_dir_edit.text())
+    def _active_runtime_target_dir(self) -> Path:
+        data_root = Path(self._active_data_root())
+        return build_data_paths(data_root).shared_root / 'runtime'
     def _set_known_data_roots(self, roots: list[str] | tuple[str, ...], *, active_root: str | None = None) -> None:
         normalized_active = self._normalized_data_root(active_root or self._active_data_root())
         ordered: list[str] = []
@@ -783,6 +832,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._set_button_variant(self.bootstrap_button, 'secondary')
         self.bootstrap_button.clicked.connect(self._run_bootstrap_model)
         action_row.addWidget(self.bootstrap_button, 0, 1)
+        self.delete_model_button = QtWidgets.QPushButton(actions_card)
+        self._set_button_variant(self.delete_model_button, 'secondary')
+        self.delete_model_button.clicked.connect(self._delete_local_model)
+        action_row.addWidget(self.delete_model_button, 0, 2)
         self.rebuild_button = QtWidgets.QPushButton(self._tr('rebuild_button'), actions_card)
         self.rebuild_button.setToolTip(self._tip('rebuild'))
         self._set_button_variant(self.rebuild_button, 'primary')
@@ -1019,11 +1072,15 @@ class ConfigWorkspace(QtWidgets.QWidget):
             form.addWidget(widget, row_index, 1)
         actions = QtWidgets.QHBoxLayout()
         layout.addLayout(actions)
-        download_button = QtWidgets.QPushButton(self._tr('bootstrap_reranker_button'), card)
-        download_button.setToolTip(self._tip('bootstrap_reranker'))
-        self._set_button_variant(download_button, 'primary')
-        download_button.clicked.connect(self._run_bootstrap_reranker)
-        actions.addWidget(download_button)
+        self.bootstrap_reranker_button = QtWidgets.QPushButton(self._tr('bootstrap_reranker_button'), card)
+        self.bootstrap_reranker_button.setToolTip(self._tip('bootstrap_reranker'))
+        self._set_button_variant(self.bootstrap_reranker_button, 'primary')
+        self.bootstrap_reranker_button.clicked.connect(self._run_bootstrap_reranker)
+        actions.addWidget(self.bootstrap_reranker_button)
+        self.delete_reranker_button = QtWidgets.QPushButton(card)
+        self._set_button_variant(self.delete_reranker_button, 'secondary')
+        self.delete_reranker_button.clicked.connect(self._delete_local_reranker)
+        actions.addWidget(self.delete_reranker_button)
         refresh_button = QtWidgets.QPushButton(self._tr('refresh_button'), card)
         self._set_button_variant(refresh_button, 'secondary')
         refresh_button.clicked.connect(self._run_refresh)
@@ -1447,12 +1504,36 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 return value
         return str(getattr(self._config, 'vector_model', 'BAAI/bge-m3') or 'BAAI/bge-m3').strip() or 'BAAI/bge-m3'
 
+    def _current_reranker_model_name(self) -> str:
+        if hasattr(self, 'reranker_model_edit'):
+            value = self.reranker_model_edit.text().strip()
+            if value:
+                return value
+        return str(getattr(self._config, 'reranker_model', 'BAAI/bge-reranker-v2-m3') or 'BAAI/bge-reranker-v2-m3').strip() or 'BAAI/bge-reranker-v2-m3'
+
     def _bootstrap_button_text(self) -> str:
         return self._tr('bootstrap_button_named', model=self._current_model_name())
+
+    def _delete_model_button_text(self) -> str:
+        return self._tr('delete_model_button_named', model=self._current_model_name())
+
+    def _delete_reranker_button_text(self) -> str:
+        return self._tr('delete_reranker_button_named', model=self._current_reranker_model_name())
 
     def _refresh_model_download_text(self) -> None:
         if hasattr(self, 'bootstrap_button'):
             self.bootstrap_button.setText(self._bootstrap_button_text())
+            self.bootstrap_button.setEnabled(not self._busy)
+        if hasattr(self, 'delete_model_button'):
+            self.delete_model_button.setText(self._delete_model_button_text())
+            self.delete_model_button.setEnabled(not self._busy)
+
+    def _refresh_reranker_download_text(self) -> None:
+        if hasattr(self, 'delete_reranker_button'):
+            self.delete_reranker_button.setText(self._delete_reranker_button_text())
+            self.delete_reranker_button.setEnabled(not self._busy)
+        if hasattr(self, 'bootstrap_reranker_button'):
+            self.bootstrap_reranker_button.setEnabled(not self._busy)
 
     def _refresh_overview_chips(self) -> None:
         try:
@@ -1467,8 +1548,16 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.model_chip.setText(self._tr('model_ready_named', model=model_name) if model_ready else self._tr('model_missing_named', model=model_name))
         self._set_chip_style(self.model_chip, ok=model_ready, warn=not model_ready)
         index_state = self._current_index_state()
-        self.index_chip.setText(self._tr(f'index_{index_state}'))
-        self._set_chip_style(self.index_chip, ok=index_state == 'ready', warn=index_state == 'pending')
+        vector_table_ready = self._semantic_vector_table_ready()
+        if index_state == 'ready' and not self._vector_backend_enabled():
+            self.index_chip.setText(self._tr('index_ready_lexical_only'))
+            self._set_chip_style(self.index_chip, warn=True)
+        elif index_state == 'ready' and vector_table_ready is False:
+            self.index_chip.setText(self._tr('index_ready_semantic_missing'))
+            self._set_chip_style(self.index_chip, warn=True)
+        else:
+            self.index_chip.setText(self._tr(f'index_{index_state}'))
+            self._set_chip_style(self.index_chip, ok=index_state == 'ready', warn=index_state == 'pending')
         if index_state == 'checking':
             self._set_chip_style(self.index_chip)
         self._refresh_runtime_management_ui()
@@ -1491,9 +1580,60 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.device_summary_label.setText(self._device_summary())
         self.device_runtime_status_label.setText(self._device_runtime_status_text())
         self._refresh_runtime_management_ui()
+    @staticmethod
+    def _backend_enabled_value(backend: str | None) -> bool:
+        return (str(backend or 'disabled').strip().lower() or 'disabled') not in {'', 'disabled', 'none', 'off'}
+
     def _vector_backend_enabled(self) -> bool:
         backend = self.backend_combo.currentText().strip() if hasattr(self, 'backend_combo') else getattr(self._config, 'vector_backend', 'disabled')
-        return (backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
+        return self._backend_enabled_value(backend)
+
+    def _semantic_vector_table_ready(self, snapshot: dict[str, object] | None = None) -> bool | None:
+        source = snapshot if isinstance(snapshot, dict) else (self._status_snapshot if isinstance(self._status_snapshot, dict) else None)
+        if not isinstance(source, dict) or 'vector_table_ready' not in source:
+            return None
+        value = source.get('vector_table_ready')
+        if value is None:
+            return None
+        return bool(value)
+
+    def _semantic_vector_rebuild_needed(self, config: AppConfig, snapshot: dict[str, object] | None = None) -> bool:
+        if not self._backend_enabled_value(getattr(config, 'vector_backend', 'disabled')):
+            return False
+        if self._current_index_state(snapshot) != 'ready':
+            return False
+        return self._semantic_vector_table_ready(snapshot) is False
+
+    def _maybe_auto_enable_semantic_backend(
+        self,
+        config: AppConfig,
+        paths,
+        snapshot: dict[str, object] | None = None,
+    ) -> tuple[AppConfig, dict[str, object] | None, bool]:
+        if self._recovery_mode or self._has_pending_data_root_switch():
+            return config, snapshot, False
+        if self._backend_enabled_value(getattr(config, 'vector_backend', 'disabled')):
+            return config, snapshot, False
+        if not is_local_model_ready(config, paths):
+            return config, snapshot, False
+        candidate = replace(config, vector_backend='lancedb')
+        if runtime_dependency_issue(candidate) is not None:
+            return config, snapshot, False
+        try:
+            save_config(candidate, paths)
+        except Exception:
+            LOGGER.exception('Qt semantic backend auto-enable failed while saving config.')
+            return config, snapshot, False
+        updated_snapshot = dict(snapshot) if isinstance(snapshot, dict) else None
+        if updated_snapshot is not None:
+            updated_snapshot['vector_backend'] = 'lancedb'
+        self._apply_config_to_controls(candidate, paths)
+        needs_rebuild = self._semantic_vector_rebuild_needed(candidate, updated_snapshot)
+        status_key = 'status_semantic_backend_auto_enabled_rebuild' if needs_rebuild else 'status_semantic_backend_auto_enabled'
+        log_key = 'log_semantic_backend_auto_enabled_rebuild' if needs_rebuild else 'log_semantic_backend_auto_enabled'
+        self.statusMessageChanged.emit(self._tr(status_key, model=candidate.vector_model))
+        self._append_log(self._tr(log_key, model=candidate.vector_model))
+        return candidate, updated_snapshot, True
     def _runtime_missing_for_cuda(self) -> bool:
         payload = runtime_guidance_context(self.runtime_combo.currentText().strip() or 'torch', 'cuda', force_refresh=True)
         if not payload.get('gpu_present'):
@@ -2192,8 +2332,18 @@ class ConfigWorkspace(QtWidgets.QWidget):
         sources = runtime_install_sources()
         runtime_dir = Path(str(context.get('preferred_runtime_dir') or context.get('install_target_dir') or context.get('runtime_dir') or '')).expanduser()
         runtime_dir.mkdir(parents=True, exist_ok=True)
-        official_command = build_runtime_install_command(profile, source='official', component=install_component if component_id != 'all' else 'all')
-        mirror_command = build_runtime_install_command(profile, source='mirror', component=install_component if component_id != 'all' else 'all')
+        official_command = build_runtime_install_command(
+            profile,
+            source='official',
+            component=install_component if component_id != 'all' else 'all',
+            runtime_root=runtime_dir,
+        )
+        mirror_command = build_runtime_install_command(
+            profile,
+            source='mirror',
+            component=install_component if component_id != 'all' else 'all',
+            runtime_root=runtime_dir,
+        )
         plain_text = self._tr(
             'runtime_manual_plain_text',
             component=component_name,
@@ -3532,6 +3682,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             requested_device,
             force_refresh=True,
             extra_detail=extra_detail,
+            runtime_root=self._active_runtime_target_dir(),
         )
         LOGGER.info('Opening runtime guidance dialog: requested_device=%s busy=%s watch_active=%s runtime_complete=%s.', requested_device, self._busy, self._watch_active, context.get('runtime_complete'))
         self.statusMessageChanged.emit(self._tr('status_runtime_guidance_opened'))
@@ -3546,7 +3697,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
         requested = self._current_device_value() if hasattr(self, 'device_combo') else self._normalize_device_code(getattr(self._config, 'vector_device', 'auto'))
         if requested not in {'auto', 'gpu', 'cuda'}:
             requested = 'auto'
-        baseline = runtime_guidance_context(self.runtime_combo.currentText().strip() or 'torch', requested, force_refresh=True)
+        baseline = runtime_guidance_context(
+            self.runtime_combo.currentText().strip() or 'torch',
+            requested,
+            force_refresh=True,
+            runtime_root=self._active_runtime_target_dir(),
+        )
         baseline_text = str(baseline.get('plain_text') or '').strip()
         extra_detail = ''
         if baseline_text and text_value.startswith(baseline_text):
@@ -3565,6 +3721,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             force_refresh=force_refresh,
             extra_detail=extra_detail,
             acceleration_payload=acceleration_payload,
+            runtime_root=self._active_runtime_target_dir(),
         )
 
     def _powershell_executable(self) -> str | None:
@@ -3573,6 +3730,543 @@ class ConfigWorkspace(QtWidgets.QWidget):
             if resolved:
                 return resolved
         return None
+
+    def _powershell_literal(self, value: str | Path) -> str:
+        return "'" + str(value).replace("'", "''") + "'"
+
+    def _download_logs_dir(self, paths) -> Path:
+        target = Path(paths.logs_dir) / 'downloads'
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def _append_download_log_entries(
+        self,
+        messages: list[str] | tuple[str, ...],
+        *,
+        focus_log: bool = False,
+        mirror_to_ui: bool = True,
+    ) -> None:
+        if not messages:
+            return
+        log_path = self._download_log_path
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        lines: list[str] = []
+        ui_lines: list[str] = []
+        for raw_message in messages:
+            for chunk in str(raw_message or '').splitlines():
+                text_value = chunk.strip()
+                if not text_value:
+                    continue
+                lines.append(f'[{timestamp}] {text_value}')
+                ui_lines.append(text_value)
+        if not lines:
+            return
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open('a', encoding='utf-8') as handle:
+                handle.write('\n'.join(lines) + '\n')
+        if mirror_to_ui:
+            for index, text_value in enumerate(ui_lines):
+                self._append_log(text_value, focus_log=focus_log and index == len(ui_lines) - 1)
+
+    def _create_download_log_file(
+        self,
+        *,
+        paths,
+        label_key: str,
+        model_name: str,
+        target_dir: Path,
+        download_source: str,
+        kind: str,
+    ) -> Path:
+        timestamp = time.strftime('%Y%m%d-%H%M%S')
+        safe_name = target_dir.name or kind
+        log_path = self._download_logs_dir(paths) / f'{kind}-{safe_name}-{timestamp}.log'
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text('', encoding='utf-8')
+        self._download_log_path = log_path
+        self._append_download_log_entries(
+            [
+                self._tr('download_log_task', task=self._tr(label_key)),
+                self._tr('download_log_model', model=model_name),
+                self._tr('download_log_data_root', path=str(paths.global_root)),
+                self._tr('download_log_target', path=str(target_dir)),
+                self._tr('download_log_source', source=self._tr(f'model_source_{download_source}')),
+                self._tr('download_log_terminal_hint'),
+            ],
+        )
+        return log_path
+
+    def _download_worker_start_timeout_seconds(self) -> float:
+        return 15.0
+
+    def _download_worker_sample_interval_seconds(self) -> float:
+        return 5.0
+
+    def _download_worker_stall_timeout_seconds(self) -> float:
+        return 90.0
+
+    def _download_sidecar_paths(self, log_path: Path) -> tuple[Path, Path]:
+        return log_path.with_suffix('.pid'), log_path.with_suffix('.result.json')
+
+    def _build_download_worker_command(
+        self,
+        *,
+        kind: str,
+        repo_id: str,
+        target_dir: Path,
+        hf_home_dir: Path,
+        download_source: str,
+        log_path: Path,
+        pid_path: Path,
+        result_path: Path,
+        local_files_only: bool,
+    ) -> list[str]:
+        command = [
+            '--download-worker',
+            '--download-kind', str(kind),
+            '--repo-id', str(repo_id),
+            '--target-dir', str(target_dir),
+            '--hf-home', str(hf_home_dir),
+            '--source', str(download_source),
+            '--log-path', str(log_path),
+            '--pid-path', str(pid_path),
+            '--result-path', str(result_path),
+        ]
+        if local_files_only:
+            command.append('--local-files-only')
+        executable = str(Path(sys.executable).resolve())
+        if getattr(sys, 'frozen', False):
+            return [executable, *command]
+        return [executable, '-m', 'omniclip_rag.app_entry.desktop', *command]
+
+    def _launch_download_log_terminal(self, *, log_path: Path, title: str, worker_command: list[str] | None = None) -> subprocess.Popen | None:
+        powershell = self._powershell_executable()
+        script = (
+            "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+            f"$Host.UI.RawUI.WindowTitle = {self._powershell_literal(title)}; "
+        )
+        if worker_command:
+            worker_line = ' '.join(self._powershell_literal(part) for part in worker_command)
+            script += (
+                "Write-Host 'OmniClip RAG download worker'; "
+                "Write-Host 'Closing this window will stop the current download.'; "
+                f"& {worker_line}; "
+                "$exitCode = $LASTEXITCODE; "
+                "Write-Host ''; "
+                "Write-Host ('Download worker exited with code {0}. You can close this window.' -f $exitCode)"
+            )
+        else:
+            script += (
+                f"$logPath = {self._powershell_literal(log_path)}; "
+                "if (-not (Test-Path -LiteralPath $logPath)) { New-Item -ItemType File -Force -Path $logPath | Out-Null }; "
+                "Write-Host 'OmniClip RAG download log'; "
+                "Write-Host 'Press Ctrl+C to stop following; the download itself keeps running in the app.'; "
+                "Get-Content -LiteralPath $logPath -Encoding UTF8 -Tail 20 -Wait"
+            )
+        creationflags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
+        if not powershell:
+            if not worker_command:
+                self._append_log(self._tr('download_terminal_unavailable', path=str(log_path)))
+                return None
+            self._append_log(self._tr('download_terminal_unavailable', path=str(log_path)))
+            try:
+                return subprocess.Popen(
+                    worker_command,
+                    cwd=str(Path.cwd()),
+                    creationflags=creationflags,
+                )
+            except Exception as exc:
+                self._append_log(self._tr('download_terminal_launch_failed', error=str(exc), path=str(log_path)), focus_log=True)
+                return None
+        try:
+            return subprocess.Popen(
+                [powershell, '-NoExit', '-Command', script],
+                cwd=str(Path.cwd()),
+                creationflags=creationflags,
+            )
+        except Exception as exc:
+            self._append_log(self._tr('download_terminal_launch_failed', error=str(exc), path=str(log_path)), focus_log=True)
+            return None
+
+    def _clear_download_sidecar_files(self, *paths: Path) -> None:
+        for path in paths:
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                continue
+
+    def _directory_bytes(self, path: Path) -> int:
+        if not path.exists():
+            return 0
+        if path.is_file():
+            try:
+                return int(path.stat().st_size)
+            except OSError:
+                return 0
+        total = 0
+        for child in path.rglob('*'):
+            try:
+                if child.is_file():
+                    total += int(child.stat().st_size)
+            except OSError:
+                continue
+        return total
+
+    def _strip_download_log_prefix(self, line: str) -> str:
+        text_value = str(line or '').strip()
+        if text_value.startswith('['):
+            closing = text_value.find('] ')
+            if closing > 0:
+                return text_value[closing + 2:].strip()
+        return text_value
+
+    def _is_download_heartbeat_line(self, line: str) -> bool:
+        return str(line or '').strip().startswith('下载心跳：')
+
+    def _is_download_status_line(self, line: str) -> bool:
+        text_value = str(line or '').strip()
+        if not text_value:
+            return False
+        if text_value.startswith('Traceback'):
+            return False
+        if text_value.startswith('File "'):
+            return False
+        return True
+
+    def _tail_download_log_updates(self, state: _DownloadTaskState) -> bool:
+        if not state.log_path.exists():
+            return False
+        try:
+            with state.log_path.open('r', encoding='utf-8') as handle:
+                handle.seek(state.log_offset)
+                chunk = handle.read()
+                state.log_offset = handle.tell()
+        except Exception:
+            return False
+        lines = [self._strip_download_log_prefix(line) for line in chunk.splitlines() if self._strip_download_log_prefix(line)]
+        has_material_progress = False
+        for index, line in enumerate(lines):
+            if not self._is_download_heartbeat_line(line):
+                has_material_progress = True
+            self._append_log(line, focus_log=index == len(lines) - 1)
+        if lines:
+            last_status_line = next((line for line in reversed(lines) if self._is_download_status_line(line)), '')
+            if last_status_line:
+                self.statusMessageChanged.emit(last_status_line)
+        return has_material_progress
+
+    def _read_download_worker_pid(self, state: _DownloadTaskState) -> int | None:
+        if state.worker_pid:
+            return state.worker_pid
+        try:
+            if not state.pid_path.exists():
+                return None
+            state.worker_pid = int(state.pid_path.read_text(encoding='utf-8').strip())
+        except Exception:
+            return None
+        return state.worker_pid
+
+    def _read_download_worker_result(self, state: _DownloadTaskState) -> dict[str, object] | None:
+        if not state.result_path.exists():
+            return None
+        try:
+            payload = json.loads(state.result_path.read_text(encoding='utf-8'))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        pid = payload.get('pid')
+        if state.worker_pid is None and isinstance(pid, int) and pid > 0:
+            state.worker_pid = pid
+        return payload
+
+    def _is_download_worker_alive(self, pid: int) -> bool:
+        if int(pid or 0) <= 0:
+            return False
+        if os.name != 'nt':
+            try:
+                os.kill(int(pid), 0)
+            except OSError:
+                return False
+            return True
+        try:
+            create_no_window = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            completed = subprocess.run(
+                ['tasklist', '/FI', f'PID eq {int(pid)}'],
+                check=False,
+                capture_output=True,
+                text=True,
+                creationflags=create_no_window,
+            )
+        except Exception:
+            return True
+        return str(int(pid)) in str(completed.stdout or '')
+
+    def _terminate_download_worker(self, state: _DownloadTaskState) -> None:
+        pid = self._read_download_worker_pid(state)
+        if not pid:
+            return
+        try:
+            create_no_window = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            subprocess.run(
+                ['taskkill', '/PID', str(pid), '/T', '/F'],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=create_no_window,
+            )
+        except Exception:
+            try:
+                os.kill(pid, 9)
+            except Exception:
+                return
+
+    def _launch_download_worker_for_state(self, state: _DownloadTaskState) -> bool:
+        self._clear_download_sidecar_files(state.pid_path, state.result_path)
+        worker_command = self._build_download_worker_command(
+            kind=state.kind,
+            repo_id=state.repo_id,
+            target_dir=state.target_dir,
+            hf_home_dir=state.hf_home_dir,
+            download_source=state.active_source,
+            log_path=state.log_path,
+            pid_path=state.pid_path,
+            result_path=state.result_path,
+            local_files_only=state.local_files_only,
+        )
+        launcher = self._launch_download_log_terminal(
+            log_path=state.log_path,
+            title=state.terminal_title,
+            worker_command=worker_command,
+        )
+        if launcher is None:
+            return False
+        now = time.monotonic()
+        state.launcher_process = launcher
+        state.worker_pid = None
+        state.log_offset = state.log_path.stat().st_size if state.log_path.exists() else 0
+        state.last_log_size = state.log_offset
+        state.last_target_bytes = self._directory_bytes(state.target_dir)
+        state.last_cache_bytes = self._directory_bytes(state.repo_cache_dir)
+        state.last_material_progress_at = now
+        state.last_progress_at = now
+        state.last_sample_at = now
+        state.started_at = now
+        return True
+
+    def _build_model_download_success_payload(self, config: AppConfig, paths) -> dict[str, object]:
+        model_dir = get_local_model_dir(config, paths)
+        if not is_local_model_ready(config, paths):
+            raise RuntimeError(self._tr('download_verify_failed', model=config.vector_model, path=str(model_dir)))
+        service = OmniClipService(config, paths)
+        try:
+            return {
+                'result': {
+                    'model_ready': True,
+                    'model': config.vector_model,
+                    'cache_bytes': self._directory_bytes(paths.cache_dir / 'models'),
+                },
+                'status': service.status_snapshot(),
+            }
+        finally:
+            service.close()
+
+    def _build_reranker_download_success_payload(self, config: AppConfig, paths) -> dict[str, object]:
+        model_dir = get_local_reranker_dir(config, paths)
+        if not is_local_reranker_ready(config, paths):
+            raise RuntimeError(self._tr('download_verify_failed', model=config.reranker_model, path=str(model_dir)))
+        service = OmniClipService(config, paths)
+        try:
+            return {
+                'result': {
+                    'model_ready': True,
+                    'model': config.reranker_model,
+                    'cache_bytes': self._directory_bytes(paths.cache_dir / 'models'),
+                },
+                'status': service.status_snapshot(),
+            }
+        finally:
+            service.close()
+
+    def _reset_download_task_state(self) -> _DownloadTaskState | None:
+        state = self._download_task_state
+        self._busy = False
+        self._download_monitor_timer.stop()
+        self._download_task_state = None
+        self._download_log_path = None
+        self._stop_task_feedback()
+        self._refresh_model_download_text()
+        self._refresh_reranker_download_text()
+        return state
+
+    def _complete_download_task_success(self, state: _DownloadTaskState) -> None:
+        try:
+            payload = state.success_payload_builder()
+        except Exception as exc:
+            self._fail_download_task(
+                state,
+                str(exc).strip() or exc.__class__.__name__,
+                traceback.format_exc(),
+            )
+            return
+        self._clear_download_sidecar_files(state.pid_path, state.result_path)
+        self._reset_download_task_state()
+        handler = state.on_success
+        if callable(handler):
+            handler(payload)
+
+    def _fail_download_task(self, state: _DownloadTaskState, message: str, traceback_text: str = '') -> None:
+        self._clear_download_sidecar_files(state.pid_path, state.result_path)
+        self._reset_download_task_state()
+        failure_handler = state.on_failure
+        if callable(failure_handler):
+            failure_handler(message, traceback_text, state.log_path)
+            return
+        self.statusMessageChanged.emit(self._tr('status_failed', label=self._tr(state.label_key or 'refresh_button')))
+        self._append_download_log_entries(
+            [traceback_text.strip() or message or self._tr('none_value')],
+            focus_log=True,
+        )
+        QtWidgets.QMessageBox.critical(self, self._tr(state.label_key or 'refresh_button'), message or traceback_text)
+
+    def _restart_download_via_official(self, state: _DownloadTaskState) -> None:
+        self._append_download_log_entries(
+            [
+                self._tr('download_log_switch_official'),
+                self._tr('download_log_source', source=self._tr('model_source_official')),
+            ],
+            focus_log=True,
+        )
+        self.statusMessageChanged.emit(self._tr('status_download_switch_official'))
+        self._terminate_download_worker(state)
+        state.active_source = 'official'
+        state.source_switched = True
+        if not self._launch_download_worker_for_state(state):
+            self._fail_download_task(state, self._tr('download_worker_not_started'))
+
+    def _poll_download_task(self) -> None:
+        state = self._download_task_state
+        if state is None:
+            self._download_monitor_timer.stop()
+            return
+        has_material_log_progress = self._tail_download_log_updates(state)
+        result_payload = self._read_download_worker_result(state)
+        if result_payload is not None and isinstance(result_payload.get('ok'), bool):
+            if bool(result_payload.get('ok')):
+                self._complete_download_task_success(state)
+            else:
+                self._fail_download_task(
+                    state,
+                    str(result_payload.get('error') or self._tr('none_value')).strip(),
+                    str(result_payload.get('traceback') or '').strip(),
+                )
+            return
+        now = time.monotonic()
+        worker_pid = self._read_download_worker_pid(state)
+        if worker_pid is not None and not self._is_download_worker_alive(worker_pid):
+            self._fail_download_task(state, self._tr('download_worker_exited'))
+            return
+        if worker_pid is None and now - state.started_at >= self._download_worker_start_timeout_seconds():
+            self._fail_download_task(state, self._tr('download_worker_not_started'))
+            return
+        if now - state.last_sample_at < self._download_worker_sample_interval_seconds():
+            return
+        state.last_sample_at = now
+        log_size = state.log_path.stat().st_size if state.log_path.exists() else 0
+        target_bytes = self._directory_bytes(state.target_dir)
+        cache_bytes = self._directory_bytes(state.repo_cache_dir)
+        if log_size > state.last_log_size:
+            state.last_progress_at = now
+        if (
+            has_material_log_progress
+            or target_bytes != state.last_target_bytes
+            or cache_bytes != state.last_cache_bytes
+        ):
+            state.last_material_progress_at = now
+        state.last_log_size = log_size
+        state.last_target_bytes = target_bytes
+        state.last_cache_bytes = cache_bytes
+        if (
+            state.active_source == 'mirror'
+            and not state.source_switched
+            and worker_pid is not None
+            and now - state.last_material_progress_at >= self._download_worker_stall_timeout_seconds()
+        ):
+            self._restart_download_via_official(state)
+
+    def _start_download_task(
+        self,
+        *,
+        label_key: str,
+        config: AppConfig,
+        paths,
+        download_kind: str,
+        repo_id: str,
+        target_dir: Path,
+        hf_home_dir: Path,
+        download_source: str,
+        on_success,
+        on_failure,
+        log_path: Path,
+        terminal_title: str,
+        start_message: str,
+        success_payload_builder,
+        local_files_only: bool = False,
+    ) -> None:
+        if self._busy:
+            QtWidgets.QMessageBox.information(self, self._tr('busy_title'), self._tr('busy_body'))
+            return
+        if self._watch_active:
+            QtWidgets.QMessageBox.information(self, self._tr('stop_watch_first_title'), self._tr('stop_watch_first_body'))
+            return
+        try:
+            save_config(config, paths)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
+            return
+        self._apply_config_to_controls(config, paths)
+        pid_path, result_path = self._download_sidecar_paths(log_path)
+        self._clear_download_sidecar_files(pid_path, result_path)
+        repo_cache_dir = hf_repo_cache_dir(hf_home_dir, repo_id)
+        state = _DownloadTaskState(
+            label_key=label_key,
+            kind=str(download_kind or 'vector'),
+            repo_id=str(repo_id),
+            config=config,
+            paths=paths,
+            target_dir=Path(target_dir),
+            hf_home_dir=Path(hf_home_dir),
+            repo_cache_dir=repo_cache_dir,
+            requested_source=str(download_source or 'official').strip().lower() or 'official',
+            active_source=str(download_source or 'official').strip().lower() or 'official',
+            log_path=log_path,
+            pid_path=pid_path,
+            result_path=result_path,
+            terminal_title=terminal_title,
+            start_message=start_message,
+            local_files_only=bool(local_files_only),
+            on_success=on_success,
+            on_failure=on_failure,
+            success_payload_builder=success_payload_builder,
+        )
+        self._busy = True
+        self._active_task_key = label_key
+        self._download_task_state = state
+        self._download_log_path = log_path
+        self.statusMessageChanged.emit(start_message)
+        self._append_log(start_message)
+        if not self._launch_download_worker_for_state(state):
+            self._fail_download_task(state, self._tr('download_worker_not_started'))
+            return
+        self._append_log(self._tr('download_terminal_opened', path=str(log_path)))
+        self._emit_query_block_state()
+        self._refresh_task_controls()
+        self._refresh_model_download_text()
+        self._refresh_reranker_download_text()
+        self._download_monitor_timer.start()
 
     def _run_runtime_auto_repair(self, _checked: bool = False, *, source: str = 'official', component: str = 'all') -> None:
         context = self._current_runtime_repair_context(force_refresh=True)
@@ -3590,6 +4284,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         normalized_component = (component or 'all').strip().lower() or 'all'
         install_component, profile = self._runtime_component_install_target(normalized_component, context=context)
         app_dir = Path(str(context.get('app_dir') or install_script.parent)).resolve()
+        runtime_root = Path(str(context.get('preferred_runtime_dir') or context.get('install_target_dir') or self._active_runtime_target_dir())).expanduser()
         command = [
             powershell,
             '-ExecutionPolicy', 'Bypass',
@@ -3602,8 +4297,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if normalized_component != 'all':
             command.extend(['-Component', install_component])
         creationflags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
+        child_env = os.environ.copy()
+        child_env['OMNICLIP_RUNTIME_ROOT'] = str(runtime_root)
         try:
-            subprocess.Popen(command, cwd=str(app_dir), creationflags=creationflags)
+            subprocess.Popen(command, cwd=str(app_dir), creationflags=creationflags, env=child_env)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, self._tr('cannot_start_title'), self._tr('runtime_repair_auto_failed', error=str(exc)))
             self.statusMessageChanged.emit(self._tr('runtime_repair_auto_failed', error=str(exc)))
@@ -3631,6 +4328,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_model_download_text()
         self._refresh_overview_chips()
         self._on_live_runtime_preferences_changed()
+
+    def _on_reranker_model_text_changed(self, _value: str) -> None:
+        self._refresh_reranker_download_text()
+        self._refresh_reranker_state(self._status_snapshot)
 
     def _on_live_runtime_preferences_changed(self, *_args) -> None:
         if self._live_runtime_sync_suppressed:
@@ -3748,6 +4449,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_workspace_summary()
         self._refresh_overview_chips()
         self._refresh_reranker_state(snapshot)
+        self._refresh_model_download_text()
+        self._refresh_reranker_download_text()
         self._refresh_watch_button()
         self._refresh_task_controls()
         self._emit_query_block_state()
@@ -4015,10 +4718,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
         config = payload.get('config')
         paths = payload.get('paths')
         snapshot = payload.get('status')
+        auto_enabled = False
+        if config is not None and paths is not None and isinstance(snapshot, dict):
+            config, snapshot, auto_enabled = self._maybe_auto_enable_semantic_backend(config, paths, snapshot)
         if isinstance(snapshot, dict):
             self._refresh_status_summary(snapshot)
-            self.statusMessageChanged.emit(self._tr('status_refresh_done'))
-            self._append_log(self._tr('log_status_done'))
+            if not auto_enabled:
+                self.statusMessageChanged.emit(self._tr('status_refresh_done'))
+                self._append_log(self._tr('log_status_done'))
             if config is not None and paths is not None:
                 self._offer_resume_rebuild(config, paths, snapshot)
         else:
@@ -4416,39 +5123,114 @@ class ConfigWorkspace(QtWidgets.QWidget):
 
     def _manual_model_hint(self, config: AppConfig, paths) -> str:
         return self._manual_model_context(config, paths)['plain_text']
+
+    def _manual_reranker_context(self, config: AppConfig, paths) -> dict[str, str]:
+        context = reranker_download_guidance_context(config, paths)
+        context['size'] = format_bytes(estimate_model_cache_bytes(config.reranker_model, config.vector_runtime))
+        context['plain_text'] = self._tr(
+            'manual_model_hint',
+            size=context['size'],
+            model=context['model'],
+            model_dir=context['model_dir'],
+            official_url=context['official_url'],
+            mirror_url=context['mirror_url'],
+            install_cli_command=context['install_cli_command'],
+            official_download_command=context['official_download_command'],
+            mirror_download_command=context['mirror_download_command'],
+        )
+        return context
+
     def _manual_reranker_hint(self, config: AppConfig, paths) -> str:
-        model_dir = get_local_reranker_dir(config, paths)
-        model_dir.mkdir(parents=True, exist_ok=True)
-        return self._tr('manual_reranker_hint', mirror_url='https://hf-mirror.com/', hf_url=f'https://huggingface.co/{config.reranker_model}', model=config.reranker_model, size=format_bytes(estimate_model_cache_bytes(config.reranker_model, config.vector_runtime)), model_dir=model_dir)
-    def _choose_model_download_mode(self, task_label: str, config: AppConfig, paths) -> str | None:
+        context = self._manual_reranker_context(config, paths)
+        return self._tr(
+            'manual_reranker_hint',
+            size=context['size'],
+            model=context['model'],
+            model_dir=context['model_dir'],
+            official_url=context['official_url'],
+            mirror_url=context['mirror_url'],
+            install_cli_command=context['install_cli_command'],
+            official_download_command=context['official_download_command'],
+            mirror_download_command=context['mirror_download_command'],
+        )
+    def _ask_model_download_source(self) -> str | None:
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(self._tr('model_source_choice_title'))
+        box.setText(self._tr('model_source_choice_body'))
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        mirror_button = box.addButton(self._tr('model_source_mirror'), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        official_button = box.addButton(self._tr('model_source_official'), QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        cancel_button = box.addButton(self._tr('cancel'), QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(mirror_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is mirror_button:
+            return 'mirror'
+        if clicked is official_button:
+            return 'official'
+        if clicked is cancel_button:
+            return None
+        return None
+
+    def _ask_reranker_download_source(self) -> str | None:
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(self._tr('reranker_source_choice_title'))
+        box.setText(self._tr('reranker_source_choice_body'))
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        mirror_button = box.addButton(self._tr('model_source_mirror'), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        official_button = box.addButton(self._tr('model_source_official'), QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        cancel_button = box.addButton(self._tr('cancel'), QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(mirror_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is mirror_button:
+            return 'mirror'
+        if clicked is official_button:
+            return 'official'
+        if clicked is cancel_button:
+            return None
+        return None
+    def _choose_model_download_mode(self, task_label: str, config: AppConfig, paths) -> tuple[str, str | None] | None:
         model_dir = get_local_model_dir(config, paths)
         model_dir.mkdir(parents=True, exist_ok=True)
         choice = self._ask_yes_no_cancel(self._tr('model_prompt_title'), self._tr('model_download_choice_body', task=task_label, model=config.vector_model, size=format_bytes(estimate_model_cache_bytes(config.vector_model, config.vector_runtime)), model_dir=model_dir))
         if choice == QtWidgets.QMessageBox.StandardButton.Yes:
             self._append_log(self._tr('log_model_download_prompt'))
-            return 'auto'
+            source = self._ask_model_download_source()
+            if not source:
+                self.statusMessageChanged.emit(self._tr('model_prompt_declined'))
+                self._append_log(self._tr('log_model_download_declined'))
+                return None
+            return 'auto', source
         if choice == QtWidgets.QMessageBox.StandardButton.No:
             context = self._manual_model_context(config, paths)
             dialog = ModelDownloadDialog(language_code=self._language_code, theme=self._theme, context=context, parent=self)
             dialog.exec()
             self.statusMessageChanged.emit(self._tr('status_manual_download_waiting'))
             self._append_log(self._tr('log_manual_download_hint', model=config.vector_model))
-            return 'manual'
+            return 'manual', None
         self.statusMessageChanged.emit(self._tr('model_prompt_declined'))
         self._append_log(self._tr('log_model_download_declined'))
         return None
-    def _choose_reranker_download_mode(self, task_label: str, config: AppConfig, paths) -> str | None:
+    def _choose_reranker_download_mode(self, task_label: str, config: AppConfig, paths) -> tuple[str, str | None] | None:
         model_dir = get_local_reranker_dir(config, paths)
         model_dir.mkdir(parents=True, exist_ok=True)
         choice = self._ask_yes_no_cancel(self._tr('model_prompt_title'), self._tr('reranker_download_choice_body', task=task_label, model=config.reranker_model, size=format_bytes(estimate_model_cache_bytes(config.reranker_model, config.vector_runtime)), model_dir=model_dir))
         if choice == QtWidgets.QMessageBox.StandardButton.Yes:
             self._append_log(self._tr('log_reranker_download_prompt'))
-            return 'auto'
+            source = self._ask_reranker_download_source()
+            if not source:
+                self.statusMessageChanged.emit(self._tr('status_reranker_download_declined'))
+                self._append_log(self._tr('log_reranker_download_declined'))
+                return None
+            return 'auto', source
         if choice == QtWidgets.QMessageBox.StandardButton.No:
-            QtWidgets.QMessageBox.information(self, self._tr('reranker_manual_title'), self._manual_reranker_hint(config, paths))
+            context = self._manual_reranker_context(config, paths)
+            dialog = ModelDownloadDialog(language_code=self._language_code, theme=self._theme, context=context, parent=self)
+            dialog.exec()
             self.statusMessageChanged.emit(self._tr('status_manual_download_waiting'))
             self._append_log(self._tr('log_manual_reranker_hint', model=config.reranker_model))
-            return 'manual'
+            return 'manual', None
         self.statusMessageChanged.emit(self._tr('status_reranker_download_declined'))
         self._append_log(self._tr('log_reranker_download_declined'))
         return None
@@ -4459,8 +5241,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
             return False
         choice = self._choose_model_download_mode(self._tr(label_key), config, paths)
-        if choice != 'auto':
+        if choice is None or choice[0] != 'auto':
             return False
+        download_source = choice[1] or 'official'
         if config.vector_local_files_only and not is_local_model_ready(config, paths):
             allow_remote = QtWidgets.QMessageBox.question(self, self._tr('model_prompt_title'), self._tr('model_prompt_local_only', manual_hint=self._manual_model_hint(config, paths)))
             if allow_remote != QtWidgets.QMessageBox.StandardButton.Yes:
@@ -4468,7 +5251,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 self._append_log(self._tr('log_model_download_declined'))
                 return False
             self.local_only_check.setChecked(False)
-        self._run_bootstrap_model(followup=followup)
+        self._run_bootstrap_model(followup=followup, download_source=download_source)
         return True
     def _task_profile(self, label_key: str, config: AppConfig, paths) -> tuple[str, str]:
         if label_key == 'preflight_button':
@@ -4829,7 +5612,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._append_log(self._tr('log_resume_discarded'))
     def _run_preflight(self) -> None:
         self._start_service_task('preflight_button', lambda service, emit, pause, cancel: {'report': service.estimate_space(on_progress=emit, pause_event=pause, cancel_event=cancel), 'status': service.status_snapshot()}, self._after_preflight, require_vault=True)
-    def _run_bootstrap_model(self, *, followup=None) -> None:
+    def _run_bootstrap_model(self, *, followup=None, download_source: str | None = None) -> None:
         if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
             return
         try:
@@ -4842,20 +5625,61 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._append_log(self._tr('log_model_already_ready', model=config.vector_model))
             QtWidgets.QMessageBox.information(self, self._tr('model_ready_title'), self._tr('model_ready_body', model=config.vector_model))
             return
-        choice = self._choose_model_download_mode(self._bootstrap_button_text(), config, paths)
-        if choice != 'auto':
-            return
-        force = self.force_check.isChecked()
-        def runner(service, emit, pause, cancel):
-            report = service.estimate_space(on_progress=emit, pause_event=pause, cancel_event=cancel)
-            if not report.can_proceed and not force:
-                return {'blocked': True, 'report': report}
-            return {'blocked': False, 'report': report, 'result': service.bootstrap_model(), 'status': service.status_snapshot()}
-        def after(payload):
-            self._after_bootstrap(payload)
-            if followup is not None and not payload.get('blocked'):
-                followup()
-        self._start_service_task('bootstrap_button', runner, after, require_vault=True)
+        normalized_download_source = (download_source or '').strip().lower()
+        if not normalized_download_source:
+            choice = self._choose_model_download_mode(self._bootstrap_button_text(), config, paths)
+            if choice is None or choice[0] != 'auto':
+                return
+            normalized_download_source = str(choice[1] or 'official').strip().lower() or 'official'
+        if config.vector_local_files_only and not is_local_model_ready(config, paths):
+            allow_remote = QtWidgets.QMessageBox.question(
+                self,
+                self._tr('model_prompt_title'),
+                self._tr('model_prompt_local_only', manual_hint=self._manual_model_hint(config, paths)),
+            )
+            if allow_remote != QtWidgets.QMessageBox.StandardButton.Yes:
+                self.statusMessageChanged.emit(self._tr('model_prompt_declined'))
+                self._append_log(self._tr('log_model_download_declined'))
+                return
+            self.local_only_check.setChecked(False)
+            config, paths = self._collect_config(True)
+        target_dir = get_local_model_dir(config, paths)
+        log_path = self._create_download_log_file(
+            paths=paths,
+            label_key='bootstrap_button',
+            model_name=config.vector_model,
+            target_dir=target_dir,
+            download_source=normalized_download_source,
+            kind='vector-model',
+        )
+        start_message = self._tr(
+            'status_model_download_started',
+            model=config.vector_model,
+            source=self._tr(f'model_source_{normalized_download_source}'),
+        )
+        self._start_download_task(
+            label_key='bootstrap_button',
+            config=config,
+            paths=paths,
+            download_kind='vector',
+            repo_id=config.vector_model,
+            target_dir=target_dir,
+            hf_home_dir=paths.cache_dir / 'models' / '_hf_home',
+            download_source=normalized_download_source,
+            on_success=lambda payload: self._after_model_download(payload, followup=followup),
+            on_failure=lambda message, traceback_text, active_log_path: self._handle_model_download_failure(
+                config,
+                paths,
+                message,
+                traceback_text,
+                active_log_path,
+            ),
+            log_path=log_path,
+            terminal_title=f'OmniClip RAG - {config.vector_model}',
+            start_message=start_message,
+            success_payload_builder=lambda: self._build_model_download_success_payload(config, paths),
+            local_files_only=bool(getattr(config, 'vector_local_files_only', False)),
+        )
     def _run_bootstrap_reranker(self) -> None:
         if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
             return
@@ -4870,9 +5694,209 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, self._tr('reranker_ready_title'), self._tr('reranker_ready_body', model=config.reranker_model))
             return
         choice = self._choose_reranker_download_mode(self._tr('bootstrap_reranker_button'), config, paths)
-        if choice != 'auto':
+        if choice is None or choice[0] != 'auto':
             return
-        self._start_service_task('bootstrap_reranker_button', lambda service, emit, pause, cancel: {'result': service.bootstrap_reranker(), 'status': service.status_snapshot()}, self._after_bootstrap_reranker, require_vault=False)
+        normalized_download_source = str(choice[1] or 'official').strip().lower() or 'official'
+        target_dir = get_local_reranker_dir(config, paths)
+        log_path = self._create_download_log_file(
+            paths=paths,
+            label_key='bootstrap_reranker_button',
+            model_name=config.reranker_model,
+            target_dir=target_dir,
+            download_source=normalized_download_source,
+            kind='reranker-model',
+        )
+        start_message = self._tr(
+            'status_reranker_download_started',
+            model=config.reranker_model,
+            source=self._tr(f'model_source_{normalized_download_source}'),
+        )
+        self._start_download_task(
+            label_key='bootstrap_reranker_button',
+            config=config,
+            paths=paths,
+            download_kind='reranker',
+            repo_id=config.reranker_model,
+            target_dir=target_dir,
+            hf_home_dir=paths.cache_dir / 'models' / '_hf_home',
+            download_source=normalized_download_source,
+            on_success=self._after_bootstrap_reranker,
+            on_failure=lambda message, traceback_text, active_log_path: self._handle_reranker_download_failure(
+                config,
+                paths,
+                message,
+                traceback_text,
+                active_log_path,
+            ),
+            log_path=log_path,
+            terminal_title=f'OmniClip RAG - {config.reranker_model}',
+            start_message=start_message,
+            success_payload_builder=lambda: self._build_reranker_download_success_payload(config, paths),
+        )
+
+    def _after_model_download(self, payload, *, followup=None) -> None:
+        result = payload['result']
+        snapshot = payload.get('status')
+        self._refresh_status_summary(snapshot)
+        self.statusMessageChanged.emit(self._tr('status_bootstrap_done'))
+        self._append_log(
+            self._tr(
+                'log_bootstrap_done',
+                model=result.get('model'),
+                dimension=result.get('dimension'),
+                cache=format_bytes(int(result.get('cache_bytes', 0))),
+            )
+        )
+        if followup is not None:
+            followup()
+
+    def _handle_model_download_failure(self, config: AppConfig, paths, message: str, traceback_text: str, log_path: Path | None) -> None:
+        detail = traceback_text.strip() or message or self._tr('none_value')
+        self.statusMessageChanged.emit(self._tr('status_model_download_failed_terminal'))
+        self._append_download_log_entries([detail], focus_log=True)
+        QtWidgets.QMessageBox.warning(
+            self,
+            self._bootstrap_button_text(),
+            self._tr(
+                'model_failed_body',
+                error=message or detail,
+                manual_hint=self._manual_model_hint(config, paths),
+                log_path=str(log_path or self._tr('none_value')),
+            ),
+        )
+
+    def _handle_reranker_download_failure(self, config: AppConfig, paths, message: str, traceback_text: str, log_path: Path | None) -> None:
+        detail = traceback_text.strip() or message or self._tr('none_value')
+        self.statusMessageChanged.emit(self._tr('status_reranker_download_failed_terminal'))
+        self._append_download_log_entries([detail], focus_log=True)
+        QtWidgets.QMessageBox.warning(
+            self,
+            self._tr('bootstrap_reranker_button'),
+            self._tr(
+                'reranker_failed_body',
+                error=(message or detail) + f'\n\n{self._tr("download_log_path_line", path=str(log_path or self._tr("none_value")))}',
+                manual_hint=self._manual_reranker_hint(config, paths),
+            ),
+        )
+
+    def _existing_delete_targets(self, *paths: Path) -> list[Path]:
+        return [path for path in paths if path.exists() or path.is_symlink()]
+
+    def _delete_target_summary(self, targets: list[Path]) -> str:
+        return '\n'.join(str(path) for path in targets) if targets else self._tr('none_value')
+
+    def _remove_path_tree(self, path: Path) -> None:
+        target = Path(path)
+        if not target.exists() and not target.is_symlink():
+            return
+        if target.is_symlink():
+            target.unlink()
+            return
+        if target.is_file():
+            os.chmod(target, stat.S_IWRITE)
+            target.unlink()
+            return
+
+        def _retry_remove(func, raw_path, _exc_info):
+            try:
+                os.chmod(raw_path, stat.S_IWRITE)
+            except OSError:
+                pass
+            func(raw_path)
+
+        try:
+            shutil.rmtree(target, onerror=_retry_remove)
+        except Exception as exc:
+            raise RuntimeError(self._tr('delete_path_failed', path=str(target), error=str(exc))) from exc
+
+    def _delete_model_cache_targets(self, targets: list[Path]) -> None:
+        for target in targets:
+            self._remove_path_tree(target)
+
+    def _delete_local_model(self) -> None:
+        if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
+            return
+        if self._busy:
+            QtWidgets.QMessageBox.information(self, self._tr('busy_title'), self._tr('busy_body'))
+            return
+        try:
+            config, paths = self._collect_config(True)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
+            return
+        model_dir = get_local_model_dir(config, paths)
+        repo_cache_dir = hf_repo_cache_dir(paths.cache_dir / 'models' / '_hf_home', config.vector_model)
+        targets = self._existing_delete_targets(model_dir, repo_cache_dir)
+        if not targets:
+            QtWidgets.QMessageBox.information(
+                self,
+                self._tr('delete_model_missing_title'),
+                self._tr('delete_model_missing_body', model=config.vector_model, path=self._delete_target_summary([model_dir, repo_cache_dir])),
+            )
+            self.statusMessageChanged.emit(self._tr('status_model_delete_missing'))
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            self._tr('delete_model_confirm_title'),
+            self._tr('delete_model_confirm_body', model=config.vector_model, path=self._delete_target_summary(targets)),
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            release_process_vector_resources()
+            release_process_reranker_resources()
+            gc.collect()
+            self._delete_model_cache_targets(targets)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, self._tr('delete_model_confirm_title'), str(exc))
+            self.statusMessageChanged.emit(self._tr('status_failed', label=self._delete_model_button_text()))
+            self._append_log(str(exc), focus_log=True)
+            return
+        self._refresh_status_summary(self._status_snapshot)
+        self.statusMessageChanged.emit(self._tr('status_model_deleted', model=config.vector_model))
+        self._append_log(self._tr('log_model_deleted', model=config.vector_model, path=self._delete_target_summary(targets)))
+
+    def _delete_local_reranker(self) -> None:
+        if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
+            return
+        if self._busy:
+            QtWidgets.QMessageBox.information(self, self._tr('busy_title'), self._tr('busy_body'))
+            return
+        try:
+            config, paths = self._collect_config(False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
+            return
+        model_dir = get_local_reranker_dir(config, paths)
+        repo_cache_dir = get_local_reranker_repo_cache_dir(config, paths)
+        targets = self._existing_delete_targets(model_dir, repo_cache_dir)
+        if not targets:
+            QtWidgets.QMessageBox.information(
+                self,
+                self._tr('delete_reranker_missing_title'),
+                self._tr('delete_reranker_missing_body', model=config.reranker_model, path=self._delete_target_summary([model_dir, repo_cache_dir])),
+            )
+            self.statusMessageChanged.emit(self._tr('status_reranker_delete_missing'))
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            self._tr('delete_reranker_confirm_title'),
+            self._tr('delete_reranker_confirm_body', model=config.reranker_model, path=self._delete_target_summary(targets)),
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            release_process_reranker_resources()
+            gc.collect()
+            self._delete_model_cache_targets(targets)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, self._tr('delete_reranker_confirm_title'), str(exc))
+            self.statusMessageChanged.emit(self._tr('status_failed', label=self._delete_reranker_button_text()))
+            self._append_log(str(exc), focus_log=True)
+            return
+        self._refresh_status_summary(self._status_snapshot)
+        self.statusMessageChanged.emit(self._tr('status_reranker_deleted', model=config.reranker_model))
+        self._append_log(self._tr('log_reranker_deleted', model=config.reranker_model, path=self._delete_target_summary(targets)))
     def _run_rebuild(self, *, resume: bool = False) -> None:
         if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
             return
@@ -5058,14 +6082,25 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, self._tr('bootstrap_blocked_title'), self._tr('bootstrap_blocked_body'))
             return
         result = payload['result']
-        self.statusMessageChanged.emit(self._tr('status_bootstrap_done'))
         self._append_log(self._tr('log_bootstrap_done', model=result.get('model'), dimension=result.get('dimension'), cache=format_bytes(int(result.get('cache_bytes', 0)))))
+        auto_enabled = False
+        try:
+            config, paths = self._collect_config(False)
+        except Exception:
+            config = None
+            paths = None
+        if config is not None and paths is not None:
+            config, snapshot, auto_enabled = self._maybe_auto_enable_semantic_backend(config, paths, snapshot)
+        if not auto_enabled:
+            self.statusMessageChanged.emit(self._tr('status_bootstrap_done'))
         self._refresh_status_summary(snapshot)
+        self.runtimeConfigChanged.emit(self._config, self._paths)
     def _after_bootstrap_reranker(self, payload) -> None:
         result = payload['result']
         self._refresh_status_summary(payload.get('status'))
         self.statusMessageChanged.emit(self._tr('status_reranker_ready'))
         self._append_log(self._tr('log_reranker_ready', model=result.get('model')))
+        self.runtimeConfigChanged.emit(self._config, self._paths)
     def _after_rebuild(self, payload) -> None:
         report = payload.get('report')
         if report is not None:
@@ -5085,15 +6120,22 @@ class ConfigWorkspace(QtWidgets.QWidget):
         else:
             self.statusMessageChanged.emit(self._tr('status_rebuild_done'))
         self._append_log(self._tr('log_rebuild_done', files=stats['files'], chunks=stats['chunks'], refs=stats['refs']))
+        self.runtimeConfigChanged.emit(self._config, self._paths)
     def _after_status(self, payload) -> None:
-        self._refresh_status_summary(payload)
-        self.statusMessageChanged.emit(self._tr('status_refresh_done'))
-        self._append_log(self._tr('log_status_done'))
         try:
             config, paths = self._collect_config(False)
         except Exception:
+            self._refresh_status_summary(payload)
+            self.statusMessageChanged.emit(self._tr('status_refresh_done'))
+            self._append_log(self._tr('log_status_done'))
             return
-        self._offer_resume_rebuild(config, paths, payload)
+        snapshot = payload if isinstance(payload, dict) else None
+        config, snapshot, auto_enabled = self._maybe_auto_enable_semantic_backend(config, paths, snapshot)
+        self._refresh_status_summary(snapshot if snapshot is not None else payload)
+        if not auto_enabled:
+            self.statusMessageChanged.emit(self._tr('status_refresh_done'))
+            self._append_log(self._tr('log_status_done'))
+        self._offer_resume_rebuild(config, paths, snapshot if snapshot is not None else payload)
     def _after_clear(self, payload) -> None:
         self.clear_index_check.setChecked(False)
         self.clear_logs_check.setChecked(False)
@@ -5102,4 +6144,4 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_status_summary(payload)
         self.statusMessageChanged.emit(self._tr('status_clear_done'))
         self._append_log(self._tr('log_clear_done'))
-
+        self.runtimeConfigChanged.emit(self._config, self._paths)

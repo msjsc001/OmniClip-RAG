@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from dataclasses import asdict, replace
@@ -29,6 +30,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--ui', default='next')
     parser.add_argument('--selfcheck-query', action='store_true')
+    parser.add_argument('--download-worker', action='store_true')
+    parser.add_argument('--download-kind', default='')
+    parser.add_argument('--repo-id', default='')
+    parser.add_argument('--target-dir', default='')
+    parser.add_argument('--hf-home', default='')
+    parser.add_argument('--source', default='official')
+    parser.add_argument('--log-path', default='')
+    parser.add_argument('--pid-path', default='')
+    parser.add_argument('--result-path', default='')
+    parser.add_argument('--local-files-only', action='store_true')
     parser.add_argument('--vault', default='')
     parser.add_argument('--data-root', default='')
     parser.add_argument('--query', default='')
@@ -43,6 +54,18 @@ def main(argv: list[str] | None = None) -> int:
         return run_selfcheck_runtime(
             check_kind=args.selfcheck_runtime,
             output_path=args.output,
+        )
+    if _should_run_download_worker(args):
+        return run_download_worker(
+            download_kind=args.download_kind,
+            repo_id=args.repo_id,
+            target_dir=args.target_dir,
+            hf_home=args.hf_home,
+            download_source=args.source,
+            log_path=args.log_path,
+            pid_path=args.pid_path,
+            result_path=args.result_path,
+            local_files_only=bool(args.local_files_only),
         )
     if _should_run_selfcheck(args):
         return run_selfcheck_query(
@@ -117,6 +140,10 @@ def _should_run_runtime_selfcheck(args: argparse.Namespace) -> bool:
     return bool(str(getattr(args, 'selfcheck_runtime', '') or '').strip())
 
 
+def _should_run_download_worker(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, 'download_worker', False))
+
+
 def _json_default(value: object):
     if isinstance(value, Path):
         return str(value)
@@ -126,6 +153,369 @@ def _json_default(value: object):
 def _write_selfcheck_payload(target: Path, payload: dict[str, object]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default), encoding='utf-8')
+
+
+def _write_download_worker_payload(target: Path | None, payload: dict[str, object]) -> None:
+    if target is None:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default),
+        encoding='utf-8',
+    )
+
+
+def _ensure_download_worker_stdio(log_path: Path | None) -> list[object]:
+    """
+    Why: the frozen GUI EXE may enter worker mode with `sys.stderr` unset.
+    Third-party download stacks such as ModelScope/tqdm assume a writable stream
+    exists and crash with `'NoneType' object has no attribute 'write'` otherwise.
+    """
+    opened_streams: list[object] = []
+    stdout_stream = getattr(sys, 'stdout', None)
+    stderr_stream = getattr(sys, 'stderr', None)
+    if stdout_stream is not None and getattr(stdout_stream, 'write', None) and stderr_stream is None:
+        sys.stderr = stdout_stream
+        return opened_streams
+    if stderr_stream is not None and getattr(stderr_stream, 'write', None) and stdout_stream is None:
+        sys.stdout = stderr_stream
+        return opened_streams
+    if (
+        stdout_stream is not None
+        and getattr(stdout_stream, 'write', None)
+        and stderr_stream is not None
+        and getattr(stderr_stream, 'write', None)
+    ):
+        return opened_streams
+    fallback_path = log_path
+    if fallback_path is None:
+        fallback_path = Path.cwd() / 'download-worker-fallback.log'
+    fallback_path.parent.mkdir(parents=True, exist_ok=True)
+    fallback_stream = fallback_path.open('a', encoding='utf-8', buffering=1)
+    opened_streams.append(fallback_stream)
+    if stdout_stream is None or not getattr(stdout_stream, 'write', None):
+        sys.stdout = fallback_stream
+    if stderr_stream is None or not getattr(stderr_stream, 'write', None):
+        sys.stderr = fallback_stream
+    return opened_streams
+
+
+def _download_worker_logger(log_path: Path | None):
+    def emit(message: str) -> None:
+        text_value = str(message or '').strip()
+        if not text_value:
+            return
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        lines = [f'[{timestamp}] {chunk.strip()}' for chunk in text_value.splitlines() if chunk.strip()]
+        if not lines:
+            return
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open('a', encoding='utf-8') as handle:
+                handle.write('\n'.join(lines) + '\n')
+        for line in lines:
+            print(line, flush=True)
+
+    return emit
+
+
+def _directory_snapshot(path: Path) -> tuple[int, int]:
+    if not path.exists():
+        return 0, 0
+    if path.is_file():
+        try:
+            return int(path.stat().st_size), 1
+        except OSError:
+            return 0, 0
+    total = 0
+    files = 0
+    for child in path.rglob('*'):
+        try:
+            if child.is_file():
+                total += int(child.stat().st_size)
+                files += 1
+        except OSError:
+            continue
+    return total, files
+
+
+def _format_download_bytes(value: int) -> str:
+    size = max(int(value or 0), 0)
+    units = ('B', 'KB', 'MB', 'GB', 'TB')
+    index = 0
+    scaled = float(size)
+    while scaled >= 1024.0 and index < len(units) - 1:
+        scaled /= 1024.0
+        index += 1
+    if index == 0:
+        return f'{int(scaled)} {units[index]}'
+    return f'{scaled:.1f} {units[index]}'
+
+
+def _format_download_elapsed(seconds: float) -> str:
+    total_seconds = max(int(seconds or 0), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f'{hours:02d}:{minutes:02d}:{secs:02d}'
+    return f'{minutes:02d}:{secs:02d}'
+
+
+def _start_download_heartbeat(
+    *,
+    emit,
+    target_dir: Path,
+    repo_cache_dir: Path,
+    interval_seconds: float = 5.0,
+) -> tuple[threading.Event, threading.Thread]:
+    stop_event = threading.Event()
+
+    def run() -> None:
+        started_at = time.monotonic()
+        last_change_at = started_at
+        last_target_bytes, last_target_files = _directory_snapshot(target_dir)
+        last_cache_bytes, last_cache_files = _directory_snapshot(repo_cache_dir)
+        interval_label = f'{float(interval_seconds):g} 秒'
+
+        def emit_snapshot() -> None:
+            nonlocal last_change_at, last_target_bytes, last_target_files, last_cache_bytes, last_cache_files
+            target_bytes, target_files = _directory_snapshot(target_dir)
+            cache_bytes, cache_files = _directory_snapshot(repo_cache_dir)
+            now = time.monotonic()
+            target_delta_bytes = target_bytes - last_target_bytes
+            target_delta_files = target_files - last_target_files
+            cache_delta_bytes = cache_bytes - last_cache_bytes
+            cache_delta_files = cache_files - last_cache_files
+            if (
+                target_delta_bytes != 0
+                or cache_delta_bytes != 0
+                or target_delta_files != 0
+                or cache_delta_files != 0
+            ):
+                last_change_at = now
+            elapsed = _format_download_elapsed(now - started_at)
+            since_change = _format_download_elapsed(now - last_change_at)
+            if target_bytes <= 0 and cache_bytes <= 0 and target_files <= 0 and cache_files <= 0:
+                emit(
+                    f'下载心跳：已用时 {elapsed}；当前仍在等待远端响应或首个文件，'
+                    f'目标目录 0 B / 0 个文件；HF 缓存 0 B / 0 个文件；最近实际进展 {since_change} 前。'
+                )
+            elif (
+                target_delta_bytes == 0
+                and cache_delta_bytes == 0
+                and target_delta_files == 0
+                and cache_delta_files == 0
+            ):
+                emit(
+                    f'下载心跳：已用时 {elapsed}；最近 {interval_label} 暂无新增文件或字节，'
+                    f'目标目录 {_format_download_bytes(target_bytes)} / {target_files} 个文件；'
+                    f'HF 缓存 {_format_download_bytes(cache_bytes)} / {cache_files} 个文件；'
+                    f'最近实际进展 {since_change} 前。'
+                )
+            else:
+                target_delta = (
+                    f'目标目录 +{_format_download_bytes(max(target_delta_bytes, 0))} / '
+                    f'+{max(target_delta_files, 0)} 个文件'
+                )
+                cache_delta = (
+                    f'HF 缓存 +{_format_download_bytes(max(cache_delta_bytes, 0))} / '
+                    f'+{max(cache_delta_files, 0)} 个文件'
+                )
+                emit(
+                    f'下载心跳：已用时 {elapsed}；最近 {interval_label} 新增 {target_delta}，{cache_delta}；'
+                    f'当前累计 目标目录 {_format_download_bytes(target_bytes)} / {target_files} 个文件；'
+                    f'HF 缓存 {_format_download_bytes(cache_bytes)} / {cache_files} 个文件；'
+                    f'最近实际进展 {since_change} 前。'
+                )
+            last_target_bytes, last_target_files = target_bytes, target_files
+            last_cache_bytes, last_cache_files = cache_bytes, cache_files
+
+        emit_snapshot()
+        while not stop_event.wait(interval_seconds):
+            emit_snapshot()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return stop_event, thread
+
+
+def _probe_download_repo(repo_id: str, *, download_source: str, emit) -> None:
+    from ..vector_index import _model_download_attempt_chain, _model_download_attempt_label, _model_download_endpoint
+
+    normalized_source = (download_source or 'official').strip().lower() or 'official'
+    attempt_chain = _model_download_attempt_chain(normalized_source, repo_id)
+    first_attempt = attempt_chain[0] if attempt_chain else 'hf-official'
+    attempt_label = _model_download_attempt_label(first_attempt)
+    if first_attempt == 'modelscope':
+        try:
+            from modelscope.hub.api import HubApi
+        except Exception as exc:
+            emit(f'仓库元数据预检跳过：无法导入 ModelScope HubApi（{exc.__class__.__name__}: {exc}）')
+            return
+        try:
+            api = HubApi()
+            files = api.get_model_files(repo_id, recursive=True)
+            emit(f'仓库元数据预检成功：{attempt_label} 检测到 {len(list(files or []))} 个远端条目。')
+        except Exception as exc:
+            emit(f'仓库元数据预检失败，但会继续尝试下载：{exc.__class__.__name__}: {exc}')
+        return
+    endpoint = _model_download_endpoint(normalized_source)
+    try:
+        from huggingface_hub import HfApi
+    except Exception as exc:
+        emit(f'仓库元数据预检跳过：无法导入 huggingface_hub.HfApi（{exc.__class__.__name__}: {exc}）')
+        return
+    try:
+        api = HfApi(endpoint=endpoint)
+        info = api.model_info(repo_id)
+        sibling_count = len(list(getattr(info, 'siblings', []) or []))
+        emit(f'仓库元数据预检成功：{attempt_label} 检测到 {sibling_count} 个远端条目。')
+    except Exception as exc:
+        emit(f'仓库元数据预检失败，但会继续尝试下载：{exc.__class__.__name__}: {exc}')
+
+
+def run_download_worker(
+    *,
+    download_kind: str,
+    repo_id: str,
+    target_dir: str,
+    hf_home: str,
+    download_source: str,
+    log_path: str,
+    pid_path: str,
+    result_path: str,
+    local_files_only: bool,
+) -> int:
+    from ..errors import RuntimeDependencyError
+    from ..vector_index import (
+        _model_download_source_label,
+        model_download_attempt_labels,
+        download_hf_repo_snapshot,
+        hf_repo_cache_dir,
+    )
+
+    normalized_kind = (download_kind or 'vector').strip().lower() or 'vector'
+    normalized_source = (download_source or 'official').strip().lower() or 'official'
+    target = Path(str(target_dir or '')).expanduser().resolve()
+    hf_home_dir = Path(str(hf_home or '')).expanduser().resolve()
+    log_target = Path(str(log_path or '')).expanduser().resolve() if str(log_path or '').strip() else None
+    pid_target = Path(str(pid_path or '')).expanduser().resolve() if str(pid_path or '').strip() else None
+    result_target = Path(str(result_path or '')).expanduser().resolve() if str(result_path or '').strip() else None
+    stdio_streams = _ensure_download_worker_stdio(log_target)
+    emit = _download_worker_logger(log_target)
+    try:
+        if pid_target is not None:
+            pid_target.parent.mkdir(parents=True, exist_ok=True)
+            pid_target.write_text(str(os.getpid()), encoding='utf-8')
+        _write_download_worker_payload(
+            result_target,
+            {
+                'state': 'running',
+                'ok': None,
+                'pid': os.getpid(),
+                'kind': normalized_kind,
+                'repo_id': repo_id,
+                'target_dir': str(target),
+                'hf_home': str(hf_home_dir),
+                'source': normalized_source,
+            },
+        )
+        repo_cache_dir = hf_repo_cache_dir(hf_home_dir, repo_id)
+        emit(f'下载 worker 已启动，PID={os.getpid()}')
+        emit(f'下载类型：{normalized_kind}')
+        emit(f'仓库：{repo_id}')
+        emit(f'目标目录：{target}')
+        emit(f'HF_HOME：{hf_home_dir}')
+        emit(f'仓库缓存目录：{repo_cache_dir}')
+        emit(f'下载源：{_model_download_source_label(normalized_source)}')
+        attempt_labels = model_download_attempt_labels(normalized_source, repo_id)
+        if attempt_labels:
+            emit('自动下载链路：' + ' -> '.join(attempt_labels))
+        _probe_download_repo(repo_id, download_source=normalized_source, emit=emit)
+        emit('下载心跳监控已启动：每 5 秒刷新一次目标目录与缓存大小。')
+        heartbeat_stop, heartbeat_thread = _start_download_heartbeat(
+            emit=emit,
+            target_dir=target,
+            repo_cache_dir=repo_cache_dir,
+        )
+        try:
+            download_hf_repo_snapshot(
+                repo_id=repo_id,
+                local_dir=target,
+                hf_home_dir=hf_home_dir,
+                local_files_only=bool(local_files_only),
+                download_source=normalized_source,
+                download_log=emit,
+                missing_dependency_message='当前还缺少 huggingface-hub 运行时，暂时不能下载模型缓存。',
+            )
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1.5)
+            final_target_bytes, final_target_files = _directory_snapshot(target)
+            final_cache_bytes, final_cache_files = _directory_snapshot(repo_cache_dir)
+            emit(
+                f'下载心跳监控已停止：目标目录 {_format_download_bytes(final_target_bytes)} / {final_target_files} 个文件；'
+                f'HF 缓存 {_format_download_bytes(final_cache_bytes)} / {final_cache_files} 个文件。'
+            )
+        emit('下载 worker 已完成。')
+        _write_download_worker_payload(
+            result_target,
+            {
+                'state': 'success',
+                'ok': True,
+                'pid': os.getpid(),
+                'kind': normalized_kind,
+                'repo_id': repo_id,
+                'target_dir': str(target),
+                'hf_home': str(hf_home_dir),
+                'source': normalized_source,
+                'repo_cache_dir': str(repo_cache_dir),
+            },
+        )
+        return 0
+    except RuntimeDependencyError as exc:
+        emit(f'下载失败：{exc}')
+        _write_download_worker_payload(
+            result_target,
+            {
+                'state': 'failed',
+                'ok': False,
+                'pid': os.getpid(),
+                'kind': normalized_kind,
+                'repo_id': repo_id,
+                'target_dir': str(target),
+                'hf_home': str(hf_home_dir),
+                'source': normalized_source,
+                'error': str(exc).strip() or exc.__class__.__name__,
+                'traceback': traceback.format_exc(),
+            },
+        )
+        return 1
+    except Exception as exc:
+        emit(f'下载失败：{exc.__class__.__name__}: {exc}')
+        emit(traceback.format_exc())
+        _write_download_worker_payload(
+            result_target,
+            {
+                'state': 'failed',
+                'ok': False,
+                'pid': os.getpid(),
+                'kind': normalized_kind,
+                'repo_id': repo_id,
+                'target_dir': str(target),
+                'hf_home': str(hf_home_dir),
+                'source': normalized_source,
+                'error': str(exc).strip() or exc.__class__.__name__,
+                'traceback': traceback.format_exc(),
+            },
+        )
+        return 1
+    finally:
+        for stream in stdio_streams:
+            try:
+                stream.flush()
+            except Exception:
+                pass
 
 
 def run_selfcheck_query(

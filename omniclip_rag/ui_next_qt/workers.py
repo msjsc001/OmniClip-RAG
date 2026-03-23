@@ -192,6 +192,51 @@ class ServiceTaskWorker(QtCore.QObject):
         _safe_emit(self.progress, dict(payload))
 
 
+class ServiceFunctionWorker(QtCore.QObject):
+    log = QtCore.Signal(str)
+    succeeded = QtCore.Signal(object)
+    runtimeError = QtCore.Signal(str)
+    failed = QtCore.Signal(str, str)
+    finished = QtCore.Signal()
+
+    def __init__(
+        self,
+        *,
+        config,
+        paths,
+        runner: Callable[[OmniClipService, Callable[[str], None]], object],
+    ) -> None:
+        super().__init__()
+        self._config = config
+        self._paths = paths
+        self._runner = runner
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        service = OmniClipService(self._config, self._paths)
+        try:
+            payload = self._runner(service, self._emit_log)
+            _safe_emit(self.succeeded, payload)
+        except RuntimeDependencyError as exc:
+            LOGGER.exception('Service function worker failed because the vector runtime is not ready.')
+            _safe_emit(self.runtimeError, str(exc).strip() or exc.__class__.__name__)
+        except Exception as exc:
+            LOGGER.exception('Service function worker crashed unexpectedly.')
+            _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
+        finally:
+            service.close()
+            _safe_emit(self.finished)
+
+    def _emit_log(self, message: str) -> None:
+        text_value = str(message or '').strip()
+        if text_value:
+            _safe_emit(self.log, text_value)
+
+
 class WatchWorker(QtCore.QObject):
     updated = QtCore.Signal(object)
     failed = QtCore.Signal(str, str)

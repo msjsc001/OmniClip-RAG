@@ -198,6 +198,42 @@ class McpTests(unittest.TestCase):
         self.assertTrue(payload.structuredContent['degraded'])
         self.assertEqual(payload.structuredContent['effective_mode'], 'lexical_only')
 
+    def test_search_tool_marks_backend_disabled_as_degraded(self) -> None:
+        hit = SearchHit(
+            score=0.6,
+            title='后端关闭',
+            anchor='段落',
+            source_path='pages/backend-disabled.md',
+            rendered_text='当前只走字面检索。',
+            chunk_id='chunk-backend-disabled',
+            display_text='当前只走字面检索。',
+            preview_text='当前只走字面检索。',
+            source_family='markdown',
+            source_kind='markdown',
+            source_label='Markdown · backend-disabled.md',
+        )
+        result = QueryResult(
+            hits=[hit],
+            context_text='context',
+            insights=QueryInsights(
+                runtime_warnings=('markdown_vector_backend_disabled',),
+                query_stage={'fallback_reason': 'vector_backend_disabled'},
+            ),
+        )
+        context = _make_context(query_result=result)
+        context.bundle.config = replace(context.bundle.config, vector_backend='disabled')
+        context.service.config = context.bundle.config
+        app = OmniClipMcpApplication(context)
+        with patch('omniclip_rag.mcp.core.inspect_runtime_environment', return_value={'runtime_complete': True, 'runtime_missing_items': [], 'active_runtime_dir': Path('D:/runtime'), 'preferred_runtime_dir': Path('D:/runtime')}), \
+             patch('omniclip_rag.mcp.core.detect_acceleration', return_value={'torch_available': True, 'sentence_transformers_available': True, 'cuda_available': False}), \
+             patch('omniclip_rag.mcp.core.is_local_model_ready', return_value=True), \
+             patch('omniclip_rag.mcp.core.runtime_dependency_issue', return_value=''):
+            payload = asyncio.run(app.server.call_tool(MCP_SEARCH_TOOL, {'query': '我的思维'}))
+        self.assertFalse(payload.isError)
+        self.assertTrue(payload.structuredContent['degraded'])
+        self.assertEqual(payload.structuredContent['effective_mode'], 'lexical_only')
+        self.assertIn('markdown_vector_backend_disabled', payload.structuredContent['warnings'])
+
     def test_search_tool_respects_top_k_and_snippet_limit(self) -> None:
         hits = [
             SearchHit(

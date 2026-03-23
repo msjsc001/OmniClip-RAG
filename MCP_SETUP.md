@@ -192,7 +192,7 @@ Use these values when adding a new MCP server in Jan.ai:
 Example:
 
 ```text
-D:\software\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.2\OmniClipRAG-MCP.exe
+D:\software\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.3\OmniClipRAG-MCP.exe
 ```
 
 ## OpenClaw Reference Setup
@@ -212,7 +212,7 @@ Add or merge an `mcpServers` block like this:
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.2\\OmniClipRAG-MCP.exe",
+      "command": "D:\\software\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.3\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }

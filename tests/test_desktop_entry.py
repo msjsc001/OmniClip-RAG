@@ -1,6 +1,8 @@
 import json
+import io
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -55,6 +57,34 @@ class DesktopEntryTests(unittest.TestCase):
             output_path='runtime.json',
         )
 
+    def test_main_dispatches_download_worker_without_launching_qt(self) -> None:
+        with patch.object(desktop, '_apply_runtime_layout_if_needed') as runtime_mock, \
+             patch.object(desktop, 'run_download_worker', return_value=11) as mocked:
+            result = desktop.main([
+                '--download-worker',
+                '--download-kind', 'vector',
+                '--repo-id', 'BAAI/bge-m3',
+                '--target-dir', 'D:/data/models/BAAI__bge-m3',
+                '--hf-home', 'D:/data/models/_hf_home',
+                '--source', 'mirror',
+                '--log-path', 'D:/logs/download.log',
+                '--pid-path', 'D:/logs/download.pid',
+                '--result-path', 'D:/logs/download.result.json',
+            ])
+        self.assertEqual(result, 11)
+        runtime_mock.assert_called_once()
+        mocked.assert_called_once_with(
+            download_kind='vector',
+            repo_id='BAAI/bge-m3',
+            target_dir='D:/data/models/BAAI__bge-m3',
+            hf_home='D:/data/models/_hf_home',
+            download_source='mirror',
+            log_path='D:/logs/download.log',
+            pid_path='D:/logs/download.pid',
+            result_path='D:/logs/download.result.json',
+            local_files_only=False,
+        )
+
     def test_run_selfcheck_runtime_suite_writes_combined_payload(self) -> None:
         temp_dir = Path(__file__).resolve().parents[1] / '.tmp' / 'desktop_runtime_suite'
         if temp_dir.exists():
@@ -85,6 +115,59 @@ class DesktopEntryTests(unittest.TestCase):
         payload = json.loads(target.read_text(encoding='utf-8'))
         self.assertEqual(payload['path'], str(Path('D:/vault')))
         shutil.rmtree(target_dir)
+
+    def test_download_heartbeat_emits_waiting_then_growth_snapshots(self) -> None:
+        target_dir = Path(tempfile.mkdtemp(prefix='omniclip-download-target-'))
+        cache_dir = Path(tempfile.mkdtemp(prefix='omniclip-download-cache-'))
+        messages: list[str] = []
+        try:
+            stop_event, thread = desktop._start_download_heartbeat(
+                emit=messages.append,
+                target_dir=target_dir,
+                repo_cache_dir=cache_dir,
+                interval_seconds=0.05,
+            )
+            time.sleep(0.08)
+            (target_dir / 'model.bin').write_bytes(b'x' * 4096)
+            cache_nested = cache_dir / 'nested'
+            cache_nested.mkdir(parents=True, exist_ok=True)
+            (cache_nested / 'chunk.bin').write_bytes(b'y' * 2048)
+            time.sleep(0.12)
+            stop_event.set()
+            thread.join(timeout=1.0)
+        finally:
+            shutil.rmtree(target_dir, ignore_errors=True)
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        self.assertTrue(any('当前仍在等待远端响应或首个文件' in item for item in messages))
+        self.assertTrue(any('新增 目标目录 +4.0 KB / +1 个文件' in item for item in messages))
+        self.assertTrue(any('HF 缓存 +2.0 KB / +1 个文件' in item for item in messages))
+
+    def test_ensure_download_worker_stdio_reuses_stdout_when_stderr_is_missing(self) -> None:
+        fake_stdout = io.StringIO()
+        with patch.object(desktop.sys, 'stdout', fake_stdout), \
+             patch.object(desktop.sys, 'stderr', None):
+            opened = desktop._ensure_download_worker_stdio(None)
+            self.assertEqual(opened, [])
+            self.assertIs(desktop.sys.stderr, fake_stdout)
+
+    def test_ensure_download_worker_stdio_creates_log_stream_when_both_missing(self) -> None:
+        temp_dir = Path(tempfile.mkdtemp(prefix='omniclip-download-stdio-'))
+        log_path = temp_dir / 'worker.log'
+        try:
+            with patch.object(desktop.sys, 'stdout', None), \
+                 patch.object(desktop.sys, 'stderr', None):
+                opened = desktop._ensure_download_worker_stdio(log_path)
+                try:
+                    self.assertEqual(len(opened), 1)
+                    self.assertIs(desktop.sys.stdout, desktop.sys.stderr)
+                    desktop.sys.stdout.write('hello\n')
+                    desktop.sys.stdout.flush()
+                finally:
+                    for stream in opened:
+                        stream.close()
+            self.assertIn('hello', log_path.read_text(encoding='utf-8'))
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 if __name__ == '__main__':

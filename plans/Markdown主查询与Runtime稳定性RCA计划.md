@@ -27,7 +27,7 @@
 - 当前主点验路径：
   - `D:\软件编写\OmniClip RAG\dist\OmniClipRAG-v0.2.4\OmniClipRAG.exe`
 - 当前固定复现场景：
-  - 笔记库：`D:\8 L-Logseq\l-phone-logseq`
+  - 笔记库：`<user-logseq-vault>`
   - 查询词：`我的思维`
   - 阈值：`0`
   - 条数：`30`
@@ -301,7 +301,7 @@
 
 ## 当前阶段更新记录
 ### 2026-03-16（构建版 suite 四模式最终钉死）
-- 已直接在当前验收构建物 `dist/OmniClipRAG-v0.2.4/OmniClipRAG.exe` 上，对真实工作区 `D:\8 L-Logseq\l-phone-logseq` 执行 `--selfcheck-query --query-mode suite`，不再依赖源码态入口或开发态运行环境。
+- 已直接在当前验收构建物 `dist/OmniClipRAG-v0.2.4/OmniClipRAG.exe` 上，对真实工作区 `<user-logseq-vault>` 执行 `--selfcheck-query --query-mode suite`，不再依赖源码态入口或开发态运行环境。
 - 本次固定 query `我的思维` 的构建版四模式结果已经全部落盘到 `.tmp_dist_runtime_diag_packaged_suite.json`，关键事实如下：
   - `lexical-only`：`result_count=0`，`lexical_candidates_raw=0`
   - `vector-only`：`result_count=30`，`vector_query_executed=true`，`vector_candidates_raw=300`
@@ -388,7 +388,7 @@
 2. 阅读 `ARCHITECTURE.md` 最后关于 Runtime / Markdown 主查询 / 构建版验收的记录
 3. 只使用构建版 EXE 作为最终点验对象
 4. 先跑固定 query：
-   - 库：`D:\8 L-Logseq\l-phone-logseq`
+   - 库：`<user-logseq-vault>`
    - 词：`我的思维`
    - 阈值：`0`
    - 条数：`30`

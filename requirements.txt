@@ -5,6 +5,7 @@ onnxruntime>=1.22.0,<1.25.0
 sentence-transformers>=5.1.0,<6.0.0
 transformers>=4.41.0,<5.0.0
 huggingface-hub>=0.20.0,<1.0.0
+modelscope>=1.35.0,<2.0.0
 pyinstaller>=6.16.0,<7.0.0
 pypdf>=5.0.0,<6.0.0
 mcp>=1,<2

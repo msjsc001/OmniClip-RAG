@@ -8,7 +8,16 @@ from unittest.mock import Mock, patch
 from omniclip_rag.canary_backend import CANARY_RERANKER_MODEL_ID
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.models import SearchHit
-from omniclip_rag.reranker import CanaryTorchReranker, CrossEncoderReranker, create_reranker, is_local_reranker_ready
+from omniclip_rag.reranker import (
+    CanaryTorchReranker,
+    CrossEncoderReranker,
+    create_reranker,
+    get_local_reranker_dir,
+    is_local_reranker_ready,
+    release_process_reranker_resources,
+    reranker_download_guidance_context,
+)
+from omniclip_rag.vector_index import _MODEL_DOWNLOAD_IGNORE_PATTERNS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +87,58 @@ class RerankerTests(unittest.TestCase):
         self.assertEqual(outcome.resolved_device, 'cpu')
         self.assertEqual(len(reranked), 2)
 
+    def test_reranker_download_guidance_context_builds_commands_and_dirs(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'manual_reranker_context'))
+        config = AppConfig(vault_path='.', data_root=str(paths.global_root), reranker_enabled=True)
+        result = reranker_download_guidance_context(config, paths)
+        self.assertEqual(result['model'], config.reranker_model)
+        self.assertTrue(Path(result['model_dir']).exists())
+        self.assertIn('https://huggingface.co/', result['official_url'])
+        self.assertIn('https://hf-mirror.com/', result['mirror_url'])
+        self.assertIn('hf download', result['official_download_command'])
+        self.assertIn('HF_ENDPOINT', result['mirror_download_command'])
+        for pattern in _MODEL_DOWNLOAD_IGNORE_PATTERNS:
+            self.assertIn(pattern, result['official_download_command'])
+            self.assertIn(pattern, result['mirror_download_command'])
+
+    def test_cross_encoder_reranker_warmup_forwards_download_source_and_log(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'warmup_download_source'))
+        config = AppConfig(vault_path='.', data_root=str(paths.global_root), reranker_enabled=True)
+        reranker = CrossEncoderReranker(config, paths)
+        callback = lambda _message: None
+        with patch('omniclip_rag.reranker.is_local_reranker_ready', side_effect=[False, True]), \
+             patch('omniclip_rag.reranker.download_hf_repo_snapshot') as download_mock, \
+             patch.object(reranker, '_load_model', return_value=object()):
+            result = reranker.warmup(allow_download=True, download_source='mirror', download_log=callback)
+        download_mock.assert_called_once_with(
+            repo_id=config.reranker_model,
+            local_dir=get_local_reranker_dir(config, paths),
+            hf_home_dir=paths.cache_dir / 'models' / '_hf_home',
+            local_files_only=False,
+            download_source='mirror',
+            download_log=callback,
+            missing_dependency_message='当前还缺少 huggingface-hub 运行时，暂时不能下载重排模型缓存。',
+        )
+        self.assertTrue(result['model_ready'])
+
+    def test_cross_encoder_reranker_warmup_can_skip_prewarm_after_download(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'warmup_download_only'))
+        config = AppConfig(vault_path='.', data_root=str(paths.global_root), reranker_enabled=True)
+        reranker = CrossEncoderReranker(config, paths)
+        with patch('omniclip_rag.reranker.is_local_reranker_ready', side_effect=[False, True]), \
+             patch('omniclip_rag.reranker.download_hf_repo_snapshot'), \
+             patch.object(reranker, '_load_model') as load_mock:
+            result = reranker.warmup(allow_download=True, warmup_after_download=False)
+        load_mock.assert_not_called()
+        self.assertTrue(result['model_ready'])
+
+    def test_release_process_reranker_resources_clears_loaded_models(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'release_process_reranker'))
+        config = AppConfig(vault_path='.', data_root=str(paths.global_root), reranker_enabled=True)
+        reranker = CrossEncoderReranker(config, paths, loader=lambda _local_dir, _device: object())
+        reranker._models['cpu'] = object()
+        release_process_reranker_resources(clear_cuda=False)
+        self.assertEqual(reranker._models, {})
 
     def test_default_loader_uses_direct_local_files_only_flag(self) -> None:
         paths = ensure_data_paths(str(TEST_DATA_ROOT))

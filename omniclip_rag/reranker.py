@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import time
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -10,11 +11,31 @@ from .canary_backend import CANARY_RERANKER_MODEL_ID, is_canary_reranker_model, 
 from .config import AppConfig, DataPaths
 from .errors import RuntimeDependencyError
 from .models import RerankOutcome, SearchHit
-from .vector_index import _configure_huggingface_environment, _normalize_model_dir_name, _runtime_import_environment, _torch_cuda_peak_memory, _torch_cuda_reset_peak_memory, _torch_cuda_synchronize, detect_acceleration, resolve_vector_device
+from .vector_index import (
+    _clear_cuda_cache,
+    _configure_huggingface_environment,
+    _normalize_model_dir_name,
+    _runtime_import_environment,
+    _torch_cuda_peak_memory,
+    _torch_cuda_reset_peak_memory,
+    _torch_cuda_synchronize,
+    build_repo_download_guidance_context,
+    detect_acceleration,
+    download_hf_repo_snapshot,
+    hf_repo_cache_dir,
+    resolve_vector_device,
+)
 
 
 class Reranker(Protocol):
-    def warmup(self, *, allow_download: bool = False) -> dict[str, object]: ...
+    def warmup(
+        self,
+        *,
+        allow_download: bool = False,
+        download_source: str = 'official',
+        download_log: Callable[[str], None] | None = None,
+        warmup_after_download: bool = True,
+    ) -> dict[str, object]: ...
 
     def rerank(self, query_text: str, hits: list[SearchHit], candidate_limit: int) -> tuple[list[SearchHit], RerankOutcome]: ...
 
@@ -24,7 +45,15 @@ class NullReranker:
         self.config = config
         self.paths = paths
 
-    def warmup(self, *, allow_download: bool = False) -> dict[str, object]:
+    def warmup(
+        self,
+        *,
+        allow_download: bool = False,
+        download_source: str = 'official',
+        download_log: Callable[[str], None] | None = None,
+        warmup_after_download: bool = True,
+    ) -> dict[str, object]:
+        del allow_download, download_source, download_log, warmup_after_download
         return {
             'backend': 'disabled',
             'model': self.config.reranker_model,
@@ -37,22 +66,39 @@ class NullReranker:
         return hits, RerankOutcome(enabled=False, applied=False, skipped_reason='disabled')
 
 
+_LIVE_RERANKERS: weakref.WeakSet[CrossEncoderReranker] = weakref.WeakSet()
+
+
 class CrossEncoderReranker:
     def __init__(self, config: AppConfig, paths: DataPaths, *, loader: Callable[[Path, str], object] | None = None) -> None:
         self.config = config
         self.paths = paths
         self._loader = loader or self._default_loader
         self._models: dict[str, object] = {}
+        _LIVE_RERANKERS.add(self)
 
-    def warmup(self, *, allow_download: bool = False) -> dict[str, object]:
+    def warmup(
+        self,
+        *,
+        allow_download: bool = False,
+        download_source: str = 'official',
+        download_log: Callable[[str], None] | None = None,
+        warmup_after_download: bool = True,
+    ) -> dict[str, object]:
         local_dir = get_local_reranker_dir(self.config, self.paths)
         if allow_download and not is_local_reranker_ready(self.config, self.paths):
-            self._download_model(local_dir)
+            self._download_model(local_dir, download_source=download_source, download_log=download_log)
         model_ready = is_local_reranker_ready(self.config, self.paths)
         requested_device = (self.config.vector_device or 'auto').strip().lower() or 'auto'
         resolved_device = resolve_vector_device(requested_device)
-        if model_ready:
+        if model_ready and warmup_after_download:
+            if download_log is not None:
+                download_log(f'开始预热重排模型：{local_dir}')
             self._load_model(resolved_device)
+            if download_log is not None:
+                download_log(f'重排模型预热完成：{local_dir}')
+        elif model_ready and download_log is not None:
+            download_log(f'重排模型目录校验通过：{local_dir}')
         return {
             'backend': 'cross-encoder',
             'model': self.config.reranker_model,
@@ -201,15 +247,33 @@ class CrossEncoderReranker:
         self._models[device] = model
         return model
 
-    def _download_model(self, local_dir: Path) -> None:
-        local_dir.parent.mkdir(parents=True, exist_ok=True)
-        _configure_huggingface_environment(self.paths.cache_dir / 'models' / '_hf_home')
-        from huggingface_hub import snapshot_download
+    def _release_models(self) -> None:
+        for model in list(self._models.values()):
+            try:
+                inner_model = getattr(model, 'model', None)
+                if callable(getattr(inner_model, 'cpu', None)):
+                    inner_model.cpu()
+                elif callable(getattr(model, 'cpu', None)):
+                    model.cpu()
+            except Exception:
+                continue
+        self._models.clear()
 
-        snapshot_download(
+    def _download_model(
+        self,
+        local_dir: Path,
+        *,
+        download_source: str = 'official',
+        download_log: Callable[[str], None] | None = None,
+    ) -> None:
+        download_hf_repo_snapshot(
             repo_id=self.config.reranker_model,
-            local_dir=str(local_dir),
+            local_dir=local_dir,
+            hf_home_dir=self.paths.cache_dir / 'models' / '_hf_home',
             local_files_only=False,
+            download_source=download_source,
+            download_log=download_log,
+            missing_dependency_message='当前还缺少 huggingface-hub 运行时，暂时不能下载重排模型缓存。',
         )
 
     def _default_loader(self, local_dir: Path, device: str):
@@ -231,8 +295,15 @@ class CanaryTorchReranker:
         self.config = config
         self.paths = paths
 
-    def warmup(self, *, allow_download: bool = False) -> dict[str, object]:
-        del allow_download
+    def warmup(
+        self,
+        *,
+        allow_download: bool = False,
+        download_source: str = 'official',
+        download_log: Callable[[str], None] | None = None,
+        warmup_after_download: bool = True,
+    ) -> dict[str, object]:
+        del allow_download, download_source, download_log, warmup_after_download
         requested_device = (self.config.vector_device or 'auto').strip().lower() or 'auto'
         resolved_device = resolve_vector_device(requested_device)
         return {
@@ -341,8 +412,30 @@ def create_reranker(config: AppConfig, paths: DataPaths, *, loader: Callable[[Pa
     return CrossEncoderReranker(config, paths, loader=loader)
 
 
+def release_process_reranker_resources(*, clear_cuda: bool = True) -> None:
+    for reranker in list(_LIVE_RERANKERS):
+        try:
+            reranker._release_models()
+        except Exception:
+            continue
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    if clear_cuda:
+        _clear_cuda_cache()
+
+
 def get_local_reranker_dir(config: AppConfig, paths: DataPaths) -> Path:
     return paths.cache_dir / 'models' / _normalize_model_dir_name(config.reranker_model)
+
+
+def reranker_download_guidance_context(config: AppConfig, paths: DataPaths) -> dict[str, str]:
+    model_root = paths.cache_dir / 'models'
+    model_dir = get_local_reranker_dir(config, paths)
+    hf_home_dir = model_root / '_hf_home'
+    model_root.mkdir(parents=True, exist_ok=True)
+    return build_repo_download_guidance_context(config.reranker_model, model_dir, hf_home_dir)
 
 
 def is_local_reranker_ready(config: AppConfig, paths: DataPaths) -> bool:
@@ -358,6 +451,10 @@ def is_local_reranker_ready(config: AppConfig, paths: DataPaths) -> bool:
         path / 'model.safetensors.index.json',
     )
     return any(candidate.exists() for candidate in weight_files)
+
+
+def get_local_reranker_repo_cache_dir(config: AppConfig, paths: DataPaths) -> Path:
+    return hf_repo_cache_dir(paths.cache_dir / 'models' / '_hf_home', config.reranker_model)
 
 
 def _compact_hit_text(hit: SearchHit, limit: int) -> str:

@@ -24,13 +24,13 @@
 1. 选择了 `EPUB` 格式，并在来源目录中放入有效文件，点击“建库”后所有文件都被跳过
 2. `Tika` 下的“自动安装”没有页内进度提示，用户无法判断是否已经开始、进行到哪一步、还要多久
 
-用户实际测试目录为：
+用户实际测试目录可抽象为：
 
-- `C:\Users\lulu\Downloads\FCY-CS`
+- `%USERPROFILE%\Downloads\sample-tika-corpus`
 
 其中包含：
 
-- `抗炎食物.epub`：有效 EPUB 文件
+- `sample.epub`：有效 EPUB 文件
 - `新建 Microsoft Word 文档.docx`：0 字节空文件
 - `油画材料学-ocr.pdf`：PDF，按架构不应走 Tika
 
@@ -238,7 +238,7 @@ UI 与日志效果：
 
 已用真实 sidecar 对以下文件验证：
 
-- `C:\Users\lulu\Downloads\FCY-CS\抗炎食物.epub`
+- `%USERPROFILE%\Downloads\sample-tika-corpus\sample.epub`
 
 结果：
 

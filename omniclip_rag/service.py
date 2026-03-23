@@ -30,7 +30,7 @@ from .models import QueryInsights, QueryResult, RerankOutcome, SearchHit, SpaceE
 from .parser import BLOCK_REF_RE, BULLET_RE, EMBED_RE, PAGE_REF_RE, PROPERTY_RE
 from .query_runtime import QueryRuntimeAdvisor, select_query_hits
 from .retrieval_policy import QueryProfile, build_query_profile, rank_candidates
-from .reranker import CrossEncoderReranker, create_reranker, is_local_reranker_ready
+from .reranker import CrossEncoderReranker, create_reranker, is_local_reranker_ready, release_process_reranker_resources
 from .preflight import estimate_storage_for_vault
 from .runtime_recovery import record_runtime_incident
 from .storage import MetadataStore, _build_fts_query
@@ -169,6 +169,10 @@ class OmniClipService:
         except Exception:
             pass
         try:
+            release_process_reranker_resources(clear_cuda=True)
+        except Exception:
+            pass
+        try:
             self.extension_query_broker.close()
         except Exception:
             pass
@@ -262,14 +266,34 @@ class OmniClipService:
         if message:
             raise RuntimeDependencyError(message)
 
-    def bootstrap_model(self) -> dict[str, object]:
-        result = prepare_local_model_snapshot(self.config, self.paths, allow_download=True)
+    def bootstrap_model(
+        self,
+        download_source: str = 'official',
+        download_log: Callable[[str], None] | None = None,
+    ) -> dict[str, object]:
+        result = prepare_local_model_snapshot(
+            self.config,
+            self.paths,
+            allow_download=True,
+            download_source=download_source,
+            download_log=download_log,
+        )
         result['cache_bytes'] = _directory_size(self.paths.cache_dir / 'models')
         return result
 
-    def bootstrap_reranker(self) -> dict[str, object]:
+    def bootstrap_reranker(
+        self,
+        download_source: str = 'official',
+        download_log: Callable[[str], None] | None = None,
+        warmup_after_download: bool = False,
+    ) -> dict[str, object]:
         bootstrapper = CrossEncoderReranker(self.config, self.paths)
-        result = bootstrapper.warmup(allow_download=True)
+        result = bootstrapper.warmup(
+            allow_download=True,
+            download_source=download_source,
+            download_log=download_log,
+            warmup_after_download=warmup_after_download,
+        )
         result['cache_bytes'] = _directory_size(self.paths.cache_dir / 'models')
         return result
 
@@ -946,10 +970,18 @@ class OmniClipService:
         }
 
     @staticmethod
-    def _query_expected_steps(*, markdown_requested: bool, query_mode: str, profile: QueryProfile, requested_families: set[str], reranker_enabled: bool) -> tuple[str, ...]:
+    def _query_expected_steps(
+        *,
+        markdown_requested: bool,
+        vector_backend_enabled: bool,
+        query_mode: str,
+        profile: QueryProfile,
+        requested_families: set[str],
+        reranker_enabled: bool,
+    ) -> tuple[str, ...]:
         steps: list[str] = []
         lexical_enabled = markdown_requested and query_mode != 'vector-only'
-        vector_enabled = markdown_requested and profile.use_vector and query_mode != 'lexical-only'
+        vector_enabled = markdown_requested and vector_backend_enabled and profile.use_vector and query_mode != 'lexical-only'
         if lexical_enabled:
             steps.append('Markdown 基础候选召回')
         if vector_enabled:
@@ -973,6 +1005,7 @@ class OmniClipService:
         device_policy: str,
         requested_families: set[str],
         profile: QueryProfile,
+        vector_backend_enabled: bool,
         threshold: float,
         topk: int,
         reranker_enabled: bool,
@@ -993,9 +1026,13 @@ class OmniClipService:
             'planned_device': 'cuda' if device_policy == 'require-cuda' else (str(self.config.vector_device or 'auto').strip().lower() or 'auto'),
             'allowed_families': sorted(requested_families),
             'lexical_enabled': bool('markdown' in requested_families and query_mode != 'vector-only'),
-            'vector_enabled': bool('markdown' in requested_families and profile.use_vector and query_mode != 'lexical-only'),
+            'vector_enabled': bool('markdown' in requested_families and vector_backend_enabled and profile.use_vector and query_mode != 'lexical-only'),
             'vector_mode': self.config.vector_backend,
-            'seed_strategy': 'pure_vector' if query_mode == 'vector-only' else ('hybrid_parallel' if profile.use_vector else 'lexical_only'),
+            'seed_strategy': (
+                'pure_vector'
+                if query_mode == 'vector-only' and vector_backend_enabled
+                else ('hybrid_parallel' if vector_backend_enabled and profile.use_vector else 'lexical_only')
+            ),
             'reranker_enabled': bool(reranker_enabled),
             'threshold': float(threshold),
             'topk': int(topk),
@@ -1137,9 +1174,11 @@ class OmniClipService:
         limit = max(int(limit or self.config.query_limit or 0), 1)
         profile = build_query_profile(query_text, limit)
         candidate_limit = profile.candidate_limit
+        vector_backend_enabled = (self.config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
         reranker_enabled = bool(getattr(self.config, 'reranker_enabled', False)) and normalized_query_mode == 'hybrid'
         expected_steps = self._query_expected_steps(
             markdown_requested='markdown' in requested_families,
+            vector_backend_enabled=vector_backend_enabled,
             query_mode=normalized_query_mode,
             profile=profile,
             requested_families=requested_families,
@@ -1180,7 +1219,9 @@ class OmniClipService:
 
         markdown_requested = 'markdown' in requested_families
         lexical_enabled = markdown_requested and normalized_query_mode != 'vector-only'
-        vector_query_planned = bool(markdown_requested and profile.use_vector and normalized_query_mode != 'lexical-only')
+        if markdown_requested and not vector_backend_enabled and normalized_query_mode != 'lexical-only':
+            runtime_warnings.append('markdown_vector_backend_disabled')
+        vector_query_planned = bool(markdown_requested and vector_backend_enabled and profile.use_vector and normalized_query_mode != 'lexical-only')
         vector_status = self._vector_index_status() if markdown_requested else {}
         trace_vector_table_ready = vector_status.get('table_ready') if vector_status else None
         fts_rows_in_scope = int(self.store.stats().get('chunks', 0) if markdown_requested else 0)
@@ -1333,6 +1374,7 @@ class OmniClipService:
             device_policy=normalized_device_policy,
             requested_families=requested_families,
             profile=profile,
+            vector_backend_enabled=vector_backend_enabled,
             threshold=threshold_floor,
             topk=limit,
             reranker_enabled=reranker_enabled,
@@ -1521,6 +1563,7 @@ class OmniClipService:
         resolved_vault = str(self.config.vault_dir) if self.config.vault_path else ''
         query_recommendation = asdict(self._query_runtime_advisor.current_recommendation(resolve_vector_device(self.config.vector_device), getattr(self.config, 'reranker_enabled', False)))
         runtime_state = inspect_runtime_environment()
+        vector_status = self._vector_index_status()
         index_meta = self._index_trace_metadata()
         return {
             'vault_path': resolved_vault,
@@ -1546,6 +1589,8 @@ class OmniClipService:
             'query_limit_recommendation': query_recommendation,
             'runtime_root': str(runtime_state.get('active_runtime_dir') or ''),
             'runtime_preferred_root': str(runtime_state.get('preferred_runtime_dir') or ''),
+            'vector_table_ready': vector_status.get('table_ready'),
+            'vector_runtime_ready': vector_status.get('runtime_ready'),
         }
 
     def pending_rebuild(self) -> dict[str, object] | None:
@@ -3207,6 +3252,3 @@ def _emit_query_progress(
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-
