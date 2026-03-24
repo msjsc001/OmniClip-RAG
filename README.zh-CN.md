@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-v0.4.3-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.4-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md) | [官网](https://msjsc001.github.io/OmniClip-RAG/)
 
@@ -40,7 +40,7 @@
 > **MCP 快速入口**
 >
 > 如果你想把方寸引接到 Jan.ai、OpenClaw、Claude Desktop、Cursor 或其他支持 MCP 的客户端，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
-> 从 `v0.4.3` 起，MCP 线在继续提供手动 ZIP 的同时，也已经把共享环境根、诚实降级提示、标准 MCPB 发布物和仓库内可复现构建链全部收紧到同一版发布面。
+> 从 `v0.4.4` 起，MCP 线在继续提供手动 ZIP 的同时，也已经把共享环境根、诚实降级提示、标准 MCPB 发布物和仓库内可复现构建链全部收紧到同一版发布面。
 
 ---
 
@@ -178,9 +178,9 @@
 - 桌面版 `OmniClipRAG.exe` 负责正常建库、维护和可视化使用
 - `OmniClipRAG-MCP.exe` 负责安静地在后台给 AI 提供“只读搜索接口”
 
-从 `v0.4.3` 开始，MCP 这条线会同时提供两种分发形态：
-- `OmniClipRAG-MCP-v0.4.3-win64.zip`：给手动配置 `stdio` 的用户
-- `omniclip-rag-mcp-win-x64-v0.4.3.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
+从 `v0.4.4` 开始，MCP 这条线会同时提供两种分发形态：
+- `OmniClipRAG-MCP-v0.4.4-win64.zip`：给手动配置 `stdio` 的用户
+- `omniclip-rag-mcp-win-x64-v0.4.4.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
 
 > [!CAUTION]
 > **使用前要先做什么？**
@@ -199,7 +199,7 @@
 - 如果客户端已经支持从 Registry 发现 MCP Server，请直接搜索或添加：
   - `io.github.msjsc001/omniclip-rag-mcp`
 - 如果客户端支持官方 MCPB 安装流，请优先使用 Release 中的：
-  - `omniclip-rag-mcp-win-x64-v0.4.3.mcpb`
+  - `omniclip-rag-mcp-win-x64-v0.4.4.mcpb`
 - 更详细的官方发布线、MCPB 与 ZIP 的区别、以及不同客户端的接入说明，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
 
 ### 传统手动路线（Jan.ai / OpenClaw）
@@ -221,7 +221,7 @@
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\软件编写\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.3\\OmniClipRAG-MCP.exe",
+      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.4\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -372,6 +372,14 @@ python launcher_mcp.py --mcp-selfcheck
 
 <br/>
 
+### V0.4.4 重点更新
+`v0.4.4` 的重点，是把扩展格式这条线从“勉强能用但体验脆弱”收口成“更值得公开交付”的状态：PDF/Tika 的预检与建库不再像黑箱，打包版 PDF 预检也不再被元数据误伤，扩展建库控制面终于开始说真话。
+- 🧱 **扩展建库控制面明显收紧**：PDF/Tika 任务现在有更完整的构建状态、进度协议、中断感知、保守恢复与 `READY / query_ready / vector_ready` 真相合同，不再是薄薄一层 fire-and-forget 任务。
+- 📄 **PDF 预检终于回到“真正的预检”**：现在保留精确页数，但走轻量页树/元信息读取，而不是为了统计页数悄悄跑一段类似抽正文的小半建库过程。
+- 👀 **慢文件时的可观察性补起来了**：单文件 PDF、慢 Tika 文件、无细粒度分母时，界面现在会明确切到忙碌态并展示当前文件与已用时，不再长时间像卡死。
+- 📦 **打包版 PDF 预检再补了一层稳固性**：即使 frozen EXE 里 `pypdf` 的 metadata 不完整，也不会再把实际可用的 PDF parser 错判成不可用。
+- 🧹 **公开文档继续去本地化痕迹**：这次发布顺手把本地开发绝对路径示例替换成了中性安装路径，避免把开发环境路径带进公开文档。
+
 ### V0.4.3 重点更新
 `v0.4.3` 的重点，是把最近这轮 hotfix 从“能跑”收口成“对用户说真话、对发布链也说真话”的正式版本：语义搜索状态不再伪装、模型下载真正跟随当前环境、MCP 与打包链重新回到仓库内可复现状态。
 - 🧠 **语义检索状态终于诚实了**：如果 `vector_backend` 被关掉，或者当前库还没补建向量表，桌面端和 MCP 都会明确告诉你现在是词法降级态，而不是继续假装已经在跑完整混合检索。
@@ -417,6 +425,7 @@ python launcher_mcp.py --mcp-selfcheck
 - [Markdown 主查询与 Runtime 稳定性 RCA 计划](plans/Markdown主查询与Runtime稳定性RCA计划.md)
 - [GPU Runtime 与扩展建库 UX 收尾计划](plans/GPU Runtime与扩展建库UX收尾计划.md)
 - [扩展格式隔离子系统实施计划](plans/扩展格式隔离子系统实施计划.md)
+- [扩展建库强化总计划](plans/扩展建库强化总计划.md)
 - [Runtime 跨版本稳定化与 Tika 全量格式闭环计划](plans/Runtime跨版本稳定化与Tika全量格式闭环计划.md)
 - [Tika 建库稳定性与安装进度闭环计划](plans/Tika建库稳定性与安装进度闭环计划.md)
 - [检索优化计划](plans/检索优化计划.md) 

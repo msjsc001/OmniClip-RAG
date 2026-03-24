@@ -25,7 +25,7 @@
 ## 当前唯一验收对象
 - 只验收 **构建版 EXE**，不再以源码态窗口作为最终依据
 - 当前主点验路径：
-  - `D:\软件编写\OmniClip RAG\dist\OmniClipRAG-v0.2.4\OmniClipRAG.exe`
+  - `D:\Apps\OmniClip RAG\dist\OmniClipRAG-v0.2.4\OmniClipRAG.exe`
 - 当前固定复现场景：
   - 笔记库：`<user-logseq-vault>`
   - 查询词：`我的思维`

@@ -1,5 +1,6 @@
 import os
 import shutil
+import threading
 import unittest
 from dataclasses import fields
 from pathlib import Path
@@ -13,11 +14,14 @@ from PySide6 import QtCore, QtWidgets
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.extensions.models import (
     ExtensionDirectoryState,
+    ExtensionIndexState,
     ExtensionSourceDirectory,
     TikaFormatSelection,
     TikaFormatSupportTier,
     default_tika_format_selections,
 )
+from omniclip_rag.extensions.build_state import write_extension_build_state
+from omniclip_rag.extensions.paths import build_extension_data_paths
 from omniclip_rag.extensions.registry import ExtensionRegistry, ExtensionRegistryState
 from omniclip_rag.extensions.service import (
     ExtensionTaskCoordinator,
@@ -63,7 +67,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
         self.assertEqual(decision.reason, 'markdown_rebuild_active')
 
     def test_extension_registry_roundtrip_persists_independent_config(self) -> None:
-        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_registry_roundtrip'), str(SAMPLE_ROOT))
         registry = ExtensionRegistry()
         state = ExtensionRegistryState()
         state.pdf_config.enabled = True
@@ -79,11 +83,13 @@ class ExtensionSkeletonTests(unittest.TestCase):
         self.assertEqual(reloaded.pdf_config.source_directories[0].path, str(SAMPLE_ROOT))
         self.assertTrue(reloaded.tika_config.enabled)
         self.assertTrue(reloaded.tika_config.selected_formats[0].enabled)
+        self.assertEqual(reloaded.snapshot.pdf.build_id, '')
+        self.assertFalse(reloaded.snapshot.pdf.resume_available)
 
     def test_config_workspace_exposes_extensions_tabs_and_persists_extension_config(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
-        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_workspace_roundtrip'), str(SAMPLE_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
@@ -114,7 +120,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
     def test_unchecking_extension_directory_requires_confirmation(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
-        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_uncheck_confirm'), str(SAMPLE_ROOT))
         registry = ExtensionRegistry()
         state = registry.load(paths)
         state.pdf_config.enabled = True
@@ -160,7 +166,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
             app.processEvents()
 
     def test_extension_registry_roundtrip_preserves_non_default_tika_formats(self) -> None:
-        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_registry_custom_formats'), str(SAMPLE_ROOT))
         registry = ExtensionRegistry()
         state = ExtensionRegistryState()
         state.tika_config.enabled = True
@@ -184,7 +190,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
         source_root.mkdir(parents=True, exist_ok=True)
         (source_root / 'a.tar.gz').write_text('hello', encoding='utf-8')
 
-        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_tika_suffixes'), str(SAMPLE_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
         service = TikaExtensionService(config=config, paths=paths)
         try:
@@ -207,7 +213,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
         theme = build_theme('light', 100)
         second_vault = TEST_ROOT / 'saved_vault_2'
         second_vault.mkdir(parents=True, exist_ok=True)
-        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_saved_vaults'), str(SAMPLE_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), vault_paths=[str(SAMPLE_ROOT), str(second_vault)], data_root=str(paths.global_root))
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
@@ -223,7 +229,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
     def test_extension_source_progress_uses_index_summary_when_idle(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
-        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_idle_progress'), str(SAMPLE_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
@@ -243,7 +249,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
     def test_extension_source_progress_includes_stage_file_and_close_hint(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
-        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_progress_file_hint'), str(SAMPLE_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
@@ -276,7 +282,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
     def test_extension_source_progress_includes_recent_issue_hint(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
-        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_progress_issue_hint'), str(SAMPLE_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
@@ -309,7 +315,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
     def test_extension_source_rebuild_can_route_to_scan_once_when_index_exists(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
-        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_source_rebuild_mode'), str(SAMPLE_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
@@ -327,7 +333,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
     def test_extension_global_preflight_dispatches_selected_pipeline(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
-        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_global_preflight_dispatch'), str(SAMPLE_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
@@ -336,6 +342,61 @@ class ExtensionSkeletonTests(unittest.TestCase):
                  patch.object(workspace, '_start_extension_task', return_value=True) as start_mock:
                 workspace._run_extension_preflight()
             self.assertEqual(start_mock.call_args.kwargs['task_key'], 'preflight:pdf')
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_resume_state_is_loaded_from_build_state_file(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_resume'), str(SAMPLE_ROOT))
+        registry = ExtensionRegistry()
+        state = registry.load(paths)
+        state.pdf_config.enabled = True
+        state.pdf_config.source_directories = [
+            ExtensionSourceDirectory(path=str(SAMPLE_ROOT), selected=True, state=ExtensionDirectoryState.ENABLED)
+        ]
+        registry.save(paths, state)
+        build_paths = build_extension_data_paths(paths, 'pdf')
+        write_extension_build_state(
+            build_paths,
+            {
+                'build_id': 'pdf-build-1',
+                'pipeline': 'pdf',
+                'status': 'resumable',
+                'resume_available': True,
+                'phase': 'parse_files',
+                'total': 7,
+                'completed_files': {'a.pdf': {'size': 1, 'mtime': 1.0}},
+            },
+        )
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        with patch('omniclip_rag.ui_next_qt.config_workspace.QtCore.QTimer.singleShot', side_effect=lambda *_args, **_kwargs: None):
+            workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            self.assertEqual(workspace._extension_state.snapshot.pdf.index_state, ExtensionIndexState.RESUMABLE)
+            self.assertTrue(workspace._extension_state.snapshot.pdf.resume_available)
+            self.assertEqual(workspace._extension_state.snapshot.pdf.build_id, 'pdf-build-1')
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_stop_action_requests_cancel_for_active_task(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_cancel'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        messages: list[str] = []
+        try:
+            workspace.statusMessageChanged.connect(messages.append)
+            workspace._extension_task_worker = object()
+            workspace._extension_task_key = 'rebuild:pdf'
+            workspace._extension_cancel_event = threading.Event()
+            workspace._handle_extension_stop_action()
+            self.assertTrue(workspace._extension_cancel_event.is_set())
+            self.assertEqual(workspace._extension_state.snapshot.pdf.index_state, ExtensionIndexState.CANCELLING)
+            self.assertTrue(any('停止当前扩展任务' in item or '停止' in item for item in messages))
         finally:
             workspace.deleteLater()
             app.processEvents()

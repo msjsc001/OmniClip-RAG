@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import DataPaths
+from .build_state import utc_now
 from .models import (
     ExtensionDirectoryState,
     ExtensionIndexState,
@@ -68,10 +70,13 @@ class ExtensionRegistry:
         """Persist extension config/state to isolated storage."""
         path = self.file_path(paths)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(self._serialize(state), ensure_ascii=False, indent=2),
+        payload = self._serialize(state)
+        temp_path = path.with_name(f'{path.name}.{int(time.time() * 1000)}.tmp')
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding='utf-8',
         )
+        temp_path.replace(path)
         self._state = state
 
     def summarize(self) -> ExtensionSubsystemSnapshot:
@@ -80,6 +85,8 @@ class ExtensionRegistry:
 
     def _serialize(self, state: ExtensionRegistryState) -> dict[str, object]:
         return {
+            'registry_version': 2,
+            'updated_at': utc_now(),
             'pdf_config': {
                 'enabled': state.pdf_config.enabled,
                 'include_in_query': state.pdf_config.include_in_query,
@@ -155,6 +162,12 @@ class ExtensionRegistry:
         return {
             'index_state': status.index_state.value,
             'build_in_progress': status.build_in_progress,
+            'build_id': status.build_id,
+            'vector_ready': status.vector_ready,
+            'query_ready': status.query_ready,
+            'resume_available': status.resume_available,
+            'last_successful_build_id': status.last_successful_build_id,
+            'last_completed_at': status.last_completed_at,
             'watch_running': status.watch_running,
             'watch_state': self._serialize_watch_state(status.watch_state),
             'last_error': status.last_error,
@@ -165,6 +178,12 @@ class ExtensionRegistry:
         return {
             'index_state': status.index_state.value,
             'build_in_progress': status.build_in_progress,
+            'build_id': status.build_id,
+            'vector_ready': status.vector_ready,
+            'query_ready': status.query_ready,
+            'resume_available': status.resume_available,
+            'last_successful_build_id': status.last_successful_build_id,
+            'last_completed_at': status.last_completed_at,
             'watch_running': status.watch_running,
             'watch_state': self._serialize_watch_state(status.watch_state),
             'last_error': status.last_error,
@@ -247,6 +266,12 @@ class ExtensionRegistry:
         return PdfExtensionStatus(
             index_state=self._enum_value(ExtensionIndexState, payload.get('index_state'), ExtensionIndexState.DISABLED),
             build_in_progress=bool(payload.get('build_in_progress', False)),
+            build_id=str(payload.get('build_id') or ''),
+            vector_ready=bool(payload.get('vector_ready', False)),
+            query_ready=bool(payload.get('query_ready', False)),
+            resume_available=bool(payload.get('resume_available', False)),
+            last_successful_build_id=str(payload.get('last_successful_build_id') or ''),
+            last_completed_at=str(payload.get('last_completed_at') or ''),
             watch_running=bool(payload.get('watch_running', watch_state.running)),
             watch_state=watch_state,
             last_error=str(payload.get('last_error') or ''),
@@ -261,6 +286,12 @@ class ExtensionRegistry:
         return TikaExtensionStatus(
             index_state=self._enum_value(ExtensionIndexState, payload.get('index_state'), ExtensionIndexState.DISABLED),
             build_in_progress=bool(payload.get('build_in_progress', False)),
+            build_id=str(payload.get('build_id') or ''),
+            vector_ready=bool(payload.get('vector_ready', False)),
+            query_ready=bool(payload.get('query_ready', False)),
+            resume_available=bool(payload.get('resume_available', False)),
+            last_successful_build_id=str(payload.get('last_successful_build_id') or ''),
+            last_completed_at=str(payload.get('last_completed_at') or ''),
             watch_running=bool(payload.get('watch_running', watch_state.running)),
             watch_state=watch_state,
             last_error=str(payload.get('last_error') or ''),

@@ -1,17 +1,35 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from importlib import import_module
+from importlib import import_module, metadata as importlib_metadata
 from pathlib import Path
 
 from ..config import AppConfig, DataPaths
+from ..errors import BuildCancelledError
 from ..models import SearchHit
 from ..retrieval_policy import QueryProfile, build_query_profile, rank_candidates
 from ..storage import MetadataStore
 from ..vector_index import NullVectorIndex, create_vector_index, runtime_dependency_issue
+from .build_state import (
+    EXTENSION_BUILD_STATE_VERSION,
+    acquire_extension_build_lease,
+    clear_extension_build_state,
+    file_fingerprint,
+    fingerprint_matches,
+    read_extension_build_state,
+    release_extension_build_lease,
+    touch_extension_build_lease,
+    utc_now,
+    write_extension_build_state,
+    write_extension_diagnostic_report,
+)
 from .models import ExtensionDirectoryState, ExtensionIndexState, TikaFormatSupportTier
 from .paths import build_extension_data_paths
 from .registry import ExtensionRegistry, ExtensionRegistryState
@@ -19,12 +37,29 @@ from .runtimes import TikaParseError, TikaSidecarManager, parse_file_with_tika
 
 LOGGER = logging.getLogger(__name__)
 
+EXTENSION_BUILD_HEARTBEAT_SECONDS = 5.0
+EXTENSION_BUILD_WATCHDOG_STALL_SECONDS = 120.0
+EXTENSION_BUILD_WATCHDOG_REPEAT_SECONDS = 60.0
+EXTENSION_TIKA_PARSE_TIMEOUT_SECONDS = 20.0
+EXTENSION_MAX_PARSED_TEXT_CHARS = 2_000_000
+EXTENSION_MAX_PARSED_CHUNKS = 5000
+EXTENSION_PDF_PARSER_SCHEMA_VERSION = 'pdf-parser-v1'
+EXTENSION_TIKA_PARSER_SCHEMA_VERSION = 'tika-parser-v1'
+EXTENSION_SUPPORTED_PYPDF_RANGE = '>=5.0.0,<6.0.0'
+EXTENSION_SUPPORTED_TIKA_SERVER_VERSION = '3.2.3'
+EXTENSION_SUPPORTED_JAVA_RANGE = '21+'
+
 
 def _extract_pdf_pages(pdf_path: Path) -> list[dict[str, object]]:
     # Why: Qt config pages and Markdown-only flows must stay importable even when
     # optional PDF parser dependencies are not installed in the source runtime.
     parser = import_module('omniclip_rag.extensions.parsers.pdf')
     return parser.extract_pdf_pages(pdf_path)
+
+
+def _inspect_pdf_file(pdf_path: Path) -> dict[str, int]:
+    parser = import_module('omniclip_rag.extensions.parsers.pdf')
+    return parser.inspect_pdf_file(pdf_path)
 
 
 def _parse_pdf_file(source_root: Path, absolute_path: Path):
@@ -104,9 +139,14 @@ class PdfBuildReport:
 
     indexed_files: int
     indexed_chunks: int
+    build_id: str = ''
     skipped_files: int = 0
     deleted_files: int = 0
+    cancelled: bool = False
+    resume_available: bool = False
+    vector_ready: bool = False
     missing_directories: tuple[str, ...] = ()
+    recent_issues: tuple[str, ...] = ()
     rebuilt: bool = False
 
 
@@ -129,10 +169,14 @@ class TikaBuildReport:
     indexed_files: int
     indexed_chunks: int
     enabled_formats: tuple[str, ...]
+    build_id: str = ''
     skipped_files: int = 0
     expected_skips: int = 0
     failed_files: int = 0
     deleted_files: int = 0
+    cancelled: bool = False
+    resume_available: bool = False
+    vector_ready: bool = False
     missing_directories: tuple[str, ...] = ()
     recent_issues: tuple[str, ...] = ()
     rebuilt: bool = False
@@ -156,6 +200,111 @@ class TikaBuildStats:
     expected_skips: int = 0
     failed_files: int = 0
     recent_issues: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ExtensionBuildContext:
+    """One isolated extension build session.
+
+    Why: PDF/Tika need the same control-plane contract as Markdown builds
+    without collapsing their parser/runtime/data-plane differences into one
+    shared orchestration class too early.
+    """
+
+    pipeline: str
+    build_id: str
+    task_kind: ExtensionTaskKind
+    manifest_signature: str
+    parser_schema_version: str
+    source_roots: tuple[str, ...]
+    enabled_formats: tuple[str, ...] = ()
+    on_progress: Callable[[dict[str, object]], None] | None = None
+    pause_event: threading.Event | None = None
+    cancel_event: threading.Event | None = None
+    incremental: bool = False
+    targeted: bool = False
+    resume_requested: bool = False
+    resume_state: dict[str, object] | None = None
+    state_payload: dict[str, object] | None = None
+    start_monotonic: float = field(default_factory=time.monotonic)
+
+
+class ExtensionBuildProgressMonitor:
+    """Heartbeat + watchdog wrapper for one extension build session."""
+
+    def __init__(
+        self,
+        *,
+        pipeline: str,
+        build_id: str,
+        extension_paths: DataPaths,
+        on_progress: Callable[[dict[str, object]], None] | None,
+    ) -> None:
+        self.pipeline = pipeline
+        self.build_id = build_id
+        self.extension_paths = extension_paths
+        self.on_progress = on_progress
+        self.start_monotonic = time.monotonic()
+        self._last_forward_at = self.start_monotonic
+        self._last_report_at = 0.0
+        self._latest_payload: dict[str, object] = {}
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True, name=f'extension-build-watchdog-{self.pipeline}')
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.3)
+
+    def emit(self, payload: dict[str, object], *, material_progress: bool = True) -> None:
+        now = time.monotonic()
+        enriched = dict(payload)
+        enriched['build_id'] = self.build_id
+        enriched['pipeline'] = self.pipeline
+        enriched['elapsed_seconds'] = round(now - self.start_monotonic, 1)
+        touch_extension_build_lease(self.extension_paths, build_id=self.build_id)
+        with self._lock:
+            self._latest_payload = dict(enriched)
+            if material_progress:
+                self._last_forward_at = now
+        _emit_progress(self.on_progress, enriched)
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(EXTENSION_BUILD_HEARTBEAT_SECONDS):
+            with self._lock:
+                payload = dict(self._latest_payload)
+                last_forward_at = self._last_forward_at
+                last_report_at = self._last_report_at
+            if not payload:
+                continue
+            now = time.monotonic()
+            stalled_seconds = max(now - last_forward_at, 0.0)
+            heartbeat = dict(payload)
+            heartbeat['heartbeat_only'] = True
+            heartbeat['elapsed_seconds'] = round(now - self.start_monotonic, 1)
+            heartbeat['watchdog_wait_seconds'] = round(stalled_seconds, 1)
+            if stalled_seconds >= EXTENSION_BUILD_WATCHDOG_STALL_SECONDS and (now - last_report_at) >= EXTENSION_BUILD_WATCHDOG_REPEAT_SECONDS:
+                report_path = write_extension_diagnostic_report(
+                    self.extension_paths,
+                    prefix=f'{self.pipeline}-build-watchdog',
+                    payload={
+                        'pipeline': self.pipeline,
+                        'build_id': self.build_id,
+                        'reported_at': utc_now(),
+                        'stalled_seconds': round(stalled_seconds, 1),
+                        'last_payload': payload,
+                    },
+                )
+                heartbeat['watchdog_stalled'] = True
+                heartbeat['watchdog_report_path'] = str(report_path)
+                with self._lock:
+                    self._last_report_at = now
+            self.emit(heartbeat, material_progress=False)
 
 
 @dataclass(slots=True)
@@ -258,22 +407,82 @@ class PdfExtensionService:
         """Release isolated storage handles."""
         self.store.close()
 
-    def preflight(self, *, source_paths: list[str] | tuple[str, ...] | None = None) -> PdfPreflightReport:
+    def preflight(
+        self,
+        *,
+        source_paths: list[str] | tuple[str, ...] | None = None,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+    ) -> PdfPreflightReport:
         """Estimate the isolated PDF build scope without mutating any index data."""
         self._refresh_state()
+        _ensure_pdf_parser_ready()
         source_dirs, missing_dirs = self._selected_source_directories(source_paths)
+        files = list(self._iter_pdf_files(source_dirs))
         total_files = 0
         total_pages = 0
         total_bytes = 0
         skipped_files = 0
-        for _source_root, pdf_path in self._iter_pdf_files(source_dirs):
+        started_at = time.monotonic()
+        _emit_extension_stage(
+            on_progress,
+            stage='pdf_preflight',
+            stage_status='prepare_runtime',
+            close_safe=True,
+            pipeline='pdf',
+            elapsed_seconds=0.0,
+        )
+        _emit_extension_stage(
+            on_progress,
+            stage='pdf_preflight',
+            stage_status='scan_sources',
+            current=0,
+            total=len(files),
+            processed_files=0,
+            skipped_files=0,
+            close_safe=True,
+            pipeline='pdf',
+            elapsed_seconds=max(time.monotonic() - started_at, 0.0),
+        )
+        processed_files = 0
+        for _source_root, pdf_path in files:
+            current_path = str(pdf_path)
+            _emit_extension_stage(
+                on_progress,
+                stage='pdf_preflight',
+                stage_status='inspect_pdf',
+                current=processed_files,
+                total=len(files),
+                current_path=current_path,
+                processed_files=processed_files,
+                skipped_files=skipped_files,
+                error_count=skipped_files,
+                close_safe=True,
+                pipeline='pdf',
+                elapsed_seconds=max(time.monotonic() - started_at, 0.0),
+            )
             try:
+                inspected = _inspect_pdf_file(pdf_path)
                 total_files += 1
-                total_bytes += int(pdf_path.stat().st_size)
-                total_pages += len(_extract_pdf_pages(pdf_path))
+                total_bytes += int(inspected.get('size') or 0)
+                total_pages += int(inspected.get('page_count') or 0)
             except Exception as exc:
                 skipped_files += 1
                 LOGGER.warning('PDF preflight skipped unreadable file: %s (%s: %s)', pdf_path, type(exc).__name__, exc)
+            processed_files += 1
+        _emit_extension_stage(
+            on_progress,
+            stage='pdf_preflight',
+            stage_status='finalizing',
+            current=processed_files,
+            total=len(files),
+            processed_files=processed_files,
+            skipped_files=skipped_files,
+            error_count=skipped_files,
+            overall_percent=100.0,
+            close_safe=True,
+            pipeline='pdf',
+            elapsed_seconds=max(time.monotonic() - started_at, 0.0),
+        )
         self._persist_state()
         return PdfPreflightReport(
             total_files=total_files,
@@ -290,6 +499,9 @@ class PdfExtensionService:
         markdown_rebuild_active: bool = False,
         markdown_watch_active: bool = False,
         on_progress: Callable[[dict[str, object]], None] | None = None,
+        resume: bool = False,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> PdfBuildReport:
         """Rebuild the isolated PDF index from scratch.
 
@@ -304,6 +516,9 @@ class PdfExtensionService:
             markdown_rebuild_active=markdown_rebuild_active,
             markdown_watch_active=markdown_watch_active,
             on_progress=on_progress,
+            resume=resume,
+            pause_event=pause_event,
+            cancel_event=cancel_event,
         )
 
     def scan_once(
@@ -313,6 +528,8 @@ class PdfExtensionService:
         markdown_rebuild_active: bool = False,
         markdown_watch_active: bool = False,
         on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> PdfBuildReport:
         """Apply one-shot incremental PDF changes without enabling watch mode."""
         return self._run_build(
@@ -322,6 +539,8 @@ class PdfExtensionService:
             markdown_rebuild_active=markdown_rebuild_active,
             markdown_watch_active=markdown_watch_active,
             on_progress=on_progress,
+            pause_event=pause_event,
+            cancel_event=cancel_event,
         )
 
     def delete_index(
@@ -343,24 +562,41 @@ class PdfExtensionService:
             raise RuntimeError(decision.reason)
         self.coordinator.reserve(request)
         try:
+            clear_extension_build_state(self.extension_paths)
+            release_extension_build_lease(self.extension_paths)
             filtered_roots, _missing_dirs = self._selected_source_directories(source_paths)
             if filtered_roots:
                 target_paths = self._indexed_paths_under_roots(filtered_roots)
                 if target_paths:
                     self._delete_paths_from_index(target_paths)
                 stats = self.store.stats()
+                vector_ready, query_ready = _vector_contract(self.store, self.vector_index, self._vector_enabled)
                 self._update_pdf_status(
                     index_state=ExtensionIndexState.READY if int(stats.get('files', 0) or 0) > 0 else (ExtensionIndexState.NOT_BUILT if self._state.pdf_config.enabled else ExtensionIndexState.DISABLED),
                     build_in_progress=False,
+                    build_id='',
+                    vector_ready=vector_ready,
+                    query_ready=query_ready,
+                    resume_available=False,
                     indexed_document_count=int(stats.get('files', 0) or 0),
                     last_error='',
                 )
-                return PdfBuildReport(indexed_files=int(stats.get('files', 0) or 0), indexed_chunks=int(stats.get('chunks', 0) or 0), deleted_files=len(target_paths), rebuilt=False)
+                return PdfBuildReport(
+                    indexed_files=int(stats.get('files', 0) or 0),
+                    indexed_chunks=int(stats.get('chunks', 0) or 0),
+                    deleted_files=len(target_paths),
+                    rebuilt=False,
+                    vector_ready=vector_ready,
+                )
             self.store.reset_all()
             self.vector_index.reset()
             self._update_pdf_status(
                 index_state=ExtensionIndexState.NOT_BUILT if self._state.pdf_config.enabled else ExtensionIndexState.DISABLED,
                 build_in_progress=False,
+                build_id='',
+                vector_ready=False,
+                query_ready=False,
+                resume_available=False,
                 indexed_document_count=0,
                 last_error='',
             )
@@ -374,7 +610,7 @@ class PdfExtensionService:
         self._refresh_state()
         if not self._state.pdf_config.enabled:
             return []
-        if self._state.snapshot.pdf.index_state != ExtensionIndexState.READY:
+        if self._state.snapshot.pdf.index_state != ExtensionIndexState.READY or not bool(self._state.snapshot.pdf.query_ready):
             return []
         limit = max(int(limit or 0), 1)
         query_profile = profile or build_query_profile(query_text, limit)
@@ -417,8 +653,12 @@ class PdfExtensionService:
         markdown_rebuild_active: bool,
         markdown_watch_active: bool,
         on_progress: Callable[[dict[str, object]], None] | None,
+        resume: bool = False,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> PdfBuildReport:
         self._refresh_state()
+        parser_contract = _ensure_pdf_parser_ready()
         request = ExtensionTaskRequest(pipeline='pdf', kind=kind)
         decision = self.coordinator.can_start(
             request,
@@ -432,100 +672,346 @@ class PdfExtensionService:
             self._update_pdf_status(
                 index_state=ExtensionIndexState.STALE,
                 build_in_progress=False,
+                build_id='',
+                resume_available=False,
                 last_error='pdf_sources_missing',
             )
             self._persist_state()
             raise RuntimeError('pdf_sources_missing')
+        files = list(self._iter_pdf_files(source_dirs))
+        manifest_signature = _build_manifest_signature('pdf', source_roots=source_dirs, files=files)
+        requested_resume = bool(resume and not incremental and not bool(source_paths))
+        resume_state = read_extension_build_state(self.extension_paths) if requested_resume else None
+        if resume_state and not _can_resume_extension_build(
+            resume_state,
+            pipeline='pdf',
+            manifest_signature=manifest_signature,
+            parser_schema_version=_parser_schema_version('pdf'),
+            source_roots=tuple(str(item.resolve()) for item in source_dirs),
+            enabled_formats=(),
+        ):
+            clear_extension_build_state(self.extension_paths)
+            resume_state = None
+        build_id = str((resume_state or {}).get('build_id') or _make_build_id('pdf'))
+        build_payload: dict[str, object] = {
+            'state_version': EXTENSION_BUILD_STATE_VERSION,
+            'pipeline': 'pdf',
+            'build_id': build_id,
+            'task_kind': kind.value,
+            'incremental': bool(incremental),
+            'targeted': bool(source_paths),
+            'resume_requested': bool(resume),
+            'resume_available': bool(not incremental and not bool(source_paths)),
+            'manifest_signature': manifest_signature,
+            'parser_schema_version': parser_contract['parser_schema_version'],
+            'source_roots': [str(item.resolve()) for item in source_dirs],
+            'enabled_formats': [],
+            'runtime_contract': parser_contract,
+            'status': 'building',
+            'phase': 'prepare_runtime',
+            'started_at': str((resume_state or {}).get('started_at') or utc_now()),
+            'updated_at': utc_now(),
+            'current_path': '',
+            'processed_files': int((resume_state or {}).get('processed_files') or 0),
+            'skipped_files': int((resume_state or {}).get('skipped_files') or 0),
+            'failed_files': int((resume_state or {}).get('failed_files') or 0),
+            'deleted_files': 0,
+            'current': int((resume_state or {}).get('current') or 0),
+            'total': len(files),
+            'completed_files': dict((resume_state or {}).get('completed_files') or {}),
+        }
+        if not source_dirs:
+            clear_extension_build_state(self.extension_paths)
+            self._update_pdf_status(
+                index_state=ExtensionIndexState.NOT_BUILT if self._state.pdf_config.enabled else ExtensionIndexState.DISABLED,
+                build_in_progress=False,
+                build_id='',
+                vector_ready=False,
+                query_ready=False,
+                resume_available=False,
+                indexed_document_count=0,
+                last_error='',
+            )
+            self._persist_state()
+            return PdfBuildReport(
+                indexed_files=0,
+                indexed_chunks=0,
+                build_id=build_id,
+                missing_directories=tuple(str(item) for item in missing_dirs),
+            )
 
         self.coordinator.reserve(request)
-        self._update_pdf_status(index_state=ExtensionIndexState.BUILDING, build_in_progress=True, last_error='')
+        try:
+            acquire_extension_build_lease(
+                self.extension_paths,
+                pipeline='pdf',
+                build_id=build_id,
+                workspace_id=self.paths.workspace_id,
+                data_root=str(self.paths.global_root),
+                owner_pid=os.getpid(),
+            )
+        except Exception:
+            self.coordinator.release(request)
+            raise
+        monitor = ExtensionBuildProgressMonitor(
+            pipeline='pdf',
+            build_id=build_id,
+            extension_paths=self.extension_paths,
+            on_progress=on_progress,
+        )
+        build_context = ExtensionBuildContext(
+            pipeline='pdf',
+            build_id=build_id,
+            task_kind=kind,
+            manifest_signature=manifest_signature,
+            parser_schema_version=parser_contract['parser_schema_version'],
+            source_roots=tuple(str(item.resolve()) for item in source_dirs),
+            on_progress=lambda payload: monitor.emit(payload, material_progress=not bool(payload.get('heartbeat_only'))),
+            pause_event=pause_event,
+            cancel_event=cancel_event,
+            incremental=incremental,
+            targeted=bool(source_paths),
+            resume_requested=requested_resume,
+            resume_state=resume_state,
+            state_payload=build_payload,
+        )
+        self._update_pdf_status(
+            index_state=ExtensionIndexState.BUILDING,
+            build_in_progress=True,
+            build_id=build_id,
+            vector_ready=False,
+            query_ready=False,
+            resume_available=False,
+            last_error='',
+        )
+        write_extension_build_state(self.extension_paths, build_payload)
+        monitor.start()
         deleted_files = 0
         skipped_files = 0
+        recent_issues: list[str] = []
         try:
-            if not source_dirs:
-                self._update_pdf_status(
-                    index_state=ExtensionIndexState.NOT_BUILT if self._state.pdf_config.enabled else ExtensionIndexState.DISABLED,
-                    build_in_progress=False,
-                    indexed_document_count=0,
-                    last_error='',
-                )
-                return PdfBuildReport(indexed_files=0, indexed_chunks=0, missing_directories=tuple(str(item) for item in missing_dirs))
-
             if incremental:
-                deleted_files, skipped_files = self._scan_once(source_dirs, on_progress=on_progress)
+                deleted_files, skipped_files, recent_issues = self._scan_once(source_dirs, files, build_context=build_context)
             else:
-                skipped_files = self._full_rebuild(source_dirs, on_progress=on_progress, targeted=bool(source_paths))
+                skipped_files, recent_issues = self._full_rebuild(source_dirs, files, build_context=build_context)
             stats = self.store.stats()
+            vector_ready, query_ready = _vector_contract(self.store, self.vector_index, self._vector_enabled)
+            clear_extension_build_state(self.extension_paths)
             self._update_pdf_status(
                 index_state=ExtensionIndexState.READY,
                 build_in_progress=False,
+                build_id='',
+                vector_ready=vector_ready,
+                query_ready=query_ready,
+                resume_available=False,
+                last_successful_build_id=build_id,
+                last_completed_at=utc_now(),
                 indexed_document_count=int(stats.get('files', 0) or 0),
                 last_error='',
             )
             return PdfBuildReport(
                 indexed_files=int(stats.get('files', 0) or 0),
                 indexed_chunks=int(stats.get('chunks', 0) or 0),
+                build_id=build_id,
                 skipped_files=skipped_files,
                 deleted_files=deleted_files,
+                vector_ready=vector_ready,
                 missing_directories=tuple(str(item) for item in missing_dirs),
+                recent_issues=tuple(recent_issues),
                 rebuilt=not incremental,
             )
+        except BuildCancelledError:
+            resumable = bool(not incremental and not bool(source_paths))
+            _mark_build_interrupted(
+                self.extension_paths,
+                build_payload,
+                resumable=resumable,
+                last_error='extension_build_cancelled',
+                phase=str(build_payload.get('phase') or 'parse_files'),
+            )
+            stats = self.store.stats()
+            self._update_pdf_status(
+                index_state=ExtensionIndexState.RESUMABLE if resumable else ExtensionIndexState.INTERRUPTED,
+                build_in_progress=False,
+                build_id=build_id,
+                vector_ready=False,
+                query_ready=False,
+                resume_available=resumable,
+                indexed_document_count=int(stats.get('files', 0) or 0),
+                last_error='extension_build_cancelled',
+            )
+            return PdfBuildReport(
+                indexed_files=int(stats.get('files', 0) or 0),
+                indexed_chunks=int(stats.get('chunks', 0) or 0),
+                build_id=build_id,
+                skipped_files=int(build_payload.get('skipped_files') or 0),
+                deleted_files=int(build_payload.get('deleted_files') or 0),
+                cancelled=True,
+                resume_available=resumable,
+                vector_ready=False,
+                missing_directories=tuple(str(item) for item in missing_dirs),
+                recent_issues=tuple(recent_issues),
+                rebuilt=not incremental,
+            )
+        except Exception as exc:
+            resumable = bool(not incremental and not bool(source_paths))
+            _mark_build_interrupted(
+                self.extension_paths,
+                build_payload,
+                resumable=resumable,
+                last_error=f'{type(exc).__name__}: {exc}',
+                phase=str(build_payload.get('phase') or 'parse_files'),
+            )
+            stats = self.store.stats()
+            self._update_pdf_status(
+                index_state=ExtensionIndexState.RESUMABLE if resumable else ExtensionIndexState.ERROR,
+                build_in_progress=False,
+                build_id=build_id,
+                vector_ready=False,
+                query_ready=False,
+                resume_available=resumable,
+                indexed_document_count=int(stats.get('files', 0) or 0),
+                last_error=f'{type(exc).__name__}: {exc}',
+            )
+            raise
         finally:
+            monitor.stop()
+            release_extension_build_lease(self.extension_paths, build_id=build_id)
             self.coordinator.release(request)
             self._persist_state()
 
     def _full_rebuild(
         self,
         source_dirs: list[Path],
+        files: list[tuple[Path, Path]],
         *,
-        on_progress: Callable[[dict[str, object]], None] | None,
-        targeted: bool = False,
-    ) -> int:
+        build_context: ExtensionBuildContext,
+    ) -> tuple[int, list[str]]:
         existing_paths: list[str] = []
-        if targeted:
+        if build_context.targeted:
             existing_paths = self._indexed_paths_under_roots(source_dirs)
             if existing_paths:
                 self._delete_paths_from_index(existing_paths)
-        else:
+        elif not build_context.resume_state:
             self.store.reset_all()
             self.vector_index.reset()
         skipped_files = 0
-        files = list(self._iter_pdf_files(source_dirs))
+        recent_issues: list[str] = []
         total = len(files)
         indexed_paths: list[str] = []
+        completed_files = _resume_completed_files(build_context.resume_state)
+        _update_build_state_payload(
+            self.extension_paths,
+            payload=build_context.state_payload or build_context.resume_state or {
+                'state_version': EXTENSION_BUILD_STATE_VERSION,
+                'pipeline': build_context.pipeline,
+                'build_id': build_context.build_id,
+                'manifest_signature': build_context.manifest_signature,
+                'parser_schema_version': build_context.parser_schema_version,
+                'source_roots': list(build_context.source_roots),
+                'enabled_formats': [],
+                'completed_files': completed_files,
+            },
+            phase='scan_sources',
+            status='building',
+            total=total,
+            deleted_files=len(existing_paths) if build_context.targeted else 0,
+        )
         _emit_extension_stage(
-            on_progress,
+            build_context.on_progress,
             stage='pdf_build',
             stage_status='scan_sources',
             current=0,
             total=total,
-            processed_files=0,
+            processed_files=len(completed_files),
             skipped_files=0,
-            deleted_files=len(existing_paths) if targeted else 0,
+            deleted_files=len(existing_paths) if build_context.targeted else 0,
             overall_percent=0.0,
             close_safe=False,
+            build_id=build_context.build_id,
+            pipeline=build_context.pipeline,
         )
         for current, (source_root, pdf_path) in enumerate(files, start=1):
+            _wait_for_extension_controls(build_context.pause_event, build_context.cancel_event)
+            path_key = str(pdf_path.resolve())
             _emit_extension_stage(
-                on_progress,
+                build_context.on_progress,
                 stage='pdf_build',
                 stage_status='parse_pdf',
                 current=current,
                 total=total,
-                current_path=str(pdf_path),
+                current_path=path_key,
                 processed_files=max(current - 1, 0),
                 skipped_files=skipped_files,
                 error_count=skipped_files,
-                deleted_files=len(existing_paths) if targeted else 0,
+                deleted_files=len(existing_paths) if build_context.targeted else 0,
                 overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
                 close_safe=False,
+                build_id=build_context.build_id,
+                pipeline=build_context.pipeline,
+                eta_seconds=_estimate_eta_seconds(started_at=build_context.start_monotonic, current=current, total=total),
             )
-            if not self._replace_one_pdf(source_root, pdf_path):
-                skipped_files += 1
+            _update_build_state_payload(
+                self.extension_paths,
+                payload=build_context.state_payload or build_context.resume_state or {
+                    'state_version': EXTENSION_BUILD_STATE_VERSION,
+                    'pipeline': build_context.pipeline,
+                    'build_id': build_context.build_id,
+                    'manifest_signature': build_context.manifest_signature,
+                    'parser_schema_version': build_context.parser_schema_version,
+                    'source_roots': list(build_context.source_roots),
+                    'enabled_formats': [],
+                    'completed_files': completed_files,
+                },
+                phase='parse_files',
+                status='building',
+                current_path=path_key,
+                processed_files=max(current - 1, 0),
+                skipped_files=skipped_files,
+                failed_files=skipped_files,
+                deleted_files=len(existing_paths) if build_context.targeted else 0,
+                current=current,
+                total=total,
+                completed_files=completed_files,
+            )
+            stored_fingerprint = completed_files.get(path_key)
+            if stored_fingerprint and fingerprint_matches(pdf_path, stored_fingerprint):
+                indexed_paths.append(path_key)
                 continue
-            indexed_paths.append(str(pdf_path.resolve()))
+            indexed, reason = self._replace_one_pdf(source_root, pdf_path)
+            if not indexed:
+                skipped_files += 1
+                if reason:
+                    _remember_recent_issue(recent_issues, reason)
+                continue
+            completed_files[path_key] = file_fingerprint(pdf_path)
+            indexed_paths.append(path_key)
+            _update_build_state_payload(
+                self.extension_paths,
+                payload=build_context.state_payload or build_context.resume_state or {
+                    'state_version': EXTENSION_BUILD_STATE_VERSION,
+                    'pipeline': build_context.pipeline,
+                    'build_id': build_context.build_id,
+                    'manifest_signature': build_context.manifest_signature,
+                    'parser_schema_version': build_context.parser_schema_version,
+                    'source_roots': list(build_context.source_roots),
+                    'enabled_formats': [],
+                    'completed_files': completed_files,
+                },
+                phase='parse_files',
+                status='building',
+                current_path=path_key,
+                processed_files=current,
+                skipped_files=skipped_files,
+                failed_files=skipped_files,
+                deleted_files=len(existing_paths) if build_context.targeted else 0,
+                current=current,
+                total=total,
+                completed_files=completed_files,
+            )
+        _wait_for_extension_controls(build_context.pause_event, build_context.cancel_event)
         _emit_extension_stage(
-            on_progress,
+            build_context.on_progress,
             stage='pdf_build',
             stage_status='write_vector',
             current=len(indexed_paths),
@@ -533,17 +1019,41 @@ class PdfExtensionService:
             processed_files=len(indexed_paths),
             skipped_files=skipped_files,
             error_count=skipped_files,
-            deleted_files=len(existing_paths) if targeted else 0,
+            deleted_files=len(existing_paths) if build_context.targeted else 0,
             overall_percent=92.0 if total else 100.0,
             close_safe=False,
+            build_id=build_context.build_id,
+            pipeline=build_context.pipeline,
         )
-        if targeted:
+        _update_build_state_payload(
+            self.extension_paths,
+            payload=build_context.state_payload or build_context.resume_state or {
+                'state_version': EXTENSION_BUILD_STATE_VERSION,
+                'pipeline': build_context.pipeline,
+                'build_id': build_context.build_id,
+                'manifest_signature': build_context.manifest_signature,
+                'parser_schema_version': build_context.parser_schema_version,
+                'source_roots': list(build_context.source_roots),
+                'enabled_formats': [],
+                'completed_files': completed_files,
+            },
+            phase='write_vector',
+            status='building',
+            processed_files=len(indexed_paths),
+            skipped_files=skipped_files,
+            failed_files=skipped_files,
+            deleted_files=len(existing_paths) if build_context.targeted else 0,
+            current=len(indexed_paths),
+            total=total,
+            completed_files=completed_files,
+        )
+        if build_context.targeted:
             if indexed_paths:
                 self._upsert_vectors_for_paths(indexed_paths)
         else:
-            self._rebuild_vectors()
+            self._rebuild_vectors(build_context=build_context)
         _emit_extension_stage(
-            on_progress,
+            build_context.on_progress,
             stage='pdf_build',
             stage_status='finalizing',
             current=len(indexed_paths),
@@ -551,22 +1061,47 @@ class PdfExtensionService:
             processed_files=len(indexed_paths),
             skipped_files=skipped_files,
             error_count=skipped_files,
-            deleted_files=len(existing_paths) if targeted else 0,
+            deleted_files=len(existing_paths) if build_context.targeted else 0,
             overall_percent=100.0,
-            close_safe=False,
+            close_safe=True,
+            build_id=build_context.build_id,
+            pipeline=build_context.pipeline,
         )
-        return skipped_files
+        _update_build_state_payload(
+            self.extension_paths,
+            payload=build_context.state_payload or build_context.resume_state or {
+                'state_version': EXTENSION_BUILD_STATE_VERSION,
+                'pipeline': build_context.pipeline,
+                'build_id': build_context.build_id,
+                'manifest_signature': build_context.manifest_signature,
+                'parser_schema_version': build_context.parser_schema_version,
+                'source_roots': list(build_context.source_roots),
+                'enabled_formats': [],
+                'completed_files': completed_files,
+            },
+            phase='finalizing',
+            status='building',
+            processed_files=len(indexed_paths),
+            skipped_files=skipped_files,
+            failed_files=skipped_files,
+            deleted_files=len(existing_paths) if build_context.targeted else 0,
+            current=len(indexed_paths),
+            total=total,
+            completed_files=completed_files,
+        )
+        return skipped_files, recent_issues
 
     def _scan_once(
         self,
         source_dirs: list[Path],
+        files: list[tuple[Path, Path]],
         *,
-        on_progress: Callable[[dict[str, object]], None] | None,
-    ) -> tuple[int, int]:
+        build_context: ExtensionBuildContext,
+    ) -> tuple[int, int, list[str]]:
         previous_manifest = self.store.fetch_file_manifest()
         current_manifest: dict[str, tuple[float, int]] = {}
         source_by_path: dict[str, tuple[Path, Path]] = {}
-        for source_root, pdf_path in self._iter_pdf_files(source_dirs):
+        for source_root, pdf_path in files:
             try:
                 stat = pdf_path.stat()
             except OSError:
@@ -587,9 +1122,10 @@ class PdfExtensionService:
         if deleted_paths:
             self._delete_paths_from_index(deleted_paths)
         skipped_files = 0
+        recent_issues: list[str] = []
         total = len(changed_paths)
         _emit_extension_stage(
-            on_progress,
+            build_context.on_progress,
             stage='pdf_scan_once',
             stage_status='scan_sources',
             current=0,
@@ -599,11 +1135,14 @@ class PdfExtensionService:
             deleted_files=len(deleted_paths),
             overall_percent=0.0,
             close_safe=False,
+            build_id=build_context.build_id,
+            pipeline=build_context.pipeline,
         )
         for current, path in enumerate(changed_paths, start=1):
+            _wait_for_extension_controls(build_context.pause_event, build_context.cancel_event)
             source_root, pdf_path = source_by_path[path]
             _emit_extension_stage(
-                on_progress,
+                build_context.on_progress,
                 stage='pdf_scan_once',
                 stage_status='parse_pdf',
                 current=current,
@@ -615,13 +1154,20 @@ class PdfExtensionService:
                 deleted_files=len(deleted_paths),
                 overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
                 close_safe=False,
+                build_id=build_context.build_id,
+                pipeline=build_context.pipeline,
+                eta_seconds=_estimate_eta_seconds(started_at=build_context.start_monotonic, current=current, total=total),
             )
             self._delete_paths_from_index([path])
-            if not self._replace_one_pdf(source_root, pdf_path):
+            indexed, reason = self._replace_one_pdf(source_root, pdf_path)
+            if not indexed:
                 skipped_files += 1
+                if reason:
+                    _remember_recent_issue(recent_issues, reason)
         if changed_paths:
+            _wait_for_extension_controls(build_context.pause_event, build_context.cancel_event)
             _emit_extension_stage(
-                on_progress,
+                build_context.on_progress,
                 stage='pdf_scan_once',
                 stage_status='write_vector',
                 current=len(changed_paths) - skipped_files,
@@ -632,10 +1178,12 @@ class PdfExtensionService:
                 deleted_files=len(deleted_paths),
                 overall_percent=92.0 if total else 100.0,
                 close_safe=False,
+                build_id=build_context.build_id,
+                pipeline=build_context.pipeline,
             )
             self._upsert_vectors_for_paths(changed_paths)
         _emit_extension_stage(
-            on_progress,
+            build_context.on_progress,
             stage='pdf_scan_once',
             stage_status='finalizing',
             current=len(changed_paths) - skipped_files,
@@ -645,16 +1193,22 @@ class PdfExtensionService:
             error_count=skipped_files,
             deleted_files=len(deleted_paths),
             overall_percent=100.0,
-            close_safe=False,
+            close_safe=True,
+            build_id=build_context.build_id,
+            pipeline=build_context.pipeline,
         )
-        return len(deleted_paths), skipped_files
+        return len(deleted_paths), skipped_files, recent_issues
 
-    def _replace_one_pdf(self, source_root: Path, pdf_path: Path) -> bool:
+    def _replace_one_pdf(self, source_root: Path, pdf_path: Path) -> tuple[bool, str]:
         try:
             parsed = _parse_pdf_file(source_root, pdf_path)
         except Exception as exc:
             LOGGER.warning('PDF extension skipped broken file: %s (%s: %s)', pdf_path, type(exc).__name__, exc)
-            return False
+            return False, f'{Path(pdf_path).name} · {type(exc).__name__}'
+        limit_reason = _parsed_file_limit_reason(parsed)
+        if limit_reason:
+            LOGGER.warning('PDF extension skipped oversize file: %s (%s)', pdf_path, limit_reason)
+            return False, f'{Path(pdf_path).name} · {limit_reason}'
         self.store.replace_file(parsed)
         rendered_payloads = [
             (chunk.chunk_id, chunk.raw_text)
@@ -663,13 +1217,40 @@ class PdfExtensionService:
         ]
         if rendered_payloads:
             self.store.update_rendered_chunks(rendered_payloads)
-        return True
+        return True, ''
 
-    def _rebuild_vectors(self) -> None:
+    def _rebuild_vectors(self, *, build_context: ExtensionBuildContext) -> None:
         if not self._vector_enabled:
             return
         total = self.store.count_vector_documents()
-        self.vector_index.rebuild(self.store.iter_vector_documents(), total=total)
+
+        def handle_vector_progress(payload: dict[str, object]) -> None:
+            current = int(payload.get('current') or payload.get('written_count') or 0)
+            processed = int(payload.get('written_count') or current)
+            _emit_extension_stage(
+                build_context.on_progress,
+                stage='pdf_build',
+                stage_status='write_vector',
+                current=current,
+                total=int(payload.get('total') or total),
+                processed_files=processed,
+                skipped_files=0,
+                error_count=0,
+                overall_percent=92.0 if total else 100.0,
+                close_safe=False,
+                build_id=build_context.build_id,
+                pipeline=build_context.pipeline,
+                eta_seconds=int(payload.get('eta_seconds') or 0),
+            )
+
+        self.vector_index.rebuild(
+            self.store.iter_vector_documents(),
+            total=total,
+            on_progress=handle_vector_progress,
+            pause_event=build_context.pause_event,
+            cancel_event=build_context.cancel_event,
+            reset_index=True,
+        )
 
     def _upsert_vectors_for_paths(self, source_paths: list[str]) -> None:
         if not self._vector_enabled:
@@ -744,6 +1325,12 @@ class PdfExtensionService:
         *,
         index_state: ExtensionIndexState | None = None,
         build_in_progress: bool | None = None,
+        build_id: str | None = None,
+        vector_ready: bool | None = None,
+        query_ready: bool | None = None,
+        resume_available: bool | None = None,
+        last_successful_build_id: str | None = None,
+        last_completed_at: str | None = None,
         indexed_document_count: int | None = None,
         last_error: str | None = None,
     ) -> None:
@@ -752,6 +1339,18 @@ class PdfExtensionService:
             status.index_state = index_state
         if build_in_progress is not None:
             status.build_in_progress = build_in_progress
+        if build_id is not None:
+            status.build_id = str(build_id or '')
+        if vector_ready is not None:
+            status.vector_ready = bool(vector_ready)
+        if query_ready is not None:
+            status.query_ready = bool(query_ready)
+        if resume_available is not None:
+            status.resume_available = bool(resume_available)
+        if last_successful_build_id is not None:
+            status.last_successful_build_id = str(last_successful_build_id or '')
+        if last_completed_at is not None:
+            status.last_completed_at = str(last_completed_at or '')
         if indexed_document_count is not None:
             status.indexed_document_count = max(int(indexed_document_count), 0)
         if last_error is not None:
@@ -813,15 +1412,59 @@ class TikaExtensionService:
     def close(self) -> None:
         self.store.close()
 
-    def preflight(self, *, source_paths: list[str] | tuple[str, ...] | None = None) -> TikaPreflightReport:
+    def preflight(
+        self,
+        *,
+        source_paths: list[str] | tuple[str, ...] | None = None,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+    ) -> TikaPreflightReport:
         self._refresh_state()
+        _ensure_tika_parser_ready()
         source_dirs, missing_dirs = self._selected_tika_source_directories(source_paths)
         enabled_formats = self._enabled_tika_formats()
+        files = list(self._iter_tika_files(source_dirs, enabled_formats))
         total_files = 0
         total_bytes = 0
         skipped_files = 0
         recent_issues: list[str] = []
-        for _source_root, file_path, _format_id in self._iter_tika_files(source_dirs, enabled_formats):
+        started_at = time.monotonic()
+        _emit_extension_stage(
+            on_progress,
+            stage='tika_preflight',
+            stage_status='prepare_runtime',
+            close_safe=True,
+            pipeline='tika',
+            elapsed_seconds=0.0,
+        )
+        _emit_extension_stage(
+            on_progress,
+            stage='tika_preflight',
+            stage_status='scan_sources',
+            current=0,
+            total=len(files),
+            processed_files=0,
+            skipped_files=0,
+            close_safe=True,
+            pipeline='tika',
+            elapsed_seconds=max(time.monotonic() - started_at, 0.0),
+        )
+        processed_files = 0
+        for _source_root, file_path, format_id in files:
+            _emit_extension_stage(
+                on_progress,
+                stage='tika_preflight',
+                stage_status='inspect_tika',
+                current=processed_files,
+                total=len(files),
+                current_path=str(file_path),
+                format_id=format_id,
+                processed_files=processed_files,
+                skipped_files=skipped_files,
+                error_count=skipped_files,
+                close_safe=True,
+                pipeline='tika',
+                elapsed_seconds=max(time.monotonic() - started_at, 0.0),
+            )
             try:
                 total_files += 1
                 total_bytes += int(file_path.stat().st_size)
@@ -829,6 +1472,21 @@ class TikaExtensionService:
                 skipped_files += 1
                 _remember_recent_issue(recent_issues, f'{Path(file_path).name} · unreadable_file')
                 LOGGER.warning('Tika preflight skipped unreadable file: %s (%s: %s)', file_path, type(exc).__name__, exc)
+            processed_files += 1
+        _emit_extension_stage(
+            on_progress,
+            stage='tika_preflight',
+            stage_status='finalizing',
+            current=processed_files,
+            total=len(files),
+            processed_files=processed_files,
+            skipped_files=skipped_files,
+            error_count=skipped_files,
+            overall_percent=100.0,
+            close_safe=True,
+            pipeline='tika',
+            elapsed_seconds=max(time.monotonic() - started_at, 0.0),
+        )
         self._persist_state()
         return TikaPreflightReport(
             total_files=total_files,
@@ -846,6 +1504,9 @@ class TikaExtensionService:
         markdown_rebuild_active: bool = False,
         markdown_watch_active: bool = False,
         on_progress: Callable[[dict[str, object]], None] | None = None,
+        resume: bool = False,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> TikaBuildReport:
         return self._run_build(
             kind=ExtensionTaskKind.FULL_REBUILD,
@@ -854,6 +1515,9 @@ class TikaExtensionService:
             markdown_rebuild_active=markdown_rebuild_active,
             markdown_watch_active=markdown_watch_active,
             on_progress=on_progress,
+            resume=resume,
+            pause_event=pause_event,
+            cancel_event=cancel_event,
         )
 
     def scan_once(
@@ -863,6 +1527,8 @@ class TikaExtensionService:
         markdown_rebuild_active: bool = False,
         markdown_watch_active: bool = False,
         on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> TikaBuildReport:
         return self._run_build(
             kind=ExtensionTaskKind.SCAN_ONCE,
@@ -871,6 +1537,8 @@ class TikaExtensionService:
             markdown_rebuild_active=markdown_rebuild_active,
             markdown_watch_active=markdown_watch_active,
             on_progress=on_progress,
+            pause_event=pause_event,
+            cancel_event=cancel_event,
         )
 
     def delete_index(
@@ -891,15 +1559,22 @@ class TikaExtensionService:
             raise RuntimeError(decision.reason)
         self.coordinator.reserve(request)
         try:
+            clear_extension_build_state(self.extension_paths)
+            release_extension_build_lease(self.extension_paths)
             filtered_roots, _missing_dirs = self._selected_tika_source_directories(source_paths)
             if filtered_roots:
                 target_paths = self._indexed_paths_under_roots(filtered_roots)
                 if target_paths:
                     self._delete_paths_from_index(target_paths)
                 stats = self.store.stats()
+                vector_ready, query_ready = _vector_contract(self.store, self.vector_index, self._vector_enabled)
                 self._update_tika_status(
                     index_state=ExtensionIndexState.READY if int(stats.get('files', 0) or 0) > 0 else (ExtensionIndexState.NOT_BUILT if self._state.tika_config.enabled else ExtensionIndexState.DISABLED),
                     build_in_progress=False,
+                    build_id='',
+                    vector_ready=vector_ready,
+                    query_ready=query_ready,
+                    resume_available=False,
                     indexed_document_count=int(stats.get('files', 0) or 0),
                     last_error='',
                 )
@@ -908,6 +1583,7 @@ class TikaExtensionService:
                     indexed_chunks=int(stats.get('chunks', 0) or 0),
                     enabled_formats=tuple(self._enabled_tika_formats()),
                     deleted_files=len(target_paths),
+                    vector_ready=vector_ready,
                     rebuilt=False,
                 )
             self.store.reset_all()
@@ -915,6 +1591,10 @@ class TikaExtensionService:
             self._update_tika_status(
                 index_state=ExtensionIndexState.NOT_BUILT if self._state.tika_config.enabled else ExtensionIndexState.DISABLED,
                 build_in_progress=False,
+                build_id='',
+                vector_ready=False,
+                query_ready=False,
+                resume_available=False,
                 indexed_document_count=0,
                 last_error='',
             )
@@ -927,7 +1607,7 @@ class TikaExtensionService:
         self._refresh_state()
         if not self._state.tika_config.enabled:
             return []
-        if self._state.snapshot.tika.index_state != ExtensionIndexState.READY:
+        if self._state.snapshot.tika.index_state != ExtensionIndexState.READY or not bool(self._state.snapshot.tika.query_ready):
             return []
         limit = max(int(limit or 0), 1)
         query_profile = profile or build_query_profile(query_text, limit)
@@ -970,8 +1650,12 @@ class TikaExtensionService:
         markdown_rebuild_active: bool,
         markdown_watch_active: bool,
         on_progress: Callable[[dict[str, object]], None] | None,
+        resume: bool = False,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> TikaBuildReport:
         self._refresh_state()
+        parser_contract = _ensure_tika_parser_ready()
         request = ExtensionTaskRequest(pipeline='tika', kind=kind)
         decision = self.coordinator.can_start(
             request,
@@ -986,6 +1670,10 @@ class TikaExtensionService:
             self._update_tika_status(
                 index_state=ExtensionIndexState.NOT_BUILT if self._state.tika_config.enabled else ExtensionIndexState.DISABLED,
                 build_in_progress=False,
+                build_id='',
+                resume_available=False,
+                vector_ready=False,
+                query_ready=False,
                 indexed_document_count=0,
                 last_error='tika_no_formats_enabled',
             )
@@ -995,45 +1683,156 @@ class TikaExtensionService:
             self._update_tika_status(
                 index_state=ExtensionIndexState.STALE,
                 build_in_progress=False,
+                build_id='',
+                resume_available=False,
                 last_error='tika_sources_missing',
             )
             self._persist_state()
             raise RuntimeError('tika_sources_missing')
+        files = list(self._iter_tika_files(source_dirs, enabled_formats))
+        manifest_signature = _build_manifest_signature('tika', source_roots=source_dirs, enabled_formats=enabled_formats, files=files)
+        requested_resume = bool(resume and not incremental and not bool(source_paths))
+        resume_state = read_extension_build_state(self.extension_paths) if requested_resume else None
+        if resume_state and not _can_resume_extension_build(
+            resume_state,
+            pipeline='tika',
+            manifest_signature=manifest_signature,
+            parser_schema_version=_parser_schema_version('tika'),
+            source_roots=tuple(str(item.resolve()) for item in source_dirs),
+            enabled_formats=tuple(enabled_formats),
+        ):
+            clear_extension_build_state(self.extension_paths)
+            resume_state = None
+        build_id = str((resume_state or {}).get('build_id') or _make_build_id('tika'))
+        build_payload: dict[str, object] = {
+            'state_version': EXTENSION_BUILD_STATE_VERSION,
+            'pipeline': 'tika',
+            'build_id': build_id,
+            'task_kind': kind.value,
+            'incremental': bool(incremental),
+            'targeted': bool(source_paths),
+            'resume_requested': bool(resume),
+            'resume_available': bool(not incremental and not bool(source_paths)),
+            'manifest_signature': manifest_signature,
+            'parser_schema_version': parser_contract['parser_schema_version'],
+            'source_roots': [str(item.resolve()) for item in source_dirs],
+            'enabled_formats': list(enabled_formats),
+            'runtime_contract': parser_contract,
+            'status': 'building',
+            'phase': 'prepare_runtime',
+            'started_at': str((resume_state or {}).get('started_at') or utc_now()),
+            'updated_at': utc_now(),
+            'current_path': '',
+            'processed_files': int((resume_state or {}).get('processed_files') or 0),
+            'skipped_files': int((resume_state or {}).get('skipped_files') or 0),
+            'failed_files': int((resume_state or {}).get('failed_files') or 0),
+            'deleted_files': 0,
+            'current': int((resume_state or {}).get('current') or 0),
+            'total': len(files),
+            'completed_files': dict((resume_state or {}).get('completed_files') or {}),
+        }
+        if not source_dirs:
+            clear_extension_build_state(self.extension_paths)
+            self._update_tika_status(
+                index_state=ExtensionIndexState.NOT_BUILT if self._state.tika_config.enabled else ExtensionIndexState.DISABLED,
+                build_in_progress=False,
+                build_id='',
+                vector_ready=False,
+                query_ready=False,
+                resume_available=False,
+                indexed_document_count=0,
+                last_error='',
+            )
+            self._persist_state()
+            return TikaBuildReport(
+                indexed_files=0,
+                indexed_chunks=0,
+                enabled_formats=tuple(enabled_formats),
+                build_id=build_id,
+                missing_directories=tuple(str(item) for item in missing_dirs),
+            )
 
         self.coordinator.reserve(request)
-        self._update_tika_status(index_state=ExtensionIndexState.BUILDING, build_in_progress=True, last_error='')
-        deleted_files = 0
-        skipped_files = 0
         try:
+            acquire_extension_build_lease(
+                self.extension_paths,
+                pipeline='tika',
+                build_id=build_id,
+                workspace_id=self.paths.workspace_id,
+                data_root=str(self.paths.global_root),
+                owner_pid=os.getpid(),
+            )
+        except Exception:
+            self.coordinator.release(request)
+            raise
+        monitor = ExtensionBuildProgressMonitor(
+            pipeline='tika',
+            build_id=build_id,
+            extension_paths=self.extension_paths,
+            on_progress=on_progress,
+        )
+        build_context = ExtensionBuildContext(
+            pipeline='tika',
+            build_id=build_id,
+            task_kind=kind,
+            manifest_signature=manifest_signature,
+            parser_schema_version=parser_contract['parser_schema_version'],
+            source_roots=tuple(str(item.resolve()) for item in source_dirs),
+            enabled_formats=tuple(enabled_formats),
+            on_progress=lambda payload: monitor.emit(payload, material_progress=not bool(payload.get('heartbeat_only'))),
+            pause_event=pause_event,
+            cancel_event=cancel_event,
+            incremental=incremental,
+            targeted=bool(source_paths),
+            resume_requested=requested_resume,
+            resume_state=resume_state,
+            state_payload=build_payload,
+        )
+        self._update_tika_status(
+            index_state=ExtensionIndexState.BUILDING,
+            build_in_progress=True,
+            build_id=build_id,
+            vector_ready=False,
+            query_ready=False,
+            resume_available=False,
+            last_error='',
+        )
+        write_extension_build_state(self.extension_paths, build_payload)
+        monitor.start()
+        deleted_files = 0
+        try:
+            _emit_extension_stage(
+                build_context.on_progress,
+                stage='tika_build',
+                stage_status='prepare_runtime',
+                current=0,
+                total=len(files),
+                overall_percent=0.0,
+                close_safe=False,
+                build_id=build_id,
+                pipeline='tika',
+            )
             runtime = self.runtime_manager.ensure_started(self.paths)
             self._state.snapshot.tika.runtime = runtime
             if not runtime.installed or not runtime.running or not runtime.healthy:
-                self._update_tika_status(index_state=ExtensionIndexState.ERROR, build_in_progress=False, last_error='tika_runtime_unavailable')
+                self._update_tika_status(index_state=ExtensionIndexState.ERROR, build_in_progress=False, build_id=build_id, last_error='tika_runtime_unavailable')
                 raise RuntimeError('tika_runtime_unavailable')
-
-            if not source_dirs:
-                self._update_tika_status(
-                    index_state=ExtensionIndexState.NOT_BUILT if self._state.tika_config.enabled else ExtensionIndexState.DISABLED,
-                    build_in_progress=False,
-                    indexed_document_count=0,
-                    last_error='',
-                )
-                return TikaBuildReport(
-                    indexed_files=0,
-                    indexed_chunks=0,
-                    enabled_formats=tuple(enabled_formats),
-                    missing_directories=tuple(str(item) for item in missing_dirs),
-                )
-
             if incremental:
-                deleted_files, build_stats = self._scan_once(source_dirs, enabled_formats, on_progress=on_progress)
+                deleted_files, build_stats = self._scan_once(source_dirs, enabled_formats, files=files, build_context=build_context)
             else:
-                build_stats = self._full_rebuild(source_dirs, enabled_formats, on_progress=on_progress, targeted=bool(source_paths))
+                build_stats = self._full_rebuild(source_dirs, enabled_formats, files=files, build_context=build_context)
             stats = self.store.stats()
-            skipped_files = build_stats.skipped_files
+            vector_ready, query_ready = _vector_contract(self.store, self.vector_index, self._vector_enabled)
+            clear_extension_build_state(self.extension_paths)
             self._update_tika_status(
                 index_state=ExtensionIndexState.READY,
                 build_in_progress=False,
+                build_id='',
+                vector_ready=vector_ready,
+                query_ready=query_ready,
+                resume_available=False,
+                last_successful_build_id=build_id,
+                last_completed_at=utc_now(),
                 indexed_document_count=int(stats.get('files', 0) or 0),
                 last_error='',
             )
@@ -1041,15 +1840,76 @@ class TikaExtensionService:
                 indexed_files=int(stats.get('files', 0) or 0),
                 indexed_chunks=int(stats.get('chunks', 0) or 0),
                 enabled_formats=tuple(enabled_formats),
-                skipped_files=skipped_files,
+                build_id=build_id,
+                skipped_files=build_stats.skipped_files,
                 expected_skips=build_stats.expected_skips,
                 failed_files=build_stats.failed_files,
                 deleted_files=deleted_files,
+                resume_available=False,
+                vector_ready=vector_ready,
                 missing_directories=tuple(str(item) for item in missing_dirs),
                 recent_issues=tuple(build_stats.recent_issues),
                 rebuilt=not incremental,
             )
+        except BuildCancelledError:
+            resumable = bool(not incremental and not bool(source_paths))
+            _mark_build_interrupted(
+                self.extension_paths,
+                build_payload,
+                resumable=resumable,
+                last_error='extension_build_cancelled',
+                phase=str(build_payload.get('phase') or 'parse_files'),
+            )
+            stats = self.store.stats()
+            self._update_tika_status(
+                index_state=ExtensionIndexState.RESUMABLE if resumable else ExtensionIndexState.INTERRUPTED,
+                build_in_progress=False,
+                build_id=build_id,
+                vector_ready=False,
+                query_ready=False,
+                resume_available=resumable,
+                indexed_document_count=int(stats.get('files', 0) or 0),
+                last_error='extension_build_cancelled',
+            )
+            return TikaBuildReport(
+                indexed_files=int(stats.get('files', 0) or 0),
+                indexed_chunks=int(stats.get('chunks', 0) or 0),
+                enabled_formats=tuple(enabled_formats),
+                build_id=build_id,
+                skipped_files=int(build_payload.get('skipped_files') or 0),
+                failed_files=int(build_payload.get('failed_files') or 0),
+                deleted_files=int(build_payload.get('deleted_files') or 0),
+                cancelled=True,
+                resume_available=resumable,
+                vector_ready=False,
+                missing_directories=tuple(str(item) for item in missing_dirs),
+                recent_issues=tuple(str(item) for item in (build_payload.get('recent_issues') or ()) if str(item).strip()),
+                rebuilt=not incremental,
+            )
+        except Exception as exc:
+            resumable = bool(not incremental and not bool(source_paths))
+            _mark_build_interrupted(
+                self.extension_paths,
+                build_payload,
+                resumable=resumable,
+                last_error=f'{type(exc).__name__}: {exc}',
+                phase=str(build_payload.get('phase') or 'parse_files'),
+            )
+            stats = self.store.stats()
+            self._update_tika_status(
+                index_state=ExtensionIndexState.RESUMABLE if resumable else ExtensionIndexState.ERROR,
+                build_in_progress=False,
+                build_id=build_id,
+                vector_ready=False,
+                query_ready=False,
+                resume_available=resumable,
+                indexed_document_count=int(stats.get('files', 0) or 0),
+                last_error=f'{type(exc).__name__}: {exc}',
+            )
+            raise
         finally:
+            monitor.stop()
+            release_extension_build_lease(self.extension_paths, build_id=build_id)
             self.coordinator.release(request)
             self._persist_state()
 
@@ -1058,74 +1918,175 @@ class TikaExtensionService:
         source_dirs: list[Path],
         enabled_formats: list[str],
         *,
-        on_progress: Callable[[dict[str, object]], None] | None,
-        targeted: bool = False,
+        files: list[tuple[Path, Path, str]],
+        build_context: ExtensionBuildContext,
     ) -> TikaBuildStats:
         existing_paths: list[str] = []
-        if targeted:
+        if build_context.targeted:
             existing_paths = self._indexed_paths_under_roots(source_dirs)
             if existing_paths:
                 self._delete_paths_from_index(existing_paths)
-        else:
+        elif not build_context.resume_state:
             self.store.reset_all()
             self.vector_index.reset()
         build_stats = TikaBuildStats()
-        files = list(self._iter_tika_files(source_dirs, enabled_formats))
         total = len(files)
         indexed_paths: list[str] = []
+        completed_files = _resume_completed_files(build_context.resume_state)
+        _update_build_state_payload(
+            self.extension_paths,
+            payload=build_context.state_payload or build_context.resume_state or {
+                'state_version': EXTENSION_BUILD_STATE_VERSION,
+                'pipeline': build_context.pipeline,
+                'build_id': build_context.build_id,
+                'manifest_signature': build_context.manifest_signature,
+                'parser_schema_version': build_context.parser_schema_version,
+                'source_roots': list(build_context.source_roots),
+                'enabled_formats': list(build_context.enabled_formats),
+                'completed_files': completed_files,
+            },
+            phase='scan_sources',
+            status='building',
+            total=total,
+            deleted_files=len(existing_paths) if build_context.targeted else 0,
+        )
         _emit_extension_stage(
-            on_progress,
+            build_context.on_progress,
             stage='tika_build',
             stage_status='scan_sources',
             current=0,
             total=total,
-            processed_files=0,
+            processed_files=len(completed_files),
             skipped_files=0,
             error_count=0,
-            deleted_files=len(existing_paths) if targeted else 0,
+            deleted_files=len(existing_paths) if build_context.targeted else 0,
             overall_percent=0.0,
             close_safe=False,
+            build_id=build_context.build_id,
+            pipeline=build_context.pipeline,
         )
         for current, (source_root, file_path, format_id) in enumerate(files, start=1):
+            _wait_for_extension_controls(build_context.pause_event, build_context.cancel_event)
+            path_key = str(file_path.resolve())
             _emit_extension_stage(
-                on_progress,
+                build_context.on_progress,
                 stage='tika_build',
                 stage_status='parse_tika',
                 current=current,
                 total=total,
-                current_path=str(file_path),
+                current_path=path_key,
                 format_id=format_id,
                 processed_files=max(current - 1, 0),
                 skipped_files=build_stats.skipped_files,
                 error_count=build_stats.failed_files,
-                deleted_files=len(existing_paths) if targeted else 0,
+                deleted_files=len(existing_paths) if build_context.targeted else 0,
                 overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
                 close_safe=False,
                 recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
+                build_id=build_context.build_id,
+                pipeline=build_context.pipeline,
+                eta_seconds=_estimate_eta_seconds(started_at=build_context.start_monotonic, current=current, total=total),
             )
+            _update_build_state_payload(
+                self.extension_paths,
+                payload=build_context.state_payload or build_context.resume_state or {
+                    'state_version': EXTENSION_BUILD_STATE_VERSION,
+                    'pipeline': build_context.pipeline,
+                    'build_id': build_context.build_id,
+                    'manifest_signature': build_context.manifest_signature,
+                    'parser_schema_version': build_context.parser_schema_version,
+                    'source_roots': list(build_context.source_roots),
+                    'enabled_formats': list(build_context.enabled_formats),
+                    'completed_files': completed_files,
+                },
+                phase='parse_files',
+                status='building',
+                current_path=path_key,
+                processed_files=max(current - 1, 0),
+                skipped_files=build_stats.skipped_files,
+                failed_files=build_stats.failed_files,
+                deleted_files=len(existing_paths) if build_context.targeted else 0,
+                current=current,
+                total=total,
+                completed_files=completed_files,
+            )
+            stored_fingerprint = completed_files.get(path_key)
+            if stored_fingerprint and fingerprint_matches(file_path, stored_fingerprint):
+                indexed_paths.append(path_key)
+                continue
             outcome = self._replace_one_tika_file(source_root, file_path, format_id)
             if outcome.status != 'indexed':
                 self._apply_tika_outcome(build_stats, outcome)
                 _emit_extension_stage(
-                    on_progress,
+                    build_context.on_progress,
                     stage='tika_build',
                     stage_status='parse_tika',
                     current=current,
                     total=total,
-                    current_path=str(file_path),
+                    current_path=path_key,
                     format_id=format_id,
                     processed_files=current,
                     skipped_files=build_stats.skipped_files,
                     error_count=build_stats.failed_files,
-                    deleted_files=len(existing_paths) if targeted else 0,
+                    deleted_files=len(existing_paths) if build_context.targeted else 0,
                     overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
                     close_safe=False,
                     recent_issue=outcome.reason,
+                    build_id=build_context.build_id,
+                    pipeline=build_context.pipeline,
+                )
+                _update_build_state_payload(
+                    self.extension_paths,
+                    payload=build_context.state_payload or build_context.resume_state or {
+                        'state_version': EXTENSION_BUILD_STATE_VERSION,
+                        'pipeline': build_context.pipeline,
+                        'build_id': build_context.build_id,
+                        'manifest_signature': build_context.manifest_signature,
+                        'parser_schema_version': build_context.parser_schema_version,
+                        'source_roots': list(build_context.source_roots),
+                        'enabled_formats': list(build_context.enabled_formats),
+                        'completed_files': completed_files,
+                    },
+                    phase='parse_files',
+                    status='building',
+                    current_path=path_key,
+                    processed_files=current,
+                    skipped_files=build_stats.skipped_files,
+                    failed_files=build_stats.failed_files,
+                    deleted_files=len(existing_paths) if build_context.targeted else 0,
+                    current=current,
+                    total=total,
+                    completed_files=completed_files,
                 )
                 continue
-            indexed_paths.append(str(file_path.resolve()))
+            completed_files[path_key] = file_fingerprint(file_path)
+            indexed_paths.append(path_key)
+            _update_build_state_payload(
+                self.extension_paths,
+                payload=build_context.state_payload or build_context.resume_state or {
+                    'state_version': EXTENSION_BUILD_STATE_VERSION,
+                    'pipeline': build_context.pipeline,
+                    'build_id': build_context.build_id,
+                    'manifest_signature': build_context.manifest_signature,
+                    'parser_schema_version': build_context.parser_schema_version,
+                    'source_roots': list(build_context.source_roots),
+                    'enabled_formats': list(build_context.enabled_formats),
+                    'completed_files': completed_files,
+                },
+                phase='parse_files',
+                status='building',
+                current_path=path_key,
+                processed_files=current,
+                skipped_files=build_stats.skipped_files,
+                failed_files=build_stats.failed_files,
+                deleted_files=len(existing_paths) if build_context.targeted else 0,
+                current=current,
+                total=total,
+                completed_files=completed_files,
+            )
+        _wait_for_extension_controls(build_context.pause_event, build_context.cancel_event)
         _emit_extension_stage(
-            on_progress,
+            build_context.on_progress,
             stage='tika_build',
             stage_status='write_vector',
             current=len(indexed_paths),
@@ -1133,18 +2094,42 @@ class TikaExtensionService:
             processed_files=len(indexed_paths),
             skipped_files=build_stats.skipped_files,
             error_count=build_stats.failed_files,
-            deleted_files=len(existing_paths) if targeted else 0,
+            deleted_files=len(existing_paths) if build_context.targeted else 0,
             overall_percent=92.0 if total else 100.0,
             close_safe=False,
             recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
+            build_id=build_context.build_id,
+            pipeline=build_context.pipeline,
         )
-        if targeted:
+        _update_build_state_payload(
+            self.extension_paths,
+            payload=build_context.state_payload or build_context.resume_state or {
+                'state_version': EXTENSION_BUILD_STATE_VERSION,
+                'pipeline': build_context.pipeline,
+                'build_id': build_context.build_id,
+                'manifest_signature': build_context.manifest_signature,
+                'parser_schema_version': build_context.parser_schema_version,
+                'source_roots': list(build_context.source_roots),
+                'enabled_formats': list(build_context.enabled_formats),
+                'completed_files': completed_files,
+            },
+            phase='write_vector',
+            status='building',
+            processed_files=len(indexed_paths),
+            skipped_files=build_stats.skipped_files,
+            failed_files=build_stats.failed_files,
+            deleted_files=len(existing_paths) if build_context.targeted else 0,
+            current=len(indexed_paths),
+            total=total,
+            completed_files=completed_files,
+        )
+        if build_context.targeted:
             if indexed_paths:
                 self._upsert_vectors_for_paths(indexed_paths)
         else:
-            self._rebuild_vectors()
+            self._rebuild_vectors(build_context=build_context)
         _emit_extension_stage(
-            on_progress,
+            build_context.on_progress,
             stage='tika_build',
             stage_status='finalizing',
             current=len(indexed_paths),
@@ -1152,10 +2137,12 @@ class TikaExtensionService:
             processed_files=len(indexed_paths),
             skipped_files=build_stats.skipped_files,
             error_count=build_stats.failed_files,
-            deleted_files=len(existing_paths) if targeted else 0,
+            deleted_files=len(existing_paths) if build_context.targeted else 0,
             overall_percent=100.0,
-            close_safe=False,
+            close_safe=True,
             recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
+            build_id=build_context.build_id,
+            pipeline=build_context.pipeline,
         )
         return build_stats
 
@@ -1164,12 +2151,13 @@ class TikaExtensionService:
         source_dirs: list[Path],
         enabled_formats: list[str],
         *,
-        on_progress: Callable[[dict[str, object]], None] | None,
+        files: list[tuple[Path, Path, str]],
+        build_context: ExtensionBuildContext,
     ) -> tuple[int, TikaBuildStats]:
         previous_manifest = self.store.fetch_file_manifest()
         current_manifest: dict[str, tuple[float, int]] = {}
         source_by_path: dict[str, tuple[Path, Path, str]] = {}
-        for source_root, file_path, format_id in self._iter_tika_files(source_dirs, enabled_formats):
+        for source_root, file_path, format_id in files:
             try:
                 stat = file_path.stat()
             except OSError:
@@ -1186,7 +2174,7 @@ class TikaExtensionService:
         build_stats = TikaBuildStats()
         total = len(changed_paths)
         _emit_extension_stage(
-            on_progress,
+            build_context.on_progress,
             stage='tika_scan_once',
             stage_status='scan_sources',
             current=0,
@@ -1197,11 +2185,14 @@ class TikaExtensionService:
             deleted_files=len(deleted_paths),
             overall_percent=0.0,
             close_safe=False,
+            build_id=build_context.build_id,
+            pipeline=build_context.pipeline,
         )
         for current, path in enumerate(changed_paths, start=1):
+            _wait_for_extension_controls(build_context.pause_event, build_context.cancel_event)
             source_root, file_path, format_id = source_by_path[path]
             _emit_extension_stage(
-                on_progress,
+                build_context.on_progress,
                 stage='tika_scan_once',
                 stage_status='parse_tika',
                 current=current,
@@ -1215,13 +2206,16 @@ class TikaExtensionService:
                 overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
                 close_safe=False,
                 recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
+                build_id=build_context.build_id,
+                pipeline=build_context.pipeline,
+                eta_seconds=_estimate_eta_seconds(started_at=build_context.start_monotonic, current=current, total=total),
             )
             self._delete_paths_from_index([path])
             outcome = self._replace_one_tika_file(source_root, file_path, format_id)
             if outcome.status != 'indexed':
                 self._apply_tika_outcome(build_stats, outcome)
                 _emit_extension_stage(
-                    on_progress,
+                    build_context.on_progress,
                     stage='tika_scan_once',
                     stage_status='parse_tika',
                     current=current,
@@ -1235,10 +2229,13 @@ class TikaExtensionService:
                     overall_percent=round((current / total) * 86.0, 2) if total else 0.0,
                     close_safe=False,
                     recent_issue=outcome.reason,
+                    build_id=build_context.build_id,
+                    pipeline=build_context.pipeline,
                 )
         if changed_paths:
+            _wait_for_extension_controls(build_context.pause_event, build_context.cancel_event)
             _emit_extension_stage(
-                on_progress,
+                build_context.on_progress,
                 stage='tika_scan_once',
                 stage_status='write_vector',
                 current=len(changed_paths) - build_stats.skipped_files,
@@ -1250,10 +2247,12 @@ class TikaExtensionService:
                 overall_percent=92.0 if total else 100.0,
                 close_safe=False,
                 recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
+                build_id=build_context.build_id,
+                pipeline=build_context.pipeline,
             )
             self._upsert_vectors_for_paths(changed_paths)
         _emit_extension_stage(
-            on_progress,
+            build_context.on_progress,
             stage='tika_scan_once',
             stage_status='finalizing',
             current=len(changed_paths) - build_stats.skipped_files,
@@ -1263,8 +2262,10 @@ class TikaExtensionService:
             error_count=build_stats.failed_files,
             deleted_files=len(deleted_paths),
             overall_percent=100.0,
-            close_safe=False,
+            close_safe=True,
             recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
+            build_id=build_context.build_id,
+            pipeline=build_context.pipeline,
         )
         return len(deleted_paths), build_stats
 
@@ -1280,14 +2281,28 @@ class TikaExtensionService:
             return TikaFileOutcome(status='expected_skip', reason=f'空文件 · {resolved.name}', path=str(resolved))
         try:
             runtime = self._state.snapshot.tika.runtime
-            parsed_content = parse_file_with_tika(resolved, port=runtime.port or 9998)
+            parsed_content = parse_file_with_tika(
+                resolved,
+                port=runtime.port or 9998,
+                timeout=EXTENSION_TIKA_PARSE_TIMEOUT_SECONDS,
+            )
             parsed = _parse_tika_file(source_root, resolved, parsed_content, format_id=format_id)
         except Exception as exc:
+            if isinstance(exc, TikaParseError) and 'timeout' in str(exc).lower():
+                try:
+                    self.runtime_manager.stop()
+                    self._state.snapshot.tika.runtime = self.runtime_manager.ensure_started(self.paths)
+                except Exception:
+                    pass
             LOGGER.warning('Tika extension failed for file: %s (%s: %s)', resolved, type(exc).__name__, exc)
             return TikaFileOutcome(status='failed', reason=_format_tika_failure_reason(resolved, exc), path=str(resolved))
         if not parsed.chunks:
             LOGGER.info('Tika extension skipped file without extracted text: %s', resolved)
             return TikaFileOutcome(status='expected_skip', reason=f'未提取到正文 · {resolved.name}', path=str(resolved))
+        limit_reason = _parsed_file_limit_reason(parsed)
+        if limit_reason:
+            LOGGER.warning('Tika extension skipped oversize file: %s (%s)', resolved, limit_reason)
+            return TikaFileOutcome(status='expected_skip', reason=f'{resolved.name} · {limit_reason}', path=str(resolved))
         self.store.replace_file(parsed)
         rendered_payloads = [(chunk.chunk_id, chunk.raw_text) for chunk in parsed.chunks if chunk.raw_text.strip()]
         if rendered_payloads:
@@ -1305,11 +2320,38 @@ class TikaExtensionService:
         if outcome.reason:
             _remember_recent_issue(build_stats.recent_issues, outcome.reason)
 
-    def _rebuild_vectors(self) -> None:
+    def _rebuild_vectors(self, *, build_context: ExtensionBuildContext) -> None:
         if not self._vector_enabled:
             return
         total = self.store.count_vector_documents()
-        self.vector_index.rebuild(self.store.iter_vector_documents(), total=total)
+
+        def handle_vector_progress(payload: dict[str, object]) -> None:
+            current = int(payload.get('current') or payload.get('written_count') or 0)
+            processed = int(payload.get('written_count') or current)
+            _emit_extension_stage(
+                build_context.on_progress,
+                stage='tika_build',
+                stage_status='write_vector',
+                current=current,
+                total=int(payload.get('total') or total),
+                processed_files=processed,
+                skipped_files=0,
+                error_count=0,
+                overall_percent=92.0 if total else 100.0,
+                close_safe=False,
+                build_id=build_context.build_id,
+                pipeline=build_context.pipeline,
+                eta_seconds=int(payload.get('eta_seconds') or 0),
+            )
+
+        self.vector_index.rebuild(
+            self.store.iter_vector_documents(),
+            total=total,
+            on_progress=handle_vector_progress,
+            pause_event=build_context.pause_event,
+            cancel_event=build_context.cancel_event,
+            reset_index=True,
+        )
 
     def _upsert_vectors_for_paths(self, source_paths: list[str]) -> None:
         if not self._vector_enabled:
@@ -1406,6 +2448,12 @@ class TikaExtensionService:
         *,
         index_state: ExtensionIndexState | None = None,
         build_in_progress: bool | None = None,
+        build_id: str | None = None,
+        vector_ready: bool | None = None,
+        query_ready: bool | None = None,
+        resume_available: bool | None = None,
+        last_successful_build_id: str | None = None,
+        last_completed_at: str | None = None,
         indexed_document_count: int | None = None,
         last_error: str | None = None,
     ) -> None:
@@ -1414,6 +2462,18 @@ class TikaExtensionService:
             status.index_state = index_state
         if build_in_progress is not None:
             status.build_in_progress = build_in_progress
+        if build_id is not None:
+            status.build_id = str(build_id or '')
+        if vector_ready is not None:
+            status.vector_ready = bool(vector_ready)
+        if query_ready is not None:
+            status.query_ready = bool(query_ready)
+        if resume_available is not None:
+            status.resume_available = bool(resume_available)
+        if last_successful_build_id is not None:
+            status.last_successful_build_id = str(last_successful_build_id or '')
+        if last_completed_at is not None:
+            status.last_completed_at = str(last_completed_at or '')
         if indexed_document_count is not None:
             status.indexed_document_count = max(int(indexed_document_count), 0)
         if last_error is not None:
@@ -1471,10 +2531,15 @@ class ExtensionService:
         self.coordinator = coordinator or ExtensionTaskCoordinator()
         self.runtime_manager = runtime_manager
 
-    def run_pdf_preflight(self, *, source_paths: list[str] | tuple[str, ...] | None = None) -> PdfPreflightReport:
+    def run_pdf_preflight(
+        self,
+        *,
+        source_paths: list[str] | tuple[str, ...] | None = None,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+    ) -> PdfPreflightReport:
         service = self._pdf_service()
         try:
-            return service.preflight(source_paths=source_paths)
+            return service.preflight(source_paths=source_paths, on_progress=on_progress)
         finally:
             service.close()
 
@@ -1483,10 +2548,17 @@ class ExtensionService:
         *,
         source_paths: list[str] | tuple[str, ...] | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> PdfBuildReport:
         service = self._pdf_service()
         try:
-            return service.scan_once(source_paths=source_paths, on_progress=on_progress)
+            return service.scan_once(
+                source_paths=source_paths,
+                on_progress=on_progress,
+                pause_event=pause_event,
+                cancel_event=cancel_event,
+            )
         finally:
             service.close()
 
@@ -1495,10 +2567,19 @@ class ExtensionService:
         *,
         source_paths: list[str] | tuple[str, ...] | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
+        resume: bool = False,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> PdfBuildReport:
         service = self._pdf_service()
         try:
-            return service.full_rebuild(source_paths=source_paths, on_progress=on_progress)
+            return service.full_rebuild(
+                source_paths=source_paths,
+                on_progress=on_progress,
+                resume=resume,
+                pause_event=pause_event,
+                cancel_event=cancel_event,
+            )
         finally:
             service.close()
 
@@ -1516,10 +2597,15 @@ class ExtensionService:
         finally:
             service.close()
 
-    def run_tika_preflight(self, *, source_paths: list[str] | tuple[str, ...] | None = None) -> TikaPreflightReport:
+    def run_tika_preflight(
+        self,
+        *,
+        source_paths: list[str] | tuple[str, ...] | None = None,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+    ) -> TikaPreflightReport:
         service = self._tika_service()
         try:
-            return service.preflight(source_paths=source_paths)
+            return service.preflight(source_paths=source_paths, on_progress=on_progress)
         finally:
             service.close()
 
@@ -1528,10 +2614,17 @@ class ExtensionService:
         *,
         source_paths: list[str] | tuple[str, ...] | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> TikaBuildReport:
         service = self._tika_service()
         try:
-            return service.scan_once(source_paths=source_paths, on_progress=on_progress)
+            return service.scan_once(
+                source_paths=source_paths,
+                on_progress=on_progress,
+                pause_event=pause_event,
+                cancel_event=cancel_event,
+            )
         finally:
             service.close()
 
@@ -1540,10 +2633,19 @@ class ExtensionService:
         *,
         source_paths: list[str] | tuple[str, ...] | None = None,
         on_progress: Callable[[dict[str, object]], None] | None = None,
+        resume: bool = False,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> TikaBuildReport:
         service = self._tika_service()
         try:
-            return service.full_rebuild(source_paths=source_paths, on_progress=on_progress)
+            return service.full_rebuild(
+                source_paths=source_paths,
+                on_progress=on_progress,
+                resume=resume,
+                pause_event=pause_event,
+                cancel_event=cancel_event,
+            )
         finally:
             service.close()
 
@@ -1645,6 +2747,234 @@ def _build_source_index_summary(
     )
 
 
+def _supported_extension_runtime_contract() -> dict[str, str]:
+    return {
+        'pypdf': EXTENSION_SUPPORTED_PYPDF_RANGE,
+        'tika_server': EXTENSION_SUPPORTED_TIKA_SERVER_VERSION,
+        'java': EXTENSION_SUPPORTED_JAVA_RANGE,
+    }
+
+
+def _parser_schema_version(pipeline: str) -> str:
+    return EXTENSION_PDF_PARSER_SCHEMA_VERSION if str(pipeline).strip().lower() == 'pdf' else EXTENSION_TIKA_PARSER_SCHEMA_VERSION
+
+
+def _make_build_id(pipeline: str) -> str:
+    return f'{pipeline}-{uuid.uuid4().hex[:12]}'
+
+
+def _estimate_eta_seconds(*, started_at: float, current: int, total: int) -> int:
+    if total <= 0 or current <= 0:
+        return 0
+    elapsed = max(time.monotonic() - started_at, 0.0)
+    rate = elapsed / max(current, 1)
+    remaining = max(total - current, 0)
+    return max(int(round(rate * remaining)), 0)
+
+
+def _build_manifest_signature(
+    pipeline: str,
+    *,
+    source_roots: list[Path],
+    enabled_formats: list[str] | tuple[str, ...] = (),
+    files: list[tuple[Path, Path]] | list[tuple[Path, Path, str]] | None = None,
+) -> str:
+    lines = [
+        f'pipeline={pipeline}',
+        f'parser_schema={_parser_schema_version(pipeline)}',
+        f'sources={";".join(sorted(str(item.resolve()) for item in source_roots))}',
+        f'formats={";".join(sorted(str(item).strip().lower() for item in enabled_formats if str(item).strip()))}',
+    ]
+    for item in files or []:
+        file_path = item[1]
+        try:
+            stat = file_path.stat()
+        except OSError:
+            continue
+        lines.append(f'{file_path.resolve()}|{float(stat.st_mtime or 0.0)}|{int(stat.st_size or 0)}')
+    return str(abs(hash('\n'.join(lines))))
+
+
+def _resume_completed_files(state: dict[str, object] | None) -> dict[str, dict[str, object]]:
+    raw = state.get('completed_files') if isinstance(state, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, dict[str, object]] = {}
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        normalized[str(key)] = dict(value)
+    return normalized
+
+
+def _can_resume_extension_build(
+    state: dict[str, object] | None,
+    *,
+    pipeline: str,
+    manifest_signature: str,
+    parser_schema_version: str,
+    source_roots: tuple[str, ...],
+    enabled_formats: tuple[str, ...],
+) -> bool:
+    if not isinstance(state, dict):
+        return False
+    if int(state.get('state_version') or 0) != EXTENSION_BUILD_STATE_VERSION:
+        return False
+    if str(state.get('pipeline') or '').strip().lower() != str(pipeline or '').strip().lower():
+        return False
+    if str(state.get('manifest_signature') or '') != str(manifest_signature or ''):
+        return False
+    if str(state.get('parser_schema_version') or '') != str(parser_schema_version or ''):
+        return False
+    if tuple(str(item) for item in (state.get('source_roots') or ())) != tuple(str(item) for item in source_roots):
+        return False
+    if tuple(str(item) for item in (state.get('enabled_formats') or ())) != tuple(str(item) for item in enabled_formats):
+        return False
+    status = str(state.get('status') or '').strip().lower()
+    return status in {'interrupted', 'resumable', 'building', 'cancelling', 'paused'}
+
+
+def _wait_for_extension_controls(
+    pause_event: threading.Event | None,
+    cancel_event: threading.Event | None,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise BuildCancelledError()
+    if pause_event is None or not pause_event.is_set():
+        return
+    while pause_event.is_set():
+        if cancel_event is not None and cancel_event.is_set():
+            raise BuildCancelledError()
+        time.sleep(0.1)
+
+
+def _update_build_state_payload(
+    extension_paths: DataPaths,
+    *,
+    payload: dict[str, object],
+    phase: str | None = None,
+    status: str | None = None,
+    current_path: str | None = None,
+    processed_files: int | None = None,
+    skipped_files: int | None = None,
+    failed_files: int | None = None,
+    deleted_files: int | None = None,
+    current: int | None = None,
+    total: int | None = None,
+    completed_files: dict[str, dict[str, object]] | None = None,
+) -> None:
+    if phase is not None:
+        payload['phase'] = str(phase or '').strip()
+    if status is not None:
+        payload['status'] = str(status or '').strip()
+    if current_path is not None:
+        payload['current_path'] = str(current_path or '').strip()
+    if processed_files is not None:
+        payload['processed_files'] = max(int(processed_files or 0), 0)
+    if skipped_files is not None:
+        payload['skipped_files'] = max(int(skipped_files or 0), 0)
+    if failed_files is not None:
+        payload['failed_files'] = max(int(failed_files or 0), 0)
+    if deleted_files is not None:
+        payload['deleted_files'] = max(int(deleted_files or 0), 0)
+    if current is not None:
+        payload['current'] = max(int(current or 0), 0)
+    if total is not None:
+        payload['total'] = max(int(total or 0), 0)
+    if completed_files is not None:
+        payload['completed_files'] = dict(completed_files)
+    write_extension_build_state(extension_paths, payload)
+
+
+def _mark_build_interrupted(
+    extension_paths: DataPaths,
+    payload: dict[str, object],
+    *,
+    resumable: bool,
+    last_error: str,
+    phase: str,
+) -> None:
+    payload['last_error'] = str(last_error or '').strip()
+    payload['resume_available'] = bool(resumable)
+    _update_build_state_payload(
+        extension_paths,
+        payload=payload,
+        phase=phase,
+        status='resumable' if resumable else 'interrupted',
+    )
+
+
+def _resolve_distribution_version(distribution_name: str, *, module_name: str | None = None) -> str:
+    metadata_error: Exception | None = None
+    try:
+        version = importlib_metadata.version(distribution_name)
+    except Exception as exc:
+        metadata_error = exc
+    else:
+        return str(version or '')
+    if module_name:
+        module = import_module(module_name)
+        module_version = getattr(module, '__version__', '') or ''
+        if module_version:
+            return str(module_version)
+    if metadata_error is not None:
+        LOGGER.warning(
+            'extension_distribution_version_unavailable: %s (%s: %s)',
+            distribution_name,
+            type(metadata_error).__name__,
+            metadata_error,
+        )
+    return ''
+
+
+def _ensure_pdf_parser_ready() -> dict[str, str]:
+    try:
+        import_module('omniclip_rag.extensions.parsers.pdf')
+        version = _resolve_distribution_version('pypdf', module_name='pypdf')
+    except Exception as exc:
+        raise RuntimeError(f'pdf_parser_unavailable: {type(exc).__name__}: {exc}') from exc
+    return {
+        'parser_schema_version': EXTENSION_PDF_PARSER_SCHEMA_VERSION,
+        'pypdf_version': str(version or ''),
+        **_supported_extension_runtime_contract(),
+    }
+
+
+def _ensure_tika_parser_ready() -> dict[str, str]:
+    try:
+        import_module('omniclip_rag.extensions.parsers.tika')
+    except Exception as exc:
+        raise RuntimeError(f'tika_parser_unavailable: {type(exc).__name__}: {exc}') from exc
+    return {
+        'parser_schema_version': EXTENSION_TIKA_PARSER_SCHEMA_VERSION,
+        **_supported_extension_runtime_contract(),
+    }
+
+
+def _parsed_file_limit_reason(parsed) -> str:
+    chunk_count = len(getattr(parsed, 'chunks', ()) or ())
+    total_chars = sum(len(str(getattr(chunk, 'raw_text', '') or '')) for chunk in getattr(parsed, 'chunks', ()) or ())
+    if chunk_count > EXTENSION_MAX_PARSED_CHUNKS:
+        return f'片段数量过大（{chunk_count}）'
+    if total_chars > EXTENSION_MAX_PARSED_TEXT_CHARS:
+        return f'正文过大（{total_chars} 字符）'
+    return ''
+
+
+def _vector_contract(store: MetadataStore, vector_index, vector_enabled: bool) -> tuple[bool, bool]:
+    stats = store.stats()
+    indexed_files = int(stats.get('files', 0) or 0)
+    if not vector_enabled:
+        return False, indexed_files >= 0
+    expected_documents = store.count_vector_documents()
+    if expected_documents <= 0:
+        return True, indexed_files >= 0
+    status_fn = getattr(vector_index, 'status', None)
+    status_payload = status_fn() if callable(status_fn) else {}
+    vector_ready = bool(status_payload.get('table_ready'))
+    return vector_ready, indexed_files >= 0
+
+
 def _emit_extension_stage(
     on_progress: Callable[[dict[str, object]], None] | None,
     *,
@@ -1661,6 +2991,13 @@ def _emit_extension_stage(
     overall_percent: float | None = None,
     close_safe: bool = False,
     recent_issue: str = '',
+    build_id: str = '',
+    pipeline: str = '',
+    eta_seconds: int | None = None,
+    elapsed_seconds: float | None = None,
+    heartbeat_only: bool = False,
+    watchdog_stalled: bool = False,
+    watchdog_report_path: str = '',
 ) -> None:
     percent = overall_percent
     if percent is None:
@@ -1678,8 +3015,24 @@ def _emit_extension_stage(
         'overall_percent': max(float(percent or 0.0), 0.0),
         'close_safe': bool(close_safe),
     }
+    if build_id:
+        payload['build_id'] = str(build_id)
+    if pipeline:
+        payload['pipeline'] = str(pipeline)
+    if eta_seconds is not None:
+        payload['eta_seconds'] = max(int(eta_seconds or 0), 0)
+    if elapsed_seconds is not None:
+        payload['elapsed_seconds'] = max(float(elapsed_seconds or 0.0), 0.0)
+    if heartbeat_only:
+        payload['heartbeat_only'] = True
+    if watchdog_stalled:
+        payload['watchdog_stalled'] = True
+    if watchdog_report_path:
+        payload['watchdog_report_path'] = str(watchdog_report_path)
     if format_id:
         payload['format_id'] = format_id
+    if current_path and 'current_file' not in payload:
+        payload['current_file'] = Path(current_path).name
     if recent_issue:
         payload['recent_issue'] = str(recent_issue)
     _emit_progress(on_progress, payload)

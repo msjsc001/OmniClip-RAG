@@ -806,6 +806,70 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_extension_global_progress_uses_busy_bar_for_single_file_pdf_inspection(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._extension_progress_timer.stop()
+            workspace._extension_task_worker = object()
+            workspace._extension_global_progress = {
+                'pipeline': 'pdf',
+                'stage_status': 'inspect_pdf',
+                'total': 1,
+                'current': 0,
+                'current_file': 'guide.pdf',
+                'close_safe': True,
+            }
+            workspace._extension_progress_activity_key = 'inspect_pdf|guide.pdf|0|1'
+            workspace._extension_progress_activity_started_at = time.monotonic() - 3.2
+            workspace._refresh_extension_global_progress_ui()
+            self.assertEqual(workspace.ext_global_progress_bar.maximum(), 0)
+            self.assertIn(text('zh-CN', 'extensions_progress_stage_inspecting_pdf'), workspace.ext_global_progress_label.text())
+            self.assertIn('正在处理', workspace.ext_global_progress_label.text())
+            self.assertIn('guide.pdf', workspace.ext_global_progress_detail_label.text())
+            self.assertIn('已用时', workspace.ext_global_progress_detail_label.text())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_global_progress_restores_determinate_bar_after_finalizing(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._extension_progress_timer.stop()
+            workspace._extension_task_worker = object()
+            workspace._extension_global_progress = {
+                'pipeline': 'pdf',
+                'stage_status': 'inspect_pdf',
+                'total': 1,
+                'current': 0,
+                'current_file': 'guide.pdf',
+                'close_safe': True,
+            }
+            workspace._extension_progress_activity_key = 'inspect_pdf|guide.pdf|0|1'
+            workspace._extension_progress_activity_started_at = time.monotonic() - 2.0
+            workspace._refresh_extension_global_progress_ui()
+            workspace._extension_global_progress = {
+                'pipeline': 'pdf',
+                'stage_status': 'finalizing',
+                'overall_percent': 100.0,
+                'total': 1,
+                'current': 1,
+                'close_safe': True,
+            }
+            workspace._refresh_extension_global_progress_ui()
+            self.assertEqual(workspace.ext_global_progress_bar.maximum(), 100)
+            self.assertEqual(workspace.ext_global_progress_bar.value(), 100)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_config_workspace_auto_enables_semantic_backend_when_local_model_is_ready(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)

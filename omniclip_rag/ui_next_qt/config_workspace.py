@@ -4,6 +4,7 @@ import os
 import stat
 import sys
 import time
+import threading
 import logging
 import gc
 import shutil
@@ -51,6 +52,15 @@ from ..extensions.models import (
     TikaFormatSupportTier,
     TikaRuntimeStatus,
 )
+from ..extensions.build_state import (
+    clear_extension_build_state,
+    diagnostics_dir as extension_diagnostics_dir,
+    is_process_alive,
+    read_extension_build_lease,
+    read_extension_build_state,
+    release_extension_build_lease,
+)
+from ..extensions.paths import build_extension_data_paths
 from ..extensions.registry import ExtensionRegistry, ExtensionRegistryState
 from ..extensions.service import ExtensionService
 from ..extensions.runtimes import TikaSidecarManager, build_manual_install_context, detect_tika_runtime, install_tika_runtime, runtime_layout
@@ -157,9 +167,17 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._extension_task_worker: QtCore.QObject | None = None
         self._extension_task_key: str | None = None
         self._extension_active_source_key: tuple[str, str] | None = None
+        self._extension_cancel_event: threading.Event | None = None
+        self._extension_resume_prompted: set[str] = set()
+        self._extension_global_progress: dict[str, object] | None = None
         self._extension_source_progress: dict[tuple[str, str], str] = {}
         self._extension_source_summaries: dict[tuple[str, str], dict[str, object]] = {}
         self._extension_source_buttons: dict[tuple[str, str], list[QtWidgets.QAbstractButton]] = {}
+        self._extension_progress_activity_key = ''
+        self._extension_progress_activity_started_at = 0.0
+        self._extension_progress_timer = QtCore.QTimer(self)
+        self._extension_progress_timer.setInterval(1000)
+        self._extension_progress_timer.timeout.connect(self._on_extension_progress_timer_tick)
         self._current_report = None
         self._latest_preflight_snapshot: dict[str, object] | None = None
         self._task_worker: ServiceTaskWorker | None = None
@@ -1690,6 +1708,36 @@ class ConfigWorkspace(QtWidgets.QWidget):
         actions.addWidget(self.ext_stop_button)
         actions.addStretch(1)
 
+        self.ext_global_progress_label = QtWidgets.QLabel(self._tr('extensions_progress_idle'), card)
+        self.ext_global_progress_label.setProperty('role', 'guide')
+        self.ext_global_progress_label.setWordWrap(True)
+        layout.addWidget(self.ext_global_progress_label)
+        self.ext_global_progress_bar = QtWidgets.QProgressBar(card)
+        self.ext_global_progress_bar.setRange(0, 100)
+        self.ext_global_progress_bar.setValue(0)
+        layout.addWidget(self.ext_global_progress_bar)
+        self.ext_global_progress_detail_label = QtWidgets.QLabel(card)
+        self.ext_global_progress_detail_label.setProperty('role', 'muted')
+        self.ext_global_progress_detail_label.setWordWrap(True)
+        layout.addWidget(self.ext_global_progress_detail_label)
+
+        support_actions = QtWidgets.QHBoxLayout()
+        support_actions.setSpacing(8)
+        layout.addLayout(support_actions)
+        self.ext_open_logs_button = QtWidgets.QPushButton(self._tr('extensions_open_logs_dir'), card)
+        self._set_button_variant(self.ext_open_logs_button, 'secondary')
+        self.ext_open_logs_button.clicked.connect(self._open_extension_logs_dir)
+        support_actions.addWidget(self.ext_open_logs_button)
+        self.ext_open_diagnostics_button = QtWidgets.QPushButton(self._tr('extensions_open_diagnostics_dir'), card)
+        self._set_button_variant(self.ext_open_diagnostics_button, 'secondary')
+        self.ext_open_diagnostics_button.clicked.connect(self._open_extension_diagnostics_dir)
+        support_actions.addWidget(self.ext_open_diagnostics_button)
+        self.ext_clear_resume_button = QtWidgets.QPushButton(self._tr('extensions_clear_build_state'), card)
+        self._set_button_variant(self.ext_clear_resume_button, 'secondary')
+        self.ext_clear_resume_button.clicked.connect(self._clear_extension_build_state_for_current_pipeline)
+        support_actions.addWidget(self.ext_clear_resume_button)
+        support_actions.addStretch(1)
+
         self.ext_tabs = QtWidgets.QTabWidget(card)
         layout.addWidget(self.ext_tabs)
         self.ext_pdf_page = QtWidgets.QWidget(self.ext_tabs)
@@ -2657,19 +2705,73 @@ class ConfigWorkspace(QtWidgets.QWidget):
 
     def _extension_source_stage_text(self, pipeline: str, stage_status: str) -> str:
         normalized = str(stage_status or '').strip().lower()
+        if normalized == 'prepare_runtime':
+            return self._tr('extensions_progress_stage_prepare_runtime')
         if normalized == 'scan_sources':
             return self._tr('extensions_progress_stage_scanning')
+        if normalized == 'inspect_pdf':
+            return self._tr('extensions_progress_stage_inspecting_pdf')
+        if normalized == 'inspect_tika':
+            return self._tr('extensions_progress_stage_inspecting_tika')
+        if normalized == 'parse_files':
+            return self._tr('extensions_progress_stage_parsing_tika' if pipeline == 'tika' else 'extensions_progress_stage_parsing_pdf')
         if normalized == 'parse_tika':
             return self._tr('extensions_progress_stage_parsing_tika')
         if normalized == 'parse_pdf':
             return self._tr('extensions_progress_stage_parsing_pdf')
+        if normalized == 'write_store':
+            return self._tr('extensions_progress_stage_writing_store')
         if normalized == 'write_vector':
             return self._tr('extensions_progress_stage_writing_vector')
         if normalized == 'finalizing':
             return self._tr('extensions_progress_stage_finalizing')
         if normalized == 'cleanup_existing':
             return self._tr('extensions_progress_stage_cleanup')
+        if normalized == 'cancelling':
+            return self._tr('extensions_status_cancelling')
         return self._extension_pipeline_label(pipeline)
+
+    def _reset_extension_progress_activity(self) -> None:
+        self._extension_progress_activity_key = ''
+        self._extension_progress_activity_started_at = 0.0
+
+    def _extension_progress_activity_identity(self, payload: dict[str, object]) -> str:
+        stage_status = str(payload.get('stage_status') or '').strip().lower()
+        current_path = str(payload.get('current_path') or payload.get('current_file') or '').strip()
+        current = int(payload.get('current') or 0)
+        total = int(payload.get('total') or 0)
+        return f'{stage_status}|{current_path}|{current}|{total}'
+
+    def _update_extension_progress_activity(self, payload: dict[str, object] | None) -> None:
+        if not isinstance(payload, dict) or not payload:
+            self._reset_extension_progress_activity()
+            return
+        identity = self._extension_progress_activity_identity(payload)
+        if identity != self._extension_progress_activity_key:
+            self._extension_progress_activity_key = identity
+            self._extension_progress_activity_started_at = time.monotonic()
+
+    def _extension_progress_elapsed_seconds(self) -> float:
+        if self._extension_progress_activity_started_at <= 0.0:
+            return 0.0
+        return max(time.monotonic() - self._extension_progress_activity_started_at, 0.0)
+
+    def _extension_progress_should_use_busy_bar(self, payload: dict[str, object]) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        stage_status = str(payload.get('stage_status') or '').strip().lower()
+        if stage_status not in {'inspect_pdf', 'inspect_tika', 'parse_pdf', 'parse_tika'}:
+            return False
+        if stage_status in {'failed', 'finalizing', 'cancelling'}:
+            return False
+        total = max(int(payload.get('total') or 0), 0)
+        return total <= 1
+
+    def _on_extension_progress_timer_tick(self) -> None:
+        if self._extension_task_worker is None:
+            self._extension_progress_timer.stop()
+            return
+        self._refresh_extension_global_progress_ui()
 
     def _choose_extension_source_build_mode(self, pipeline: str, source_path: str) -> str | None:
         summary = self._extension_source_summaries.get((pipeline, normalize_vault_path(source_path)))
@@ -2740,24 +2842,149 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _extension_pipeline_label(self, pipeline: str) -> str:
         return self._tr('extensions_tika_tab') if pipeline == 'tika' else self._tr('extensions_pdf_tab')
 
+    def _extension_paths_for_pipeline(self, pipeline: str, *, paths=None):
+        return build_extension_data_paths(paths or self._paths, pipeline)
+
+    def _extension_status_for_pipeline(self, pipeline: str):
+        return self._extension_state.snapshot.tika if pipeline == 'tika' else self._extension_state.snapshot.pdf
+
     def _refresh_extension_action_buttons(self) -> None:
         busy = self._extension_task_worker is not None
+        remote_busy = bool(self._extension_state.snapshot.pdf.build_in_progress or self._extension_state.snapshot.tika.build_in_progress)
         runtime = self._extension_state.snapshot.tika.runtime
-        self.ext_preflight_button.setEnabled(not busy)
-        self.ext_rebuild_button.setEnabled(not busy)
+        current_pipeline = self._current_extension_pipeline()
+        current_build_state = read_extension_build_state(self._extension_paths_for_pipeline(current_pipeline))
+        self.ext_preflight_button.setEnabled(not busy and not remote_busy)
+        self.ext_rebuild_button.setEnabled(not busy and not remote_busy)
         self.ext_stop_button.setEnabled(busy or runtime.running or runtime.starting)
+        self.ext_open_logs_button.setEnabled(True)
+        self.ext_open_diagnostics_button.setEnabled(True)
+        self.ext_clear_resume_button.setEnabled(not busy and isinstance(current_build_state, dict))
         for buttons in self._extension_source_buttons.values():
             for button in buttons:
-                button.setEnabled(not busy and bool(button.property('row_enabled')))
+                button.setEnabled(not busy and not remote_busy and bool(button.property('row_enabled')))
+
+    def _refresh_extension_global_progress_ui(self) -> None:
+        if not hasattr(self, 'ext_global_progress_label'):
+            return
+        payload = self._extension_global_progress if isinstance(self._extension_global_progress, dict) else {}
+        if not payload:
+            self.ext_global_progress_label.setText(self._tr('extensions_progress_idle'))
+            self.ext_global_progress_bar.setRange(0, 100)
+            self.ext_global_progress_bar.setValue(0)
+            self.ext_global_progress_detail_label.setText('')
+            return
+        pipeline = str(payload.get('pipeline') or self._current_extension_pipeline()).strip().lower() or 'pdf'
+        stage_status = str(payload.get('stage_status') or '').strip().lower()
+        stage_label = self._extension_source_stage_text(pipeline, stage_status)
+        percent = max(0.0, min(float(payload.get('overall_percent') or 0.0), 100.0))
+        current = max(int(payload.get('current') or 0), 0)
+        total = max(int(payload.get('total') or 0), 0)
+        processed = max(int(payload.get('processed_files') or 0), 0)
+        skipped = max(int(payload.get('skipped_files') or 0), 0)
+        errors = max(int(payload.get('error_count') or payload.get('failed_files') or 0), 0)
+        use_busy_bar = self._extension_progress_should_use_busy_bar(payload)
+        if stage_status == 'failed':
+            headline = self._tr('extensions_progress_failed')
+        elif use_busy_bar:
+            headline = self._tr('extensions_progress_stage_active', stage=stage_label)
+        elif total > 0:
+            headline = self._tr(
+                'extensions_progress_stage_counts',
+                stage=stage_label,
+                percent=percent,
+                current=current,
+                total=total,
+                processed=processed,
+                skipped=skipped,
+                errors=errors,
+            )
+        else:
+            headline = self._tr('extensions_progress_stage_percent', stage=stage_label, percent=percent)
+        detail_lines: list[str] = []
+        build_id = str(payload.get('build_id') or '').strip()
+        if build_id:
+            detail_lines.append(self._tr('extensions_progress_build_id', build_id=build_id))
+        current_file = str(payload.get('current_file') or '').strip()
+        current_path = str(payload.get('current_path') or '').strip()
+        if not current_file and current_path:
+            current_file = Path(current_path).name
+        if current_file:
+            detail_lines.append(self._tr('extensions_progress_current_file', name=current_file))
+        elapsed_seconds = self._extension_progress_elapsed_seconds()
+        if self._extension_task_worker is not None and elapsed_seconds > 0:
+            elapsed_text = format_duration(int(round(elapsed_seconds)))
+            if current_file:
+                detail_lines.append(
+                    self._tr('extensions_progress_current_file_elapsed', name=current_file, elapsed=elapsed_text)
+                )
+            else:
+                detail_lines.append(
+                    self._tr('extensions_progress_stage_elapsed', stage=stage_label, elapsed=elapsed_text)
+                )
+        eta_seconds = float(payload.get('eta_seconds') or 0.0)
+        if eta_seconds > 0:
+            detail_lines.append(self._tr('extensions_progress_eta', eta=format_duration(int(round(eta_seconds)))))
+        if bool(payload.get('heartbeat_only')) and not current_file:
+            detail_lines.append(self._tr('extensions_progress_heartbeat_waiting'))
+        recent_issue = str(payload.get('recent_issue') or '').strip()
+        if recent_issue:
+            detail_lines.append(self._tr('extensions_progress_recent_issue', reason=recent_issue))
+        if bool(payload.get('watchdog_stalled')):
+            report_path = str(payload.get('watchdog_report_path') or '').strip()
+            detail_lines.append(self._tr('extensions_progress_watchdog_stalled', path=report_path or '--'))
+        detail_lines.append(self._tr('extensions_progress_close_safe' if bool(payload.get('close_safe')) else 'extensions_progress_close_busy'))
+        self.ext_global_progress_label.setText(headline)
+        self.ext_global_progress_bar.setRange(0, 0 if use_busy_bar else 100)
+        self.ext_global_progress_bar.setValue(int(round(percent)))
+        self.ext_global_progress_detail_label.setText('\n'.join(detail_lines))
+
+    def _open_extension_logs_dir(self) -> None:
+        self._open_local_dir(self._extension_paths_for_pipeline(self._current_extension_pipeline()).logs_dir)
+        self.statusMessageChanged.emit(self._tr('extensions_logs_opened'))
+
+    def _open_extension_diagnostics_dir(self) -> None:
+        self._open_local_dir(extension_diagnostics_dir(self._extension_paths_for_pipeline(self._current_extension_pipeline())))
+        self.statusMessageChanged.emit(self._tr('extensions_diagnostics_opened'))
+
+    def _clear_extension_build_state_for_current_pipeline(self) -> None:
+        pipeline = self._current_extension_pipeline()
+        build_paths = self._extension_paths_for_pipeline(pipeline)
+        build_state = read_extension_build_state(build_paths)
+        if not isinstance(build_state, dict):
+            self.statusMessageChanged.emit(self._tr('extensions_build_state_missing'))
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            self._tr('extensions_build_state_clear_confirm_title'),
+            self._tr('extensions_build_state_clear_confirm_body', pipeline=self._extension_pipeline_label(pipeline)),
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        build_id = str(build_state.get('build_id') or '').strip()
+        clear_extension_build_state(build_paths)
+        release_extension_build_lease(build_paths, build_id=build_id)
+        self._extension_resume_prompted = {
+            key for key in self._extension_resume_prompted
+            if f':{pipeline}:' not in key
+        }
+        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        self.statusMessageChanged.emit(self._tr('extensions_build_state_cleared', pipeline=self._extension_pipeline_label(pipeline)))
+        self._append_log(self._tr('extensions_build_state_cleared', pipeline=self._extension_pipeline_label(pipeline)))
 
     def _start_extension_task(self, *, task_key: str, fn, on_success) -> bool:
         if self._extension_task_worker is not None:
             self.statusMessageChanged.emit(self._tr('extensions_task_busy'))
             return False
-        worker = FunctionWorker(fn=fn)
+        worker = ProgressFunctionWorker(fn=fn)
         self._extension_task_worker = worker
         self._extension_task_key = task_key
+        self._extension_cancel_event = threading.Event()
+        self._extension_global_progress = None
+        self._reset_extension_progress_activity()
+        self._extension_progress_timer.start()
         self._refresh_extension_action_buttons()
+        worker.progress.connect(self._handle_extension_task_progress)
         worker.succeeded.connect(on_success)
         worker.failed.connect(lambda message, tb, key=task_key: self._handle_extension_task_failure(key, message, tb))
         worker.finished.connect(self._on_extension_task_finished)
@@ -2768,7 +2995,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._extension_task_worker = None
         self._extension_task_key = None
         self._extension_active_source_key = None
+        self._extension_cancel_event = None
+        self._extension_progress_timer.stop()
+        self._reset_extension_progress_activity()
         self._refresh_extension_source_tables()
+        self._refresh_extension_global_progress_ui()
         self._refresh_extension_action_buttons()
 
     def _handle_extension_task_failure(self, task_key: str, message: str, traceback_text: str) -> None:
@@ -2776,9 +3007,23 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if self._extension_active_source_key is not None:
             pipeline, source_path = self._extension_active_source_key
             self._set_extension_source_progress(pipeline, source_path, self._tr('extensions_progress_failed'))
+        self._extension_global_progress = {
+            'stage_status': 'failed',
+            'recent_issue': message,
+            'overall_percent': float((self._extension_global_progress or {}).get('overall_percent') or 0.0),
+            'close_safe': True,
+        }
+        self._refresh_extension_global_progress_ui()
         self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
         self.statusMessageChanged.emit(message or self._tr('extensions_task_failed_generic'))
         self._append_log(traceback_text.strip() or message, focus_log=True)
+
+    def _handle_extension_task_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        self._extension_global_progress = dict(payload)
+        self._update_extension_progress_activity(self._extension_global_progress)
+        self._refresh_extension_global_progress_ui()
 
     def _run_extension_preflight(self, _checked: bool = False) -> None:
         try:
@@ -2788,11 +3033,13 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return
         pipeline = self._current_extension_pipeline()
 
-        def runner():
+        def runner(emit_progress):
             service = ExtensionService(config, paths, runtime_manager=self._tika_runtime_manager)
             if pipeline == 'tika':
-                return {'pipeline': pipeline, 'report': service.run_tika_preflight()}
-            return {'pipeline': pipeline, 'report': service.run_pdf_preflight()}
+                report = service.run_tika_preflight(on_progress=emit_progress)
+            else:
+                report = service.run_pdf_preflight(on_progress=emit_progress)
+            return {'pipeline': pipeline, 'report': report}
 
         if self._start_extension_task(task_key=f'preflight:{pipeline}', fn=runner, on_success=self._after_extension_preflight):
             self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_global_preflight'), pipeline=self._extension_pipeline_label(pipeline)))
@@ -2802,6 +3049,13 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return
         pipeline = str(payload.get('pipeline') or 'pdf')
         report = payload.get('report')
+        self._extension_global_progress = {
+            'pipeline': pipeline,
+            'stage_status': 'finalizing',
+            'overall_percent': 100.0,
+            'close_safe': True,
+        }
+        self._refresh_extension_global_progress_ui()
         self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
         if pipeline == 'tika':
             message = self._tr(
@@ -2827,28 +3081,60 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if missing_dirs:
             self._append_log(self._tr('extensions_missing_dirs_detail', paths='; '.join(missing_dirs)), focus_log=True)
 
-    def _run_extension_rebuild(self, _checked: bool = False) -> None:
+    def _run_extension_rebuild(self, _checked: bool = False, *, resume: bool = False, pipeline: str | None = None) -> None:
         try:
             config, paths = self._collect_config(False)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
             return
-        pipeline = self._current_extension_pipeline()
+        pipeline = pipeline or self._current_extension_pipeline()
+        if not resume:
+            build_state = read_extension_build_state(self._extension_paths_for_pipeline(pipeline, paths=paths))
+            if isinstance(build_state, dict) and bool(build_state.get('resume_available')):
+                self._offer_extension_resume_rebuild(pipeline, build_state)
+                return
 
-        def runner():
+        def runner(emit_progress):
             service = ExtensionService(config, paths, runtime_manager=self._tika_runtime_manager)
             if pipeline == 'tika':
-                return {'pipeline': pipeline, 'report': service.run_tika_full_rebuild()}
-            return {'pipeline': pipeline, 'report': service.run_pdf_full_rebuild()}
+                return {
+                    'pipeline': pipeline,
+                    'report': service.run_tika_full_rebuild(
+                        on_progress=emit_progress,
+                        resume=resume,
+                        cancel_event=self._extension_cancel_event,
+                    ),
+                }
+            return {
+                'pipeline': pipeline,
+                'report': service.run_pdf_full_rebuild(
+                    on_progress=emit_progress,
+                    resume=resume,
+                    cancel_event=self._extension_cancel_event,
+                ),
+            }
 
         if self._start_extension_task(task_key=f'rebuild:{pipeline}', fn=runner, on_success=self._after_extension_rebuild):
-            self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_global_rebuild'), pipeline=self._extension_pipeline_label(pipeline)))
+            self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_global_rebuild_resume' if resume else 'extensions_global_rebuild'), pipeline=self._extension_pipeline_label(pipeline)))
 
     def _after_extension_rebuild(self, payload: object) -> None:
         if not isinstance(payload, dict):
             return
         pipeline = str(payload.get('pipeline') or 'pdf')
         report = payload.get('report')
+        if bool(getattr(report, 'cancelled', False)):
+            self._extension_global_progress = {
+                'stage_status': 'finalizing',
+                'overall_percent': float((self._extension_global_progress or {}).get('overall_percent') or 0.0),
+                'close_safe': True,
+                'recent_issue': self._tr('extensions_status_resumable'),
+            }
+            self._refresh_extension_global_progress_ui()
+            self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+            message = self._tr('extensions_task_cancelled_resume_available' if bool(getattr(report, 'resume_available', False)) else 'extensions_task_cancelled')
+            self.statusMessageChanged.emit(message)
+            self._append_log(message)
+            return
         self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
         if pipeline == 'tika':
             indexed_files = int(getattr(report, 'indexed_files', 0) or 0)
@@ -2892,8 +3178,13 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._extension_task_worker = worker
         self._extension_task_key = task_key
         self._extension_active_source_key = (pipeline, normalized)
+        self._extension_cancel_event = threading.Event()
+        self._extension_global_progress = None
+        self._reset_extension_progress_activity()
+        self._extension_progress_timer.start()
         self._set_extension_source_progress(pipeline, normalized, self._tr('extensions_progress_running'))
         self._refresh_extension_action_buttons()
+        worker.progress.connect(self._handle_extension_task_progress)
         worker.progress.connect(lambda payload, p=pipeline, s=normalized: self._handle_extension_source_progress(p, s, payload))
         worker.succeeded.connect(on_success)
         worker.failed.connect(lambda message, tb, key=task_key: self._handle_extension_task_failure(key, message, tb))
@@ -2913,9 +3204,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
         error_count = int(payload.get('error_count') or 0)
         deleted_files = int(payload.get('deleted_files') or 0)
         current_path = str(payload.get('current_path') or '').strip()
-        current_name = Path(current_path).name if current_path else ''
+        current_name = str(payload.get('current_file') or '').strip()
+        if not current_name and current_path:
+            current_name = Path(current_path).name
         recent_issue = str(payload.get('recent_issue') or '').strip()
-        if total > 0:
+        use_busy_bar = self._extension_progress_should_use_busy_bar(payload)
+        if use_busy_bar:
+            message = self._tr('extensions_progress_stage_active', stage=stage_label)
+        elif total > 0:
             message = self._tr(
                 'extensions_progress_stage_counts',
                 stage=stage_label,
@@ -2952,8 +3248,18 @@ class ConfigWorkspace(QtWidgets.QWidget):
         def runner(_emit_progress):
             service = ExtensionService(config, paths, runtime_manager=self._tika_runtime_manager)
             if pipeline == 'tika':
-                return {'pipeline': pipeline, 'source_path': source_path, 'action': 'preflight', 'report': service.run_tika_preflight(source_paths=[source_path])}
-            return {'pipeline': pipeline, 'source_path': source_path, 'action': 'preflight', 'report': service.run_pdf_preflight(source_paths=[source_path])}
+                return {
+                    'pipeline': pipeline,
+                    'source_path': source_path,
+                    'action': 'preflight',
+                    'report': service.run_tika_preflight(source_paths=[source_path], on_progress=_emit_progress),
+                }
+            return {
+                'pipeline': pipeline,
+                'source_path': source_path,
+                'action': 'preflight',
+                'report': service.run_pdf_preflight(source_paths=[source_path], on_progress=_emit_progress),
+            }
 
         if self._start_extension_source_task(task_key=f'row-preflight:{pipeline}', pipeline=pipeline, source_path=source_path, fn=runner, on_success=self._after_extension_source_task):
             self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_row_preflight'), pipeline=self._extension_pipeline_label(pipeline)))
@@ -2968,8 +3274,26 @@ class ConfigWorkspace(QtWidgets.QWidget):
         def runner(emit_progress):
             service = ExtensionService(config, paths, runtime_manager=self._tika_runtime_manager)
             if pipeline == 'tika':
-                return {'pipeline': pipeline, 'source_path': source_path, 'action': 'scan_once', 'report': service.run_tika_scan_once(source_paths=[source_path], on_progress=emit_progress)}
-            return {'pipeline': pipeline, 'source_path': source_path, 'action': 'scan_once', 'report': service.run_pdf_scan_once(source_paths=[source_path], on_progress=emit_progress)}
+                return {
+                    'pipeline': pipeline,
+                    'source_path': source_path,
+                    'action': 'scan_once',
+                    'report': service.run_tika_scan_once(
+                        source_paths=[source_path],
+                        on_progress=emit_progress,
+                        cancel_event=self._extension_cancel_event,
+                    ),
+                }
+            return {
+                'pipeline': pipeline,
+                'source_path': source_path,
+                'action': 'scan_once',
+                'report': service.run_pdf_scan_once(
+                    source_paths=[source_path],
+                    on_progress=emit_progress,
+                    cancel_event=self._extension_cancel_event,
+                ),
+            }
 
         if self._start_extension_source_task(task_key=f'row-scan:{pipeline}', pipeline=pipeline, source_path=source_path, fn=runner, on_success=self._after_extension_source_task):
             self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_row_scan_once'), pipeline=self._extension_pipeline_label(pipeline)))
@@ -2990,8 +3314,26 @@ class ConfigWorkspace(QtWidgets.QWidget):
         def runner(emit_progress):
             service = ExtensionService(config, paths, runtime_manager=self._tika_runtime_manager)
             if pipeline == 'tika':
-                return {'pipeline': pipeline, 'source_path': source_path, 'action': 'rebuild', 'report': service.run_tika_full_rebuild(source_paths=[source_path], on_progress=emit_progress)}
-            return {'pipeline': pipeline, 'source_path': source_path, 'action': 'rebuild', 'report': service.run_pdf_full_rebuild(source_paths=[source_path], on_progress=emit_progress)}
+                return {
+                    'pipeline': pipeline,
+                    'source_path': source_path,
+                    'action': 'rebuild',
+                    'report': service.run_tika_full_rebuild(
+                        source_paths=[source_path],
+                        on_progress=emit_progress,
+                        cancel_event=self._extension_cancel_event,
+                    ),
+                }
+            return {
+                'pipeline': pipeline,
+                'source_path': source_path,
+                'action': 'rebuild',
+                'report': service.run_pdf_full_rebuild(
+                    source_paths=[source_path],
+                    on_progress=emit_progress,
+                    cancel_event=self._extension_cancel_event,
+                ),
+            }
 
         if self._start_extension_source_task(task_key=f'row-rebuild:{pipeline}', pipeline=pipeline, source_path=source_path, fn=runner, on_success=self._after_extension_source_task):
             self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_row_rebuild'), pipeline=self._extension_pipeline_label(pipeline)))
@@ -3023,6 +3365,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
         action = str(payload.get('action') or 'rebuild')
         report = payload.get('report')
         self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        if bool(getattr(report, 'cancelled', False)):
+            message = self._tr('extensions_task_cancelled_resume_available' if bool(getattr(report, 'resume_available', False)) else 'extensions_task_cancelled')
+            self._set_extension_source_progress(pipeline, source_path, message)
+            self.statusMessageChanged.emit(message)
+            self._append_log(message)
+            return
         if action == 'preflight':
             if pipeline == 'tika':
                 message = self._tr('extensions_row_preflight_done_tika', files=int(getattr(report, 'total_files', 0) or 0), formats=len(tuple(getattr(report, 'enabled_formats', ()) or ())))
@@ -3067,6 +3415,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if hasattr(self, 'ext_pdf_enabled_check'):
             self._apply_extension_state_to_controls()
             self._schedule_tika_runtime_refresh()
+        if self._extension_task_worker is None:
+            self._maybe_offer_extension_resume(paths)
 
     def _normalize_extension_registry_state(self, state: ExtensionRegistryState, paths, vault_path: str) -> ExtensionRegistryState:
         state.tika_config.selected_formats = self._merge_tika_format_catalog(state.tika_config.selected_formats)
@@ -3083,15 +3433,168 @@ class ConfigWorkspace(QtWidgets.QWidget):
             healthy=False,
             pid=0,
         )
-        if not state.pdf_config.enabled:
-            state.snapshot.pdf.index_state = ExtensionIndexState.DISABLED
-        elif state.snapshot.pdf.index_state == ExtensionIndexState.DISABLED:
-            state.snapshot.pdf.index_state = ExtensionIndexState.NOT_BUILT
-        if not state.tika_config.enabled:
-            state.snapshot.tika.index_state = ExtensionIndexState.DISABLED
-        elif state.snapshot.tika.index_state == ExtensionIndexState.DISABLED:
-            state.snapshot.tika.index_state = ExtensionIndexState.NOT_BUILT
+        state.snapshot.pdf = self._normalize_extension_pipeline_snapshot(
+            pipeline='pdf',
+            config_enabled=state.pdf_config.enabled,
+            status=state.snapshot.pdf,
+            paths=paths,
+        )
+        state.snapshot.tika = self._normalize_extension_pipeline_snapshot(
+            pipeline='tika',
+            config_enabled=state.tika_config.enabled,
+            status=state.snapshot.tika,
+            paths=paths,
+        )
         return state
+
+    def _normalize_extension_pipeline_snapshot(self, *, pipeline: str, config_enabled: bool, status, paths):
+        build_paths = self._extension_paths_for_pipeline(pipeline, paths=paths)
+        build_state = read_extension_build_state(build_paths) or {}
+        lease = read_extension_build_lease(build_paths) or {}
+        active_pid = int(lease.get('pid') or 0)
+        active_build = bool(active_pid and is_process_alive(active_pid))
+        index_state = getattr(status, 'index_state', ExtensionIndexState.NOT_BUILT)
+        indexed_document_count = int(getattr(status, 'indexed_document_count', 0) or 0)
+        vector_ready = bool(getattr(status, 'vector_ready', False))
+        query_ready = bool(getattr(status, 'query_ready', False))
+        build_in_progress = False
+        build_id = str(getattr(status, 'build_id', '') or '')
+        resume_available = False
+        last_error = str(getattr(status, 'last_error', '') or '')
+        if not config_enabled:
+            return replace(
+                status,
+                index_state=ExtensionIndexState.DISABLED,
+                build_in_progress=False,
+                build_id='',
+                vector_ready=False,
+                query_ready=False,
+                resume_available=False,
+            )
+        if build_state:
+            build_id = str(build_state.get('build_id') or build_id)
+            resume_available = bool(build_state.get('resume_available'))
+            last_error = str(build_state.get('last_error') or last_error)
+            build_status = str(build_state.get('status') or '').strip().lower()
+            if active_build:
+                build_in_progress = True
+                if build_status == 'cancelling':
+                    index_state = ExtensionIndexState.CANCELLING
+                elif build_status == 'paused':
+                    index_state = ExtensionIndexState.PAUSED
+                else:
+                    index_state = ExtensionIndexState.BUILDING
+            else:
+                build_in_progress = False
+                if build_status == 'paused':
+                    index_state = ExtensionIndexState.PAUSED
+                elif build_status == 'resumable' or resume_available:
+                    index_state = ExtensionIndexState.RESUMABLE
+                else:
+                    index_state = ExtensionIndexState.INTERRUPTED
+            return replace(
+                status,
+                index_state=index_state,
+                build_in_progress=build_in_progress,
+                build_id=build_id,
+                vector_ready=False,
+                query_ready=False,
+                resume_available=resume_available,
+                last_error=last_error,
+            )
+        if index_state in {
+            ExtensionIndexState.BUILDING,
+            ExtensionIndexState.PAUSED,
+            ExtensionIndexState.CANCELLING,
+            ExtensionIndexState.INTERRUPTED,
+            ExtensionIndexState.RESUMABLE,
+        } or bool(getattr(status, 'build_in_progress', False)):
+            index_state = ExtensionIndexState.STALE if indexed_document_count > 0 else ExtensionIndexState.NOT_BUILT
+            build_id = ''
+            resume_available = False
+            query_ready = False
+            vector_ready = False
+        elif index_state == ExtensionIndexState.DISABLED:
+            index_state = ExtensionIndexState.NOT_BUILT
+        elif index_state == ExtensionIndexState.READY and indexed_document_count > 0 and not query_ready:
+            query_ready = True
+        return replace(
+            status,
+            index_state=index_state,
+            build_in_progress=False,
+            build_id=build_id,
+            vector_ready=vector_ready,
+            query_ready=query_ready,
+            resume_available=resume_available,
+            last_error=last_error,
+        )
+
+    def _maybe_offer_extension_resume(self, paths) -> None:
+        if self._extension_task_worker is not None:
+            return
+        for pipeline in ('pdf', 'tika'):
+            status = self._extension_status_for_pipeline(pipeline)
+            if getattr(status, 'index_state', ExtensionIndexState.NOT_BUILT) != ExtensionIndexState.RESUMABLE:
+                continue
+            if not bool(getattr(status, 'resume_available', False)):
+                continue
+            build_paths = self._extension_paths_for_pipeline(pipeline, paths=paths)
+            build_state = read_extension_build_state(build_paths)
+            if not isinstance(build_state, dict):
+                continue
+            prompt_key = f'{paths.root}:{pipeline}:{str(build_state.get("build_id") or "")}'
+            if prompt_key in self._extension_resume_prompted:
+                continue
+            self._extension_resume_prompted.add(prompt_key)
+            QtCore.QTimer.singleShot(0, lambda p=pipeline, s=dict(build_state): self._offer_extension_resume_rebuild(p, s))
+            break
+
+    def _offer_extension_resume_rebuild(self, pipeline: str, build_state: dict[str, object]) -> None:
+        if self._extension_task_worker is not None:
+            return
+        build_id = str(build_state.get('build_id') or '').strip()
+        current_state = read_extension_build_state(self._extension_paths_for_pipeline(pipeline))
+        if not isinstance(current_state, dict):
+            return
+        if build_id and str(current_state.get('build_id') or '').strip() != build_id:
+            return
+        completed_files = build_state.get('completed_files')
+        completed = len(completed_files) if isinstance(completed_files, dict) else 0
+        total = int(build_state.get('total') or 0)
+        phase_label = self._extension_resume_phase_label(pipeline, str(build_state.get('phase') or 'parse_files'))
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            self._tr('extensions_resume_prompt_title', pipeline=self._extension_pipeline_label(pipeline)),
+            self._tr(
+                'extensions_resume_prompt_body',
+                pipeline=self._extension_pipeline_label(pipeline),
+                phase=phase_label,
+                completed=completed,
+                total=total,
+            ),
+        )
+        if answer == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._append_log(self._tr('extensions_resume_continue', pipeline=self._extension_pipeline_label(pipeline)))
+            if pipeline == 'tika':
+                self.ext_tabs.setCurrentWidget(self.ext_tika_page)
+            else:
+                self.ext_tabs.setCurrentWidget(self.ext_pdf_page)
+            self._run_extension_rebuild(resume=True, pipeline=pipeline)
+            return
+        build_paths = self._extension_paths_for_pipeline(pipeline)
+        clear_extension_build_state(build_paths)
+        release_extension_build_lease(build_paths, build_id=build_id)
+        self.statusMessageChanged.emit(self._tr('extensions_resume_discarded', pipeline=self._extension_pipeline_label(pipeline)))
+        self._append_log(self._tr('extensions_resume_discarded', pipeline=self._extension_pipeline_label(pipeline)))
+        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+
+    def _extension_resume_phase_label(self, pipeline: str, phase: str) -> str:
+        normalized = str(phase or '').strip().lower()
+        if normalized in {'prepare_runtime', 'scan_sources', 'write_store', 'write_vector', 'finalizing'}:
+            return self._extension_source_stage_text(pipeline, normalized)
+        if normalized == 'parse_files':
+            return self._tr('extensions_progress_stage_parsing_tika' if pipeline == 'tika' else 'extensions_progress_stage_parsing_pdf')
+        return self._extension_pipeline_label(pipeline)
 
     def _merge_tika_format_catalog(self, current_formats: list) -> list:
         catalog = build_tika_format_catalog(self._paths)
@@ -3239,13 +3742,26 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return self._tr('extensions_status_not_configured'), False, True
         if any(item.state == ExtensionDirectoryState.MISSING_TEMPORARILY for item in selected_sources):
             return self._tr('extensions_status_missing'), False, True
-        if getattr(status, 'build_in_progress', False):
+        index_state = getattr(status, 'index_state', ExtensionIndexState.NOT_BUILT)
+        if index_state == ExtensionIndexState.CANCELLING:
+            return self._tr('extensions_status_cancelling'), False, True
+        if index_state == ExtensionIndexState.PAUSED:
+            return self._tr('extensions_status_paused'), False, True
+        if getattr(status, 'build_in_progress', False) or index_state == ExtensionIndexState.BUILDING:
             return self._tr('extensions_status_building'), False, True
+        if index_state == ExtensionIndexState.RESUMABLE:
+            return self._tr('extensions_status_resumable'), False, True
+        if index_state == ExtensionIndexState.INTERRUPTED:
+            return self._tr('extensions_status_interrupted'), False, True
+        if index_state == ExtensionIndexState.WATCHING:
+            return self._tr('extensions_status_watching'), True, False
         if getattr(status, 'last_error', ''):
             return self._tr('extensions_status_error'), False, True
-        if getattr(status, 'index_state', ExtensionIndexState.NOT_BUILT) == ExtensionIndexState.READY:
+        if index_state == ExtensionIndexState.READY:
+            if not bool(getattr(status, 'vector_ready', False)):
+                return self._tr('extensions_status_ready_lexical'), False, True
             return self._tr('extensions_status_ready'), True, False
-        if getattr(status, 'index_state', ExtensionIndexState.NOT_BUILT) == ExtensionIndexState.STALE:
+        if index_state == ExtensionIndexState.STALE:
             return self._tr('extensions_status_stale'), False, True
         return self._tr('extensions_status_not_built'), False, True
 
@@ -3542,7 +4058,23 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _handle_extension_stop_action(self, _checked: bool = False) -> None:
         runtime = self._extension_state.snapshot.tika.runtime
         if self._extension_task_worker is not None:
-            self.statusMessageChanged.emit(self._tr('extensions_stop_busy_not_supported'))
+            if self._extension_cancel_event is not None and not self._extension_cancel_event.is_set():
+                self._extension_cancel_event.set()
+            pipeline = 'tika' if isinstance(self._extension_task_key, str) and ':tika' in self._extension_task_key else 'pdf'
+            status = self._extension_status_for_pipeline(pipeline)
+            status.index_state = ExtensionIndexState.CANCELLING
+            status.build_in_progress = True
+            self._extension_global_progress = {
+                **(self._extension_global_progress or {}),
+                'pipeline': pipeline,
+                'stage_status': 'cancelling',
+                'recent_issue': self._tr('extensions_task_cancel_requested'),
+                'close_safe': False,
+            }
+            self._refresh_extension_overview()
+            self._refresh_extension_global_progress_ui()
+            self.statusMessageChanged.emit(self._tr('extensions_task_cancel_requested'))
+            self._append_log(self._tr('extensions_task_cancel_requested'))
             return
         if runtime.running or runtime.starting:
             self._stop_tika_sidecar(announce_key='extensions_tika_runtime_stopped')

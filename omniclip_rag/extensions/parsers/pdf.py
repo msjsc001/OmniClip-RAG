@@ -9,6 +9,18 @@ from ...models import ChunkRecord, ParsedFile
 from ..normalizers.pdf import normalize_pdf_pages
 
 
+def inspect_pdf_file(pdf_path: Path) -> dict[str, int]:
+    """Read lightweight PDF metadata for preflight without extracting page text."""
+
+    absolute_path = pdf_path.resolve()
+    stat = absolute_path.stat()
+    reader = PdfReader(str(absolute_path))
+    return {
+        'size': int(stat.st_size),
+        'page_count': int(len(reader.pages)),
+    }
+
+
 def extract_pdf_pages(pdf_path: Path) -> list[dict[str, object]]:
     """Extract raw text per page from a PDF using pypdf."""
 

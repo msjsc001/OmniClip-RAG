@@ -25,7 +25,12 @@ class ExtensionIndexState(str, Enum):
     DISABLED = 'disabled'
     NOT_BUILT = 'not_built'
     BUILDING = 'building'
+    PAUSED = 'paused'
+    CANCELLING = 'cancelling'
+    INTERRUPTED = 'interrupted'
+    RESUMABLE = 'resumable'
     READY = 'ready'
+    WATCHING = 'watching'
     STALE = 'stale'
     ERROR = 'error'
 
@@ -83,6 +88,12 @@ class PdfExtensionStatus:
 
     index_state: ExtensionIndexState = ExtensionIndexState.DISABLED
     build_in_progress: bool = False
+    build_id: str = ''
+    vector_ready: bool = False
+    query_ready: bool = False
+    resume_available: bool = False
+    last_successful_build_id: str = ''
+    last_completed_at: str = ''
     watch_running: bool = False
     watch_state: ExtensionWatchState = field(default_factory=ExtensionWatchState)
     last_error: str = ''
@@ -172,6 +183,12 @@ class TikaExtensionStatus:
 
     index_state: ExtensionIndexState = ExtensionIndexState.DISABLED
     build_in_progress: bool = False
+    build_id: str = ''
+    vector_ready: bool = False
+    query_ready: bool = False
+    resume_available: bool = False
+    last_successful_build_id: str = ''
+    last_completed_at: str = ''
     watch_running: bool = False
     watch_state: ExtensionWatchState = field(default_factory=ExtensionWatchState)
     runtime: TikaRuntimeStatus = field(default_factory=TikaRuntimeStatus)

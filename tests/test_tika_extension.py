@@ -1,5 +1,6 @@
 import shutil
 import time
+import threading
 import unittest
 import json
 from io import BytesIO
@@ -10,6 +11,7 @@ from urllib.error import HTTPError
 import omniclip_rag  # noqa: F401
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
+from omniclip_rag.extensions.build_state import read_extension_build_state
 from omniclip_rag.extensions.models import ExtensionDirectoryState, ExtensionIndexState, ExtensionSourceDirectory, TikaRuntimeStatus
 from omniclip_rag.extensions.normalizers.tika_output import normalize_tika_content, normalize_tika_xhtml
 from omniclip_rag.extensions.registry import ExtensionRegistry, ExtensionRegistryState
@@ -49,6 +51,10 @@ class _FakeScanService:
 
 
 class TikaExtensionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        if TEST_ROOT.exists():
+            shutil.rmtree(TEST_ROOT, ignore_errors=True)
+
     def tearDown(self) -> None:
         if TEST_ROOT.exists():
             shutil.rmtree(TEST_ROOT, ignore_errors=True)
@@ -190,6 +196,43 @@ class TikaExtensionTests(unittest.TestCase):
         self.assertEqual(reloaded.snapshot.tika.indexed_document_count, 2)
         self.assertTrue(reloaded.snapshot.tika.runtime.running)
         self.assertEqual(runtime_manager.ensure_started_calls, 1)
+
+    def test_tika_preflight_emits_file_level_progress(self) -> None:
+        vault = TEST_ROOT / 'vault_preflight'
+        vault.mkdir(parents=True, exist_ok=True)
+        source_root = TEST_ROOT / 'tika_preflight_source'
+        source_root.mkdir(parents=True, exist_ok=True)
+        (source_root / 'guide.html').write_text('<html/>', encoding='utf-8')
+        (source_root / 'slides.docx').write_bytes(b'docx')
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_preflight'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.tika_config.enabled = True
+        state.tika_config.source_directories = [
+            ExtensionSourceDirectory(path=str(source_root), selected=True, state=ExtensionDirectoryState.ENABLED)
+        ]
+        for item in state.tika_config.selected_formats:
+            item.enabled = item.format_id in {'html', 'docx'}
+        ExtensionRegistry().save(paths, state)
+
+        runtime_manager = _FakeTikaRuntimeManager()
+        progress_events: list[dict[str, object]] = []
+        service = TikaExtensionService(config, paths, runtime_manager=runtime_manager)
+        try:
+            report = service.preflight(on_progress=progress_events.append)
+        finally:
+            service.close()
+
+        self.assertEqual(report.total_files, 2)
+        self.assertEqual(runtime_manager.ensure_started_calls, 0)
+        stage_sequence = [str(item.get('stage_status') or '') for item in progress_events]
+        self.assertIn('scan_sources', stage_sequence)
+        self.assertIn('inspect_tika', stage_sequence)
+        self.assertIn('finalizing', stage_sequence)
+        current_paths = {str(item.get('current_path') or '') for item in progress_events if item.get('current_path')}
+        self.assertTrue(any(path.endswith('guide.html') for path in current_paths))
+        self.assertTrue(any(path.endswith('slides.docx') for path in current_paths))
 
     def test_tika_scan_once_updates_changed_and_removed_files(self) -> None:
         vault = TEST_ROOT / 'vault_scan'
@@ -362,6 +405,113 @@ class TikaExtensionTests(unittest.TestCase):
         self.assertEqual(report.expected_skips, 1)
         self.assertEqual(report.failed_files, 0)
         self.assertTrue(any('empty.docx' in item for item in report.recent_issues))
+
+    def test_tika_full_rebuild_cancel_marks_resumable_state(self) -> None:
+        vault = TEST_ROOT / 'vault_cancel'
+        vault.mkdir(parents=True, exist_ok=True)
+        source_root = TEST_ROOT / 'tika_cancel_source'
+        source_root.mkdir(parents=True, exist_ok=True)
+        (source_root / 'guide.html').write_text('<html/>', encoding='utf-8')
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_cancel'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.tika_config.enabled = True
+        state.tika_config.source_directories = [ExtensionSourceDirectory(path=str(source_root), selected=True, state=ExtensionDirectoryState.ENABLED)]
+        for item in state.tika_config.selected_formats:
+            item.enabled = item.format_id == 'html'
+        ExtensionRegistry().save(paths, state)
+
+        cancel_event = threading.Event()
+        cancel_event.set()
+        runtime_manager = _FakeTikaRuntimeManager()
+        service = TikaExtensionService(config, paths, runtime_manager=runtime_manager)
+        try:
+            report = service.full_rebuild(cancel_event=cancel_event)
+        finally:
+            service.close()
+
+        self.assertTrue(report.cancelled)
+        self.assertTrue(report.resume_available)
+        reloaded = ExtensionRegistry().load(paths)
+        self.assertEqual(reloaded.snapshot.tika.index_state, ExtensionIndexState.RESUMABLE)
+        build_state = read_extension_build_state(build_extension_data_paths(paths, 'tika'))
+        self.assertIsInstance(build_state, dict)
+        self.assertEqual(str(build_state.get('status') or ''), 'resumable')
+
+    def test_tika_full_rebuild_vector_failure_marks_resumable_state(self) -> None:
+        vault = TEST_ROOT / 'vault_vector_failure'
+        vault.mkdir(parents=True, exist_ok=True)
+        source_root = TEST_ROOT / 'tika_vector_failure_source'
+        source_root.mkdir(parents=True, exist_ok=True)
+        (source_root / 'guide.html').write_text('<html/>', encoding='utf-8')
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_vector_failure'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.tika_config.enabled = True
+        state.tika_config.source_directories = [ExtensionSourceDirectory(path=str(source_root), selected=True, state=ExtensionDirectoryState.ENABLED)]
+        for item in state.tika_config.selected_formats:
+            item.enabled = item.format_id == 'html'
+        ExtensionRegistry().save(paths, state)
+
+        runtime_manager = _FakeTikaRuntimeManager()
+        service = TikaExtensionService(config, paths, runtime_manager=runtime_manager)
+        try:
+            with patch('omniclip_rag.extensions.service.parse_file_with_tika', side_effect=self._fake_tika_parse), \
+                patch.object(service, '_rebuild_vectors', side_effect=RuntimeError('tika_vector_failure')):
+                with self.assertRaisesRegex(RuntimeError, 'tika_vector_failure'):
+                    service.full_rebuild()
+        finally:
+            service.close()
+
+        reloaded = ExtensionRegistry().load(paths)
+        self.assertEqual(reloaded.snapshot.tika.index_state, ExtensionIndexState.RESUMABLE)
+        self.assertTrue(reloaded.snapshot.tika.resume_available)
+        self.assertFalse(reloaded.snapshot.tika.query_ready)
+        build_state = read_extension_build_state(build_extension_data_paths(paths, 'tika'))
+        self.assertIsInstance(build_state, dict)
+        self.assertEqual(str(build_state.get('status') or ''), 'resumable')
+        self.assertIn('tika_vector_failure', str(build_state.get('last_error') or ''))
+
+    def test_tika_build_watchdog_writes_diagnostic_report_when_parse_stalls(self) -> None:
+        vault = TEST_ROOT / 'vault_watchdog'
+        vault.mkdir(parents=True, exist_ok=True)
+        source_root = TEST_ROOT / 'tika_watchdog_source'
+        source_root.mkdir(parents=True, exist_ok=True)
+        (source_root / 'guide.html').write_text('<html/>', encoding='utf-8')
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_watchdog'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.tika_config.enabled = True
+        state.tika_config.source_directories = [ExtensionSourceDirectory(path=str(source_root), selected=True, state=ExtensionDirectoryState.ENABLED)]
+        for item in state.tika_config.selected_formats:
+            item.enabled = item.format_id == 'html'
+        ExtensionRegistry().save(paths, state)
+
+        runtime_manager = _FakeTikaRuntimeManager()
+        progress_events: list[dict[str, object]] = []
+        service = TikaExtensionService(config, paths, runtime_manager=runtime_manager)
+
+        def slow_parse(file_path: Path, *, port: int = 9998, timeout: float = 60.0) -> TikaParsedContent:
+            time.sleep(0.12)
+            return self._fake_tika_parse(file_path, port=port, timeout=timeout)
+
+        try:
+            with patch('omniclip_rag.extensions.service.EXTENSION_BUILD_HEARTBEAT_SECONDS', 0.02), \
+                patch('omniclip_rag.extensions.service.EXTENSION_BUILD_WATCHDOG_STALL_SECONDS', 0.05), \
+                patch('omniclip_rag.extensions.service.EXTENSION_BUILD_WATCHDOG_REPEAT_SECONDS', 0.05), \
+                patch('omniclip_rag.extensions.service.parse_file_with_tika', side_effect=slow_parse):
+                report = service.full_rebuild(on_progress=progress_events.append)
+        finally:
+            service.close()
+
+        self.assertGreaterEqual(report.indexed_files, 1)
+        self.assertTrue(any(bool(item.get('watchdog_stalled')) for item in progress_events))
+        diagnostics_dir = build_extension_data_paths(paths, 'tika').logs_dir / 'diagnostics'
+        diagnostics = sorted(diagnostics_dir.glob('tika-build-watchdog-*.json'))
+        self.assertTrue(diagnostics)
 
     def _fake_tika_parse(self, file_path: Path, *, port: int = 9998, timeout: float = 60.0) -> TikaParsedContent:
         del port, timeout

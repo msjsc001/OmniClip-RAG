@@ -1,6 +1,6 @@
 [project]
 name = "omniclip-rag"
-version = "0.4.3"
+version = "0.4.4"
 description = "Local-first desktop RAG for Markdown and Logseq vaults."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -11,6 +11,7 @@ authors = [
 keywords = ["rag", "markdown", "logseq", "sqlite", "lancedb", "desktop"]
 dependencies = [
   "mcp>=1,<2",
+  "pypdf>=5.0.0,<6.0.0",
 ]
 
 [project.urls]

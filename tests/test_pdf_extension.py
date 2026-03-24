@@ -1,10 +1,15 @@
 import shutil
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import omniclip_rag  # noqa: F401
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
+from omniclip_rag.extensions import service as extension_service
+from omniclip_rag.extensions.build_state import read_extension_build_state
 from omniclip_rag.extensions.models import ExtensionDirectoryState, ExtensionIndexState, ExtensionSourceDirectory
 from omniclip_rag.extensions.normalizers.pdf import normalize_pdf_pages
 from omniclip_rag.extensions.registry import ExtensionRegistry, ExtensionRegistryState
@@ -19,6 +24,10 @@ TEST_ROOT = ROOT / '.tmp' / 'test_pdf_extension'
 
 
 class PdfExtensionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        if TEST_ROOT.exists():
+            shutil.rmtree(TEST_ROOT, ignore_errors=True)
+
     def tearDown(self) -> None:
         if TEST_ROOT.exists():
             shutil.rmtree(TEST_ROOT, ignore_errors=True)
@@ -103,6 +112,67 @@ class PdfExtensionTests(unittest.TestCase):
         self.assertEqual(reloaded.snapshot.pdf.index_state, ExtensionIndexState.READY)
         self.assertEqual(reloaded.snapshot.pdf.indexed_document_count, 1)
 
+    def test_pdf_preflight_tolerates_missing_pypdf_metadata_when_module_is_bundled(self) -> None:
+        vault = TEST_ROOT / 'vault_preflight'
+        vault.mkdir(parents=True, exist_ok=True)
+        pdf_root = TEST_ROOT / 'pdf_preflight'
+        pdf_root.mkdir(parents=True, exist_ok=True)
+        write_text_pdf(pdf_root / 'guide.pdf', ['Pdf preflight token'])
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_preflight'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.pdf_config.enabled = True
+        state.pdf_config.source_directories = [
+            ExtensionSourceDirectory(path=str(pdf_root), selected=True, state=ExtensionDirectoryState.ENABLED)
+        ]
+        ExtensionRegistry().save(paths, state)
+
+        service = PdfExtensionService(config, paths)
+        try:
+            with patch(
+                'omniclip_rag.extensions.service.importlib_metadata.version',
+                side_effect=extension_service.importlib_metadata.PackageNotFoundError('pypdf'),
+            ):
+                report = service.preflight()
+        finally:
+            service.close()
+
+        self.assertEqual(report.total_files, 1)
+        self.assertEqual(report.skipped_files, 0)
+        self.assertGreater(report.total_bytes, 0)
+
+    def test_pdf_preflight_emits_inspection_progress_without_extracting_text(self) -> None:
+        vault = TEST_ROOT / 'vault_preflight_progress'
+        vault.mkdir(parents=True, exist_ok=True)
+        pdf_root = TEST_ROOT / 'pdf_preflight_progress'
+        pdf_root.mkdir(parents=True, exist_ok=True)
+        write_text_pdf(pdf_root / 'guide.pdf', ['Pdf preflight progress token'])
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_preflight_progress'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.pdf_config.enabled = True
+        state.pdf_config.source_directories = [
+            ExtensionSourceDirectory(path=str(pdf_root), selected=True, state=ExtensionDirectoryState.ENABLED)
+        ]
+        ExtensionRegistry().save(paths, state)
+
+        progress_events: list[dict[str, object]] = []
+        service = PdfExtensionService(config, paths)
+        try:
+            with patch('omniclip_rag.extensions.service._extract_pdf_pages', side_effect=AssertionError('preflight must stay lightweight')):
+                report = service.preflight(on_progress=progress_events.append)
+        finally:
+            service.close()
+
+        self.assertEqual(report.total_files, 1)
+        self.assertEqual(report.total_pages, 1)
+        stage_sequence = [str(item.get('stage_status') or '') for item in progress_events]
+        self.assertIn('scan_sources', stage_sequence)
+        self.assertIn('inspect_pdf', stage_sequence)
+        self.assertIn('finalizing', stage_sequence)
+
     def test_main_query_broker_returns_pdf_hits_with_page_identity(self) -> None:
         vault = TEST_ROOT / 'vault_query'
         vault.mkdir(parents=True, exist_ok=True)
@@ -145,6 +215,112 @@ class PdfExtensionTests(unittest.TestCase):
         self.assertIn('PDF · guide.pdf · 第 1 页', pdf_hits[0].title)
         self.assertEqual(pdf_hits[0].source_label, 'PDF · guide.pdf · 第 1 页')
         self.assertEqual(pdf_hits[0].anchor, '第 1 页')
+
+    def test_pdf_full_rebuild_cancel_marks_resumable_state(self) -> None:
+        vault = TEST_ROOT / 'vault_cancel'
+        vault.mkdir(parents=True, exist_ok=True)
+        pdf_root = TEST_ROOT / 'pdf_cancel'
+        pdf_root.mkdir(parents=True, exist_ok=True)
+        write_text_pdf(pdf_root / 'guide.pdf', ['Pdf cancel token'])
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_cancel'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.pdf_config.enabled = True
+        state.pdf_config.source_directories = [
+            ExtensionSourceDirectory(path=str(pdf_root), selected=True, state=ExtensionDirectoryState.ENABLED)
+        ]
+        ExtensionRegistry().save(paths, state)
+
+        cancel_event = threading.Event()
+        cancel_event.set()
+        service = PdfExtensionService(config, paths)
+        try:
+            report = service.full_rebuild(cancel_event=cancel_event)
+        finally:
+            service.close()
+
+        self.assertTrue(report.cancelled)
+        self.assertTrue(report.resume_available)
+        reloaded = ExtensionRegistry().load(paths)
+        self.assertEqual(reloaded.snapshot.pdf.index_state, ExtensionIndexState.RESUMABLE)
+        build_state = read_extension_build_state(build_extension_data_paths(paths, 'pdf'))
+        self.assertIsInstance(build_state, dict)
+        self.assertEqual(str(build_state.get('status') or ''), 'resumable')
+
+    def test_pdf_full_rebuild_runtime_failure_marks_resumable_state(self) -> None:
+        vault = TEST_ROOT / 'vault_failure'
+        vault.mkdir(parents=True, exist_ok=True)
+        pdf_root = TEST_ROOT / 'pdf_failure'
+        pdf_root.mkdir(parents=True, exist_ok=True)
+        write_text_pdf(pdf_root / 'guide.pdf', ['Pdf fatal token'])
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_failure'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.pdf_config.enabled = True
+        state.pdf_config.source_directories = [
+            ExtensionSourceDirectory(path=str(pdf_root), selected=True, state=ExtensionDirectoryState.ENABLED)
+        ]
+        ExtensionRegistry().save(paths, state)
+
+        progress_events: list[dict[str, object]] = []
+        service = PdfExtensionService(config, paths)
+        try:
+            with patch.object(service, '_replace_one_pdf', side_effect=RuntimeError('pdf_fatal_failure')):
+                with self.assertRaisesRegex(RuntimeError, 'pdf_fatal_failure'):
+                    service.full_rebuild(on_progress=progress_events.append)
+        finally:
+            service.close()
+
+        reloaded = ExtensionRegistry().load(paths)
+        self.assertEqual(reloaded.snapshot.pdf.index_state, ExtensionIndexState.RESUMABLE)
+        self.assertTrue(reloaded.snapshot.pdf.resume_available)
+        self.assertFalse(reloaded.snapshot.pdf.query_ready)
+        build_state = read_extension_build_state(build_extension_data_paths(paths, 'pdf'))
+        self.assertIsInstance(build_state, dict)
+        self.assertEqual(str(build_state.get('status') or ''), 'resumable')
+        self.assertIn('pdf_fatal_failure', str(build_state.get('last_error') or ''))
+        self.assertTrue(progress_events)
+
+    def test_pdf_build_watchdog_writes_diagnostic_report_when_parse_stalls(self) -> None:
+        vault = TEST_ROOT / 'vault_watchdog'
+        vault.mkdir(parents=True, exist_ok=True)
+        pdf_root = TEST_ROOT / 'pdf_watchdog'
+        pdf_root.mkdir(parents=True, exist_ok=True)
+        write_text_pdf(pdf_root / 'guide.pdf', ['Pdf watchdog token'])
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_watchdog'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.pdf_config.enabled = True
+        state.pdf_config.source_directories = [
+            ExtensionSourceDirectory(path=str(pdf_root), selected=True, state=ExtensionDirectoryState.ENABLED)
+        ]
+        ExtensionRegistry().save(paths, state)
+
+        progress_events: list[dict[str, object]] = []
+        service = PdfExtensionService(config, paths)
+        original_replace = service._replace_one_pdf
+
+        def slow_replace(source_root: Path, pdf_path: Path):
+            time.sleep(0.12)
+            return original_replace(source_root, pdf_path)
+
+        try:
+            with patch('omniclip_rag.extensions.service.EXTENSION_BUILD_HEARTBEAT_SECONDS', 0.02), \
+                patch('omniclip_rag.extensions.service.EXTENSION_BUILD_WATCHDOG_STALL_SECONDS', 0.05), \
+                patch('omniclip_rag.extensions.service.EXTENSION_BUILD_WATCHDOG_REPEAT_SECONDS', 0.05), \
+                patch.object(service, '_replace_one_pdf', side_effect=slow_replace):
+                report = service.full_rebuild(on_progress=progress_events.append)
+        finally:
+            service.close()
+
+        self.assertGreaterEqual(report.indexed_files, 1)
+        self.assertTrue(any(bool(item.get('watchdog_stalled')) for item in progress_events))
+        diagnostics_dir = build_extension_data_paths(paths, 'pdf').logs_dir / 'diagnostics'
+        diagnostics = sorted(diagnostics_dir.glob('pdf-build-watchdog-*.json'))
+        self.assertTrue(diagnostics)
 
 
 def write_text_pdf(path: Path, lines: list[str]) -> None:

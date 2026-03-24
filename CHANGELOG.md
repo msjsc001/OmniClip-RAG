@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## V0.4.4 - 2026-03-24
+
+### Added
+
+- Added [RELEASE_NOTES_v0.4.4](releases/RELEASE_NOTES_v0.4.4.md) for the extension-format hardening and observability release.
+- Added the persistent extension-build control plane around `PDF / Tika`, including dedicated build state, build lease, diagnostics/watchdog records, and the in-repo execution blueprint [扩展建库强化总计划](plans/扩展建库强化总计划.md).
+- Added truthful extension preflight/build activity feedback for slow or single-file jobs, including lightweight PDF inspection, real preflight progress events, busy-bar fallbacks, and elapsed-time surfacing in the Qt shell.
+
+### Changed
+
+- Changed visible app/package/release metadata to `v0.4.4` across the desktop app, MCP line, README badges, MCP setup examples, release notes, and Registry-facing release URLs.
+- Changed extension-format build control so PDF/Tika indexing now reuse a stronger build-control contract with honest progress payloads, cancellation/interruption awareness, resumable state, and explicit `READY/query_ready/vector_ready` truth instead of thin fire-and-forget tasks.
+- Changed PDF preflight from a quasi-build text-extraction path into a lightweight metadata/page inspection path, keeping exact page counts while making preflight substantially faster and more observable.
+
+### Fixed
+
+- Fixed the packaged PDF preflight false negative where frozen EXE builds could report `pypdf` unavailable only because package metadata was missing, even when the parser code itself was present.
+- Fixed extension preflight/build visibility so global PDF/Tika tasks no longer look frozen for long stretches with fake `0%/100%` jumps and no clear current-file activity.
+- Fixed remaining public-doc hygiene by replacing tracked local absolute example paths with neutral install-path examples before the next GitHub push.
+
 ## V0.4.3 - 2026-03-23
 
 ### Added
@@ -540,5 +560,4 @@
 - The current stable default remains `torch + bge-m3`.
 - ONNX remains a future optimization path, not the default production route for `V0.1.0`.
 - CLI remains available for debugging and automation, but GUI is now the primary workflow.
-
 

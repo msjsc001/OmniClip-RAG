@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 _spec_anchor = Path(globals().get('SPECPATH', Path.cwd()))
 ROOT = _spec_anchor.resolve().parent if _spec_anchor.is_file() else _spec_anchor.resolve()
@@ -19,6 +19,13 @@ def _safe_collect_hidden(package: str) -> list[str]:
         return []
 
 
+def _safe_copy_metadata(distribution: str) -> list[tuple[str, str]]:
+    try:
+        return copy_metadata(distribution)
+    except Exception:
+        return []
+
+
 # Why: 纯净主程序只打包 Qt 壳子和业务代码，所有重型 AI/runtime 统一外置到 runtime/。
 datas: list[tuple[str, str]] = [
     (str(ROOT / 'resources' / 'app_icon.ico'), 'resources'),
@@ -26,6 +33,7 @@ datas: list[tuple[str, str]] = [
     (str(ROOT / 'resources' / 'app_icon_32.png'), 'resources'),
     (str(ROOT / 'resources' / 'tika_suffixes_3.2.3.txt'), 'resources'),
 ]
+datas.extend(_safe_copy_metadata('pypdf'))
 
 binaries: list[tuple[str, str]] = []
 hiddenimports = [
@@ -34,6 +42,8 @@ hiddenimports = [
     'omniclip_rag.ui_next_qt.main_window',
     'omniclip_rag.ui_next_qt.config_workspace',
     'omniclip_rag.ui_next_qt.query_workspace',
+    'omniclip_rag.extensions.parsers.pdf',
+    'omniclip_rag.extensions.parsers.tika',
     'PySide6.QtCore',
     'PySide6.QtGui',
     'PySide6.QtWidgets',

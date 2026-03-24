@@ -1560,3 +1560,18 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - `service.query()` 在 `vector_backend` 被关闭时会直接写入 `markdown_vector_backend_disabled` 诊断，而不是静默退回纯字面检索。Why：这类场景的正确解释是“后端被关了”，不是“没命中结果”也不是“缺少向量索引”；查询页必须把根因直接告诉用户。
 - `ConfigWorkspace` 现在会在状态刷新 / 启动状态加载 / 模型下载完成后自动检查：如果本地语义模型已经就绪、runtime 也满足语义执行，但保存配置里还残留 `vector_backend='disabled'`，就会自动把后端切到 `lancedb` 并落盘。Why：用户主动下载了 `BAAI/bge-m3` 却仍然停留在 disabled，多半不是有意关闭语义，而是被旧默认值和旧 UI 误导；这类配置要自动纠偏，而不是继续让用户手动排雷。
 - 自动纠偏后，如果当前工作区已经有 Markdown 普通索引但还没有 LanceDB 表，状态和日志会明确提示“还需要再执行一次全量建库，语义向量索引才会写入”。Why：下载模型只能补齐 runtime / 权重，不能倒推出现有工作区已经有向量表；用户需要知道下一步是“补建语义向量”，不是重复下载模型。
+
+## 2026-03-24 扩展建库强化记忆
+- 扩展格式建库现在正式进入“主线同级控制面、扩展自有数据面”的阶段。`PDF / Tika` 继续保留各自独立 parser、store、vector、runtime 与删除语义，但建库控制面开始对齐主线：全局/行级任务统一走 progress worker、统一 build ID、统一心跳与 watchdog 报告、统一 cancel/resume 状态合同。
+- `omniclip_rag/extensions/build_state.py` 现在负责每条扩展管线自己的 `build_state.json / build_lease.json / diagnostics/`。这些文件必须和稳定的 `extensions_registry.json` 分离：registry 只保存稳定快照，build state 只保存易变的构建期状态。Why：把易变构建状态混进 registry 会让中断恢复、UI 状态和真实索引状态互相污染。
+- 扩展状态机已经从旧的 `disabled / not_built / ready / stale / error` 扩展到 `DISABLED / NOT_BUILT / BUILDING / PAUSED / CANCELLING / INTERRUPTED / RESUMABLE / READY / WATCHING / STALE / ERROR`。Qt 侧不允许再用“猜测”去推断 READY；唯一真相源必须来自扩展服务层和构建状态文件。
+- `READY` 与 `query_ready` 现在是两个不同概念：扩展查询只在 `index_state == READY` 且 `query_ready == true` 时开放；如果扩展索引已经完整但向量层不可用，状态必须诚实显示为 lexical-only，而不是假装整条扩展查询不可用。Why：扩展用户最需要的是“还能不能查”，不是“后端是不是全绿”。
+- v1 扩展恢复策略已经锁死为“文件级保守恢复”：恢复单元只认“单文件 parser 完成 + store durable write 完成”，`vector` 阶段在恢复时一律从头重建；当前版本不做 chunk 级恢复，也不做部分 vector 续跑。Why：这比复杂 resume 更保守，但一致性风险远低。
+- 当前版本明确不做扩展原子蓝绿切换；full rebuild 或异常中断期间，扩展查询直接不可用，不保留旧扩展索引继续服务。Why：扩展侧当前最大的痛点是解析链、可见性、取消与恢复，不是无缝切换。先把“真实可用”做稳，比追求切换优雅更重要。
+- `PDF` 打包链已经把 `omniclip_rag.extensions.parsers.pdf` 显式加入 PyInstaller hidden imports；`pypdf` 也必须作为显式依赖存在于项目依赖声明中。Why：扩展 parser 是动态导入链，源码态可用不代表 EXE 态可用；这个坑已经真实踩过一次。
+- 2026-03-24 补充：Frozen EXE 里的 `pypdf` 代码即使已打进去，也可能缺少 `dist-info`，导致 `importlib.metadata.version('pypdf')` 在 PDF 预检阶段误报 `PackageNotFoundError`。`extensions/service.py` 现在必须遵守“模块可导入优先、版本元数据缺失时回退到模块 `__version__` 或空字符串”的合同，不能再把“元数据缺失”误判成“PDF parser 不可用”；`OmniClipRAG.spec` 也同步补带 `copy_metadata('pypdf')`，尽量让打包态诊断信息保持完整。Why：这次真实故障不是 PDF 文件坏，而是 frozen 打包态的版本探测写得过严。
+- 2026-03-24 再补充：`PDF preflight` 必须保持“轻量预检”合同，只允许做文件可读性、文件大小与精确页数读取，禁止再为了算页数去跑逐页 `extract_text()`。Why：预检的职责是快速确认“能不能做、多大范围”，不是提前半跑一遍正文解析；单文件 PDF 场景下全文抽取会把预检做得像卡死。
+- 扩展预检/建库的 UI 现在必须区分“真的有可靠分母的确定性进度”和“任务还活着、但没有细粒度分母”的阶段；`inspect_pdf / inspect_tika / parse_pdf / parse_tika` 在单文件或无可靠分母场景下要用 busy/indeterminate + 已用时提示，而不是硬显示误导性的假百分比。Why：单文件 PDF/Tika 最容易让用户误以为任务停住，真正需要的是活性反馈，而不是精度虚假的进度条。
+- Windows 下扩展 lease/build-state 的 JSON 写入必须容忍并发与瞬时共享冲突。当前实现已经增加写入锁、短重试，以及“lease 心跳写入失败只降级、不炸整轮建库”的保护。Why：lease 心跳是诊断与互斥辅助，不值得因为一次写盘抖动把整轮扩展建库打成失败。
+- Frozen 验证时，`desktop.py --selfcheck-query` 目前固定只查 `allowed_families=('markdown',)`；它适合验证打包后的 EXE 能否正常执行查询自检，但**不适合**拿来判断扩展命中链是否工作。Why：这条入口本来是 Markdown 查询诊断，不是扩展查询验收器；以后验证扩展 frozen 行为时不要被“自检能跑但没扩展命中”误导。
+- 当前 PyInstaller `warn-OmniClipRAG.txt` 里仍可能出现 `pypdf` 的可选 `Crypto.*` 提供者告警，以及 `modelscope.hub*` 的条件导入告警；只要没有重新出现 `omniclip_rag.extensions.parsers.pdf / tika` 缺失，就不应把这些可选告警误判成扩展 parser 漏包回归。Why：扩展建库强化这轮真正要封死的是 parser 漏包与依赖缺失，不是顺手清零所有条件导入告警。
