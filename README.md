@@ -236,6 +236,36 @@ Once the MCP server is connected, you can simply speak to the AI in natural lang
 - `"Search only PDF results in OmniClip for 'attention mechanism'."`
 - `"Find notes related to 'my thinking model' in OmniClip and show me the most relevant 5 snippets with sources."`
 
+### Recommended Ongoing Collaboration Prompts
+
+If you want an AI to behave more like it has a built-in RAG habit instead of waiting for you to remind it every time, the following two prompt templates work well.
+
+#### For AI Clients With MCP Connected
+
+Use this when the AI can call `omniclip.search` by itself:
+
+```text
+From now on, whenever we discuss a topic, please first search my local knowledge base for information relevant to the current question, and then talk to me based on both the search results and my knowledge base as the boundary of what I know, even if I do not always remember that knowledge clearly myself.
+
+Because my knowledge base may contain hundreds of thousands of chunks, please do not over-expand the search beyond what is needed for the current topic.
+
+If you need more of my background later in the conversation, keep using the same pattern: search my local knowledge base first, then continue the discussion based on the relevant results.
+```
+
+#### For Web AI Without MCP
+
+Use this when you are talking to a normal web AI that cannot call MCP directly and must ask you for search terms:
+
+```text
+From now on, whenever we discuss a topic, please first decide what information you need from my local knowledge base, then ask me for the exact keywords or phrases you want me to search. I will manually search with my local RAG tool and send the retrieved snippets back to you.
+
+Because this web chat does not have MCP access, please behave as if you do: ask me for the search terms you need, wait for the retrieved snippets, and then continue the discussion based on both those snippets and my knowledge base as the boundary of what I know, even if I do not always remember that knowledge clearly myself.
+
+Because my knowledge base may contain hundreds of thousands of chunks, please do not over-expand the search beyond what is needed for the current topic.
+
+If you need more of my background later in the conversation, keep using the same pattern.
+```
+
 </details>
 
 <br/>
