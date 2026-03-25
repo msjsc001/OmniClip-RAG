@@ -56,7 +56,14 @@ class VectorIndex(Protocol):
         reset_index: bool = True,
     ) -> None: ...
 
-    def upsert(self, documents: list[dict[str, str]]) -> None: ...
+    def upsert(
+        self,
+        documents: list[dict[str, str]],
+        *,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None: ...
 
     def delete(self, chunk_ids: list[str]) -> None: ...
 
@@ -160,7 +167,14 @@ class NullVectorIndex:
     ) -> None:
         return None
 
-    def upsert(self, documents: list[dict[str, str]]) -> None:
+    def upsert(
+        self,
+        documents: list[dict[str, str]],
+        *,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         return None
 
     def delete(self, chunk_ids: list[str]) -> None:
@@ -219,7 +233,14 @@ class MissingRuntimeVectorIndex:
     ) -> None:
         self._raise_runtime()
 
-    def upsert(self, documents: list[dict[str, str]]) -> None:
+    def upsert(
+        self,
+        documents: list[dict[str, str]],
+        *,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         self._raise_runtime()
 
     def delete(self, chunk_ids: list[str]) -> None:
@@ -755,13 +776,29 @@ class LanceDbVectorIndex:
             drain_write_completions()
             _release_vector_memory(clear_cuda=resolved_device == 'cuda')
 
-    def upsert(self, documents: list[dict[str, str]]) -> None:
+    def upsert(
+        self,
+        documents: list[dict[str, str]],
+        *,
+        on_progress: Callable[[dict[str, object]], None] | None = None,
+        pause_event: threading.Event | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         if not documents:
             return
-        rows = self._embed_documents(documents)
-        self._ensure_table(len(rows[0]["vector"]))
-        self.delete([row["chunk_id"] for row in rows])
-        self._table().add(rows)
+        chunk_ids = [str(item.get("chunk_id", "")).strip() for item in documents if str(item.get("chunk_id", "")).strip()]
+        if chunk_ids:
+            self.delete(chunk_ids)
+        # Reuse the rebuild pipeline so incremental upserts inherit the same
+        # batching, watchdog, and cooperative cancel behavior as full rebuilds.
+        self.rebuild(
+            documents,
+            total=len(documents),
+            on_progress=on_progress,
+            pause_event=pause_event,
+            cancel_event=cancel_event,
+            reset_index=False,
+        )
 
     def delete(self, chunk_ids: list[str]) -> None:
         if not chunk_ids or not self._table_exists():
@@ -3339,7 +3376,6 @@ def _wait_for_controls(pause_event: threading.Event | None, cancel_event: thread
         if pause_event is None or not pause_event.is_set():
             return
         time.sleep(0.12)
-
 
 
 

@@ -8,6 +8,7 @@ from unittest.mock import patch
 import omniclip_rag  # noqa: F401
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
+from omniclip_rag.errors import BuildCancelledError
 from omniclip_rag.extensions import service as extension_service
 from omniclip_rag.extensions.build_state import read_extension_build_state
 from omniclip_rag.extensions.models import ExtensionDirectoryState, ExtensionIndexState, ExtensionSourceDirectory
@@ -16,11 +17,58 @@ from omniclip_rag.extensions.registry import ExtensionRegistry, ExtensionRegistr
 from omniclip_rag.extensions.service import PdfExtensionService
 from omniclip_rag.extensions.paths import build_extension_data_paths
 from omniclip_rag.extensions.parsers.pdf import parse_pdf_file
+from omniclip_rag.models import ChunkRecord, ParsedFile
 from omniclip_rag.service import OmniClipService
 from omniclip_rag.storage import MetadataStore
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_ROOT = ROOT / '.tmp' / 'test_pdf_extension'
+
+
+class _FakeProgressVectorIndex:
+    def __init__(self) -> None:
+        self.rebuild_doc_counts: list[int] = []
+        self.upsert_doc_counts: list[int] = []
+        self.deleted_batches: list[list[str]] = []
+
+    def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None, progress_offset=0, reset_index=True):
+        del total, pause_event, progress_offset, reset_index
+        docs = list(documents)
+        self.rebuild_doc_counts.append(len(docs))
+        if cancel_event is not None and cancel_event.is_set():
+            raise BuildCancelledError('cancelled')
+        if on_progress is not None and docs:
+            on_progress({'current': len(docs), 'total': len(docs), 'written_count': len(docs), 'eta_seconds': 0})
+
+    def upsert(self, documents, *, on_progress=None, pause_event=None, cancel_event=None):
+        del pause_event
+        docs = list(documents)
+        self.upsert_doc_counts.append(len(docs))
+        if not docs:
+            return
+        halfway = max(len(docs) // 2, 1)
+        if on_progress is not None:
+            on_progress({'current': halfway, 'total': len(docs), 'written_count': halfway, 'eta_seconds': 2})
+        if cancel_event is not None and cancel_event.is_set():
+            raise BuildCancelledError('cancelled')
+        if on_progress is not None:
+            on_progress({'current': len(docs), 'total': len(docs), 'written_count': len(docs), 'eta_seconds': 0})
+
+    def delete(self, chunk_ids):
+        self.deleted_batches.append(list(chunk_ids))
+
+    def search(self, query_text, limit):
+        del query_text, limit
+        return []
+
+    def warmup(self):
+        return {}
+
+    def status(self):
+        return {'table_ready': True}
+
+    def reset(self):
+        return None
 
 
 class PdfExtensionTests(unittest.TestCase):
@@ -173,6 +221,80 @@ class PdfExtensionTests(unittest.TestCase):
         self.assertIn('inspect_pdf', stage_sequence)
         self.assertIn('finalizing', stage_sequence)
 
+    def test_pdf_scan_once_vector_upsert_emits_progress_after_92_percent(self) -> None:
+        vault = TEST_ROOT / 'vault_scan_progress'
+        vault.mkdir(parents=True, exist_ok=True)
+        pdf_root = TEST_ROOT / 'pdf_scan_progress'
+        pdf_root.mkdir(parents=True, exist_ok=True)
+        pdf_path = pdf_root / 'guide.pdf'
+        write_text_pdf(pdf_path, ['Pdf progress token v1'])
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_scan_progress'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.pdf_config.enabled = True
+        state.pdf_config.source_directories = [
+            ExtensionSourceDirectory(path=str(pdf_root), selected=True, state=ExtensionDirectoryState.ENABLED)
+        ]
+        ExtensionRegistry().save(paths, state)
+
+        fake_vector_index = _FakeProgressVectorIndex()
+        service = PdfExtensionService(config, paths)
+        service._vector_enabled = True
+        service.vector_index = fake_vector_index
+        try:
+            service.full_rebuild()
+            time.sleep(0.02)
+            write_text_pdf(pdf_path, ['Pdf progress token v2'])
+            progress_events: list[dict[str, object]] = []
+            report = service.scan_once(on_progress=progress_events.append)
+        finally:
+            service.close()
+
+        self.assertFalse(report.cancelled)
+        self.assertTrue(fake_vector_index.upsert_doc_counts)
+        write_vector_events = [item for item in progress_events if str(item.get('stage_status') or '') == 'write_vector']
+        self.assertTrue(write_vector_events)
+        self.assertTrue(any(float(item.get('overall_percent') or 0.0) > 92.0 for item in write_vector_events))
+
+    def test_pdf_full_rebuild_regroups_oversized_text_carrier_and_writes_issue_log(self) -> None:
+        vault = TEST_ROOT / 'vault_oversized'
+        vault.mkdir(parents=True, exist_ok=True)
+        pdf_root = TEST_ROOT / 'pdf_oversized'
+        pdf_root.mkdir(parents=True, exist_ok=True)
+        pdf_path = pdf_root / 'huge.pdf'
+        pdf_path.write_bytes(b'%PDF-oversized-placeholder')
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_oversized'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.pdf_config.enabled = True
+        state.pdf_config.source_directories = [
+            ExtensionSourceDirectory(path=str(pdf_root), selected=True, state=ExtensionDirectoryState.ENABLED)
+        ]
+        ExtensionRegistry().save(paths, state)
+
+        service = PdfExtensionService(config, paths)
+        try:
+            with patch(
+                'omniclip_rag.extensions.service._parse_pdf_file',
+                return_value=build_oversized_parsed_file(pdf_root, pdf_path, kind='pdf'),
+            ):
+                report = service.full_rebuild()
+                manifest = service.store.fetch_file_manifest()
+        finally:
+            service.close()
+
+        self.assertEqual(report.indexed_files, 1)
+        self.assertEqual(report.skipped_files, 0)
+        self.assertEqual(report.regrouped_files, 1)
+        self.assertTrue(report.issue_log_path)
+        self.assertIn('huge.pdf', manifest)
+        self.assertLess(report.indexed_chunks, 5501)
+        issue_lines = Path(report.issue_log_path).read_text(encoding='utf-8').splitlines()
+        self.assertTrue(issue_lines)
+        self.assertIn('regrouped_oversized_text_carrier', issue_lines[0])
+
     def test_main_query_broker_returns_pdf_hits_with_page_identity(self) -> None:
         vault = TEST_ROOT / 'vault_query'
         vault.mkdir(parents=True, exist_ok=True)
@@ -303,9 +425,9 @@ class PdfExtensionTests(unittest.TestCase):
         service = PdfExtensionService(config, paths)
         original_replace = service._replace_one_pdf
 
-        def slow_replace(source_root: Path, pdf_path: Path):
+        def slow_replace(source_root: Path, pdf_path: Path, *, build_context=None):
             time.sleep(0.12)
-            return original_replace(source_root, pdf_path)
+            return original_replace(source_root, pdf_path, build_context=build_context)
 
         try:
             with patch('omniclip_rag.extensions.service.EXTENSION_BUILD_HEARTBEAT_SECONDS', 0.02), \
@@ -326,6 +448,47 @@ class PdfExtensionTests(unittest.TestCase):
 def write_text_pdf(path: Path, lines: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(build_text_pdf(lines))
+
+
+def build_oversized_parsed_file(source_root: Path, absolute_path: Path, *, kind: str) -> ParsedFile:
+    source_root = source_root.resolve()
+    absolute_path = absolute_path.resolve()
+    stat = absolute_path.stat()
+    relative_path = str(absolute_path.relative_to(source_root)).replace('\\', '/')
+    chunks: list[ChunkRecord] = []
+    for index in range(5501):
+        page_no = (index // 80) + 1
+        text = f'第{index + 1}段中文正文。'
+        chunks.append(
+            ChunkRecord(
+                chunk_id=f'{relative_path}::pdf::{index + 1}',
+                source_path=relative_path,
+                kind=kind,
+                block_id=None,
+                parent_chunk_id=None,
+                title=absolute_path.name,
+                anchor=f'第 {page_no} 页',
+                raw_text=text,
+                properties={'page_no': str(page_no)},
+                refs=[],
+                position=index,
+                depth=0,
+                line_start=page_no,
+                line_end=page_no,
+            )
+        )
+    return ParsedFile(
+        vault_root=source_root,
+        absolute_path=absolute_path,
+        relative_path=relative_path,
+        title=absolute_path.name,
+        kind=kind,
+        page_properties={},
+        chunks=chunks,
+        content_hash='oversized-pdf',
+        mtime=float(stat.st_mtime),
+        size=int(stat.st_size),
+    )
 
 
 def build_text_pdf(lines: list[str]) -> bytes:

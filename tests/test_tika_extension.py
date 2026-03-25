@@ -10,7 +10,9 @@ from urllib.error import HTTPError
 
 import omniclip_rag  # noqa: F401
 
+from omniclip_rag.extensions import service as extension_service
 from omniclip_rag.config import AppConfig, ensure_data_paths
+from omniclip_rag.errors import BuildCancelledError
 from omniclip_rag.extensions.build_state import read_extension_build_state
 from omniclip_rag.extensions.models import ExtensionDirectoryState, ExtensionIndexState, ExtensionSourceDirectory, TikaRuntimeStatus
 from omniclip_rag.extensions.normalizers.tika_output import normalize_tika_content, normalize_tika_xhtml
@@ -20,6 +22,7 @@ from omniclip_rag.extensions.service import TikaExtensionService
 from omniclip_rag.service import OmniClipService
 from omniclip_rag.extensions.watch import ExtensionWatchService
 from omniclip_rag.extensions.paths import build_extension_data_paths
+from omniclip_rag.models import ChunkRecord, ParsedFile
 from omniclip_rag.storage import MetadataStore
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +51,63 @@ class _FakeScanService:
 
     def close(self):
         return None
+
+
+class _FakeProgressVectorIndex:
+    def __init__(self) -> None:
+        self.rebuild_doc_counts: list[int] = []
+        self.upsert_doc_counts: list[int] = []
+        self.deleted_batches: list[list[str]] = []
+
+    def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None, progress_offset=0, reset_index=True):
+        del total, pause_event, progress_offset, reset_index
+        docs = list(documents)
+        self.rebuild_doc_counts.append(len(docs))
+        if cancel_event is not None and cancel_event.is_set():
+            raise BuildCancelledError('cancelled')
+        if on_progress is not None and docs:
+            on_progress({'current': len(docs), 'total': len(docs), 'written_count': len(docs), 'eta_seconds': 0})
+
+    def upsert(self, documents, *, on_progress=None, pause_event=None, cancel_event=None):
+        del pause_event
+        docs = list(documents)
+        self.upsert_doc_counts.append(len(docs))
+        if not docs:
+            return
+        halfway = max(len(docs) // 2, 1)
+        if on_progress is not None:
+            on_progress({'current': halfway, 'total': len(docs), 'written_count': halfway, 'eta_seconds': 2})
+        if cancel_event is not None and cancel_event.is_set():
+            raise BuildCancelledError('cancelled')
+        if on_progress is not None:
+            on_progress({'current': len(docs), 'total': len(docs), 'written_count': len(docs), 'eta_seconds': 0})
+
+    def delete(self, chunk_ids):
+        self.deleted_batches.append(list(chunk_ids))
+
+    def search(self, query_text, limit):
+        del query_text, limit
+        return []
+
+    def warmup(self):
+        return {}
+
+    def status(self):
+        return {'table_ready': True}
+
+    def reset(self):
+        return None
+
+
+class _FakeCancellingVectorIndex(_FakeProgressVectorIndex):
+    def upsert(self, documents, *, on_progress=None, pause_event=None, cancel_event=None):
+        del pause_event, cancel_event
+        docs = list(documents)
+        self.upsert_doc_counts.append(len(docs))
+        if docs and on_progress is not None:
+            halfway = max(len(docs) // 2, 1)
+            on_progress({'current': halfway, 'total': len(docs), 'written_count': halfway, 'eta_seconds': 2})
+        raise BuildCancelledError('cancelled')
 
 
 class TikaExtensionTests(unittest.TestCase):
@@ -271,6 +331,198 @@ class TikaExtensionTests(unittest.TestCase):
         self.assertEqual(report.indexed_files, 1)
         self.assertIn(str(html_path.resolve()), manifest)
         self.assertNotIn(str(docx_path.resolve()), manifest)
+
+    def test_tika_scan_once_vector_upsert_emits_progress_after_92_percent(self) -> None:
+        vault = TEST_ROOT / 'vault_scan_progress'
+        vault.mkdir(parents=True, exist_ok=True)
+        source_root = TEST_ROOT / 'tika_scan_progress_source'
+        source_root.mkdir(parents=True, exist_ok=True)
+        html_path = source_root / 'guide.html'
+        html_path.write_text('v1', encoding='utf-8')
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_scan_progress'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.tika_config.enabled = True
+        state.tika_config.source_directories = [ExtensionSourceDirectory(path=str(source_root), selected=True, state=ExtensionDirectoryState.ENABLED)]
+        for item in state.tika_config.selected_formats:
+            item.enabled = item.format_id == 'html'
+        ExtensionRegistry().save(paths, state)
+
+        runtime_manager = _FakeTikaRuntimeManager()
+        fake_vector_index = _FakeProgressVectorIndex()
+        service = TikaExtensionService(config, paths, runtime_manager=runtime_manager)
+        service._vector_enabled = True
+        service.vector_index = fake_vector_index
+        try:
+            with patch('omniclip_rag.extensions.service.parse_file_with_tika', side_effect=self._fake_tika_parse):
+                service.full_rebuild()
+            time.sleep(0.02)
+            html_path.write_text('v2-updated', encoding='utf-8')
+            progress_events: list[dict[str, object]] = []
+            with patch('omniclip_rag.extensions.service.parse_file_with_tika', side_effect=self._fake_tika_parse):
+                report = service.scan_once(on_progress=progress_events.append)
+        finally:
+            service.close()
+
+        self.assertFalse(report.cancelled)
+        self.assertTrue(fake_vector_index.upsert_doc_counts)
+        write_vector_events = [item for item in progress_events if str(item.get('stage_status') or '') == 'write_vector']
+        self.assertTrue(write_vector_events)
+        self.assertTrue(any(float(item.get('overall_percent') or 0.0) > 92.0 for item in write_vector_events))
+
+    def test_tika_scan_once_cancel_during_vector_upsert_marks_interrupted(self) -> None:
+        vault = TEST_ROOT / 'vault_scan_cancel'
+        vault.mkdir(parents=True, exist_ok=True)
+        source_root = TEST_ROOT / 'tika_scan_cancel_source'
+        source_root.mkdir(parents=True, exist_ok=True)
+        html_path = source_root / 'guide.html'
+        html_path.write_text('v1', encoding='utf-8')
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_scan_cancel'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.tika_config.enabled = True
+        state.tika_config.source_directories = [ExtensionSourceDirectory(path=str(source_root), selected=True, state=ExtensionDirectoryState.ENABLED)]
+        for item in state.tika_config.selected_formats:
+            item.enabled = item.format_id == 'html'
+        ExtensionRegistry().save(paths, state)
+
+        runtime_manager = _FakeTikaRuntimeManager()
+        fake_vector_index = _FakeCancellingVectorIndex()
+        service = TikaExtensionService(config, paths, runtime_manager=runtime_manager)
+        service._vector_enabled = True
+        service.vector_index = fake_vector_index
+        try:
+            with patch('omniclip_rag.extensions.service.parse_file_with_tika', side_effect=self._fake_tika_parse):
+                service.full_rebuild()
+            time.sleep(0.02)
+            html_path.write_text('v2-updated', encoding='utf-8')
+            progress_events: list[dict[str, object]] = []
+            with patch('omniclip_rag.extensions.service.parse_file_with_tika', side_effect=self._fake_tika_parse):
+                report = service.scan_once(on_progress=progress_events.append)
+        finally:
+            service.close()
+
+        self.assertTrue(report.cancelled)
+        self.assertFalse(report.resume_available)
+        write_vector_events = [item for item in progress_events if str(item.get('stage_status') or '') == 'write_vector']
+        self.assertTrue(write_vector_events)
+        reloaded = ExtensionRegistry().load(paths)
+        self.assertEqual(reloaded.snapshot.tika.index_state, ExtensionIndexState.INTERRUPTED)
+        self.assertFalse(reloaded.snapshot.tika.query_ready)
+        build_state = read_extension_build_state(build_extension_data_paths(paths, 'tika'))
+        self.assertIsInstance(build_state, dict)
+        self.assertEqual(str(build_state.get('phase') or ''), 'write_vector')
+
+    def test_tika_full_rebuild_regroups_oversized_text_carrier_and_logs_issue(self) -> None:
+        vault = TEST_ROOT / 'vault_oversized_text'
+        vault.mkdir(parents=True, exist_ok=True)
+        source_root = TEST_ROOT / 'tika_oversized_text_source'
+        source_root.mkdir(parents=True, exist_ok=True)
+        docx_path = source_root / 'book.docx'
+        docx_path.write_bytes(b'docx-oversized')
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_oversized_text'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.tika_config.enabled = True
+        state.tika_config.source_directories = [ExtensionSourceDirectory(path=str(source_root), selected=True, state=ExtensionDirectoryState.ENABLED)]
+        for item in state.tika_config.selected_formats:
+            item.enabled = item.format_id == 'docx'
+        ExtensionRegistry().save(paths, state)
+
+        runtime_manager = _FakeTikaRuntimeManager()
+        service = TikaExtensionService(config, paths, runtime_manager=runtime_manager)
+        oversized = build_oversized_tika_parsed_file(source_root, docx_path, format_id='docx')
+        try:
+            with patch('omniclip_rag.extensions.service.parse_file_with_tika', return_value=TikaParsedContent(content='', content_type='text/plain', strategy='text_plain', metadata=None)), \
+                patch('omniclip_rag.extensions.service._parse_tika_file', return_value=oversized):
+                report = service.full_rebuild()
+        finally:
+            service.close()
+
+        self.assertEqual(report.indexed_files, 1)
+        self.assertEqual(report.skipped_files, 0)
+        self.assertEqual(report.regrouped_files, 1)
+        self.assertTrue(report.issue_log_path)
+        self.assertLess(report.indexed_chunks, 5501)
+        issue_lines = Path(report.issue_log_path).read_text(encoding='utf-8').splitlines()
+        self.assertTrue(issue_lines)
+        self.assertIn('regrouped_oversized_text_carrier', issue_lines[0])
+
+    def test_tika_full_rebuild_skips_oversized_structured_file_and_logs_issue(self) -> None:
+        vault = TEST_ROOT / 'vault_oversized_structured'
+        vault.mkdir(parents=True, exist_ok=True)
+        source_root = TEST_ROOT / 'tika_oversized_structured_source'
+        source_root.mkdir(parents=True, exist_ok=True)
+        html_path = source_root / 'page.mhtml'
+        html_path.write_text('<html/>', encoding='utf-8')
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_oversized_structured'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        state = ExtensionRegistryState()
+        state.tika_config.enabled = True
+        state.tika_config.source_directories = [ExtensionSourceDirectory(path=str(source_root), selected=True, state=ExtensionDirectoryState.ENABLED)]
+        for item in state.tika_config.selected_formats:
+            item.enabled = item.format_id == 'mhtml'
+        ExtensionRegistry().save(paths, state)
+
+        runtime_manager = _FakeTikaRuntimeManager()
+        service = TikaExtensionService(config, paths, runtime_manager=runtime_manager)
+        oversized = build_oversized_tika_parsed_file(source_root, html_path, format_id='mhtml')
+        try:
+            with patch('omniclip_rag.extensions.service.parse_file_with_tika', return_value=TikaParsedContent(content='', content_type='text/plain', strategy='text_plain', metadata=None)), \
+                patch('omniclip_rag.extensions.service._parse_tika_file', return_value=oversized):
+                report = service.full_rebuild()
+        finally:
+            service.close()
+
+        self.assertEqual(report.indexed_files, 0)
+        self.assertEqual(report.skipped_files, 1)
+        self.assertEqual(report.expected_skips, 1)
+        self.assertEqual(report.oversized_skipped_files, 1)
+        self.assertTrue(report.issue_log_path)
+        issue_lines = Path(report.issue_log_path).read_text(encoding='utf-8').splitlines()
+        self.assertTrue(issue_lines)
+        self.assertIn('skipped_oversized_structured', issue_lines[0])
+
+    def test_tika_unknown_format_oversized_defaults_to_structured_skip(self) -> None:
+        vault = TEST_ROOT / 'vault_unknown_oversized'
+        vault.mkdir(parents=True, exist_ok=True)
+        source_root = TEST_ROOT / 'tika_unknown_oversized_source'
+        source_root.mkdir(parents=True, exist_ok=True)
+        weird_path = source_root / 'archive.weird'
+        weird_path.write_text('weird', encoding='utf-8')
+
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_unknown_oversized'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root), vector_backend='disabled', reranker_enabled=False)
+        runtime_manager = _FakeTikaRuntimeManager()
+        service = TikaExtensionService(config, paths, runtime_manager=runtime_manager)
+        build_context = extension_service.ExtensionBuildContext(
+            pipeline='tika',
+            build_id='tika-unknown-format',
+            task_kind=extension_service.ExtensionTaskKind.FULL_REBUILD,
+            manifest_signature='manifest',
+            parser_schema_version='schema',
+            source_roots=(str(source_root.resolve()),),
+            enabled_formats=('weird',),
+            issue_log=extension_service._make_issue_log(build_extension_data_paths(paths, 'tika'), pipeline='tika', build_id='tika-unknown-format'),
+        )
+        oversized = build_oversized_tika_parsed_file(source_root, weird_path, format_id='weird')
+        try:
+            with patch('omniclip_rag.extensions.service.parse_file_with_tika', return_value=TikaParsedContent(content='', content_type='text/plain', strategy='text_plain', metadata=None)), \
+                patch('omniclip_rag.extensions.service._parse_tika_file', return_value=oversized):
+                outcome = service._replace_one_tika_file(source_root, weird_path, 'weird', build_context=build_context)
+        finally:
+            service.close()
+
+        self.assertEqual(outcome.status, 'expected_skip')
+        self.assertEqual(outcome.issue_type, 'skipped_oversized_structured')
+        issue_lines = build_context.issue_log.path.read_text(encoding='utf-8').splitlines()
+        self.assertTrue(issue_lines)
+        self.assertIn('"format_id": "weird"', issue_lines[0])
+        self.assertIn('skipped_oversized_structured', issue_lines[0])
 
     def test_main_query_can_return_tika_only_hits_with_subtype_identity(self) -> None:
         vault = TEST_ROOT / 'vault_query'
@@ -538,6 +790,47 @@ class TikaExtensionTests(unittest.TestCase):
             strategy='text_plain',
             metadata=None,
         )
+
+
+def build_oversized_tika_parsed_file(source_root: Path, absolute_path: Path, *, format_id: str) -> ParsedFile:
+    source_root = source_root.resolve()
+    absolute_path = absolute_path.resolve()
+    stat = absolute_path.stat()
+    relative_path = str(absolute_path.relative_to(source_root)).replace('\\', '/')
+    chunks: list[ChunkRecord] = []
+    for index in range(5501):
+        anchor = 'Main Section' if index < 2750 else 'Appendix'
+        text = f'第{index + 1}段中文正文。'
+        chunks.append(
+            ChunkRecord(
+                chunk_id=f'{relative_path}::tika::{index + 1}',
+                source_path=relative_path,
+                kind=format_id,
+                block_id=None,
+                parent_chunk_id=None,
+                title=absolute_path.name,
+                anchor=anchor,
+                raw_text=text,
+                properties={'format_id': format_id},
+                refs=[],
+                position=index,
+                depth=0,
+                line_start=index + 1,
+                line_end=index + 1,
+            )
+        )
+    return ParsedFile(
+        vault_root=source_root,
+        absolute_path=absolute_path,
+        relative_path=relative_path,
+        title=absolute_path.name,
+        kind=format_id,
+        page_properties={'format_id': format_id},
+        chunks=chunks,
+        content_hash=f'oversized-{format_id}',
+        mtime=float(stat.st_mtime),
+        size=int(stat.st_size),
+    )
 
 
 if __name__ == '__main__':

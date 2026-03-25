@@ -4,6 +4,7 @@ import threading
 import unittest
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -279,6 +280,26 @@ class ExtensionSkeletonTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_extension_issue_summary_is_appended_when_report_has_issue_log(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_issue_summary'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            report = SimpleNamespace(
+                regrouped_files=2,
+                oversized_skipped_files=3,
+                issue_log_path=r'D:\tmp\issues.jsonl',
+            )
+            message = workspace._append_extension_issue_summary('建库完成', report)
+            self.assertIn('2', message)
+            self.assertIn('3', message)
+            self.assertIn(r'D:\tmp\issues.jsonl', message)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_extension_source_progress_includes_recent_issue_hint(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -329,6 +350,20 @@ class ExtensionSkeletonTests(unittest.TestCase):
 
     def test_extensions_subtitle_no_longer_mentions_ui_only_phase(self) -> None:
         self.assertNotIn('本阶段只接入 UI 与配置管理', text('zh-CN', 'extensions_subtitle'))
+
+    def test_extension_clear_build_state_button_has_plain_tooltip(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_clear_build_state_tooltip'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            tooltip_text = workspace.ext_clear_resume_button.toolTip()
+            self.assertIn('不会删除原始文件', tooltip_text)
+            self.assertIn('从头重来', tooltip_text)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
 
     def test_extension_global_preflight_dispatches_selected_pipeline(self) -> None:
         app = get_app()

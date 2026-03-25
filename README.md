@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-v0.4.4-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-quick-start--workflow) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-core-philosophy--priceless-boundaries) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500?style=flat-square)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.5-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-quick-start--workflow) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-core-philosophy--priceless-boundaries) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500?style=flat-square)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md) | [MCP Setup](MCP_SETUP.md) | [Website](https://msjsc001.github.io/OmniClip-RAG/)
 
@@ -40,7 +40,7 @@
 > **TL;DR: MCP Quickstart**
 >
 > OmniClip RAG now ships a **read-only local-first MCP server** for searching private Markdown, PDF, and Tika-backed knowledge bases on Windows.
-> Download `OmniClipRAG-MCP-v0.4.4-win64.zip` for manual `stdio` setup or `omniclip-rag-mcp-win-x64-v0.4.4.mcpb` for the official MCP Registry / MCPB path.
+> Download `OmniClipRAG-MCP-v0.4.5-win64.zip` for manual `stdio` setup or `omniclip-rag-mcp-win-x64-v0.4.5.mcpb` for the official MCP Registry / MCPB path.
 > Point your MCP client at `OmniClipRAG-MCP.exe`, then ask the AI to call `omniclip.status` first and `omniclip.search` for the actual retrieval flow. Full details: [MCP_SETUP.md](MCP_SETUP.md).
 
 ---
@@ -175,9 +175,9 @@ The foundation is built as a single portable green EXE. No complicated scripting
 
 `OmniClip RAG MCP Server` lets MCP-capable AI clients search your local knowledge base through the same read-only retrieval core that powers the desktop app.
 
-From `v0.4.4`, the MCP line is packaged in two parallel distribution forms:
-- `OmniClipRAG-MCP-v0.4.4-win64.zip` for manual file-based setup
-- `omniclip-rag-mcp-win-x64-v0.4.4.mcpb` for the official MCP Registry and MCPB-aware clients
+From `v0.4.5`, the MCP line is packaged in two parallel distribution forms:
+- `OmniClipRAG-MCP-v0.4.5-win64.zip` for manual file-based setup
+- `omniclip-rag-mcp-win-x64-v0.4.5.mcpb` for the official MCP Registry and MCPB-aware clients
 
 > [!CAUTION]
 > **What You Need First**
@@ -193,7 +193,7 @@ From `v0.4.4`, the MCP line is packaged in two parallel distribution forms:
 
 Since `v0.4.1`, OmniClip RAG keeps a first-class MCP Registry / MCPB line, so clients that support Registry discovery or MCPB installation can use that path first.
 - If your client supports Registry discovery, look for: `io.github.msjsc001/omniclip-rag-mcp`
-- If your client supports MCPB installation, prefer the Release asset: `omniclip-rag-mcp-win-x64-v0.4.4.mcpb`
+- If your client supports MCPB installation, prefer the Release asset: `omniclip-rag-mcp-win-x64-v0.4.5.mcpb`
 
 For the full Registry/MCPB explanation and client-specific setup notes, see [MCP_SETUP.md](MCP_SETUP.md).
 
@@ -205,7 +205,7 @@ If you downloaded the ZIP package manually, or your client does not support the 
 In Jan.ai, create a new MCP server with the following values:
 - `Server Name`: `OmniClip RAG`
 - `Transport Type`: `STDIO`
-- `Command`: the full path to `OmniClipRAG-MCP.exe` (e.g. `D:\Apps\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.4\OmniClipRAG-MCP.exe`)
+- `Command`: the full path to `OmniClipRAG-MCP.exe` (e.g. `D:\Apps\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.5\OmniClipRAG-MCP.exe`)
 - `Arguments`: leave empty
 - `Environment Variables`: leave empty by default
 
@@ -216,7 +216,7 @@ Register the MCP server in OpenClaw's config file (`%USERPROFILE%\.openclaw\open
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.4\\OmniClipRAG-MCP.exe",
+      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.5\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -367,8 +367,8 @@ python launcher_mcp.py --mcp-selfcheck
 
 <br/>
 
-### V0.4.4 Key Updates
-`v0.4.4` is the release that turns the extension-format side of OmniClip from “usable with caveats” into a more trustworthy public surface: PDF/Tika preflight/build behavior is now more observable, packaged PDF parsing is less fragile, and extension build control finally matches the product's honesty standard.
+### V0.4.5 Key Updates
+`v0.4.5` is the release that hardens oversize extension inputs into a stable product contract: text-heavy extension carriers are no longer thrown away just because the parser produced too many fragments, while structured/noisy carriers stop poisoning the index or stalling the vector-write phase. The release also adds durable per-file issue logs so “why was this file skipped or regrouped?” finally has an auditable answer after the build ends.
 - 🧱 **Extension build control is materially stronger now**: PDF/Tika build tasks gained a dedicated control layer for truthful progress payloads, interruption awareness, conservative resume contracts, and explicit `READY / query_ready / vector_ready` state truth.
 - 📄 **PDF preflight is lighter and faster without losing exact page counts**: single-file PDF preflight now reads metadata/page structure instead of drifting into partial text extraction, so it no longer feels like a hidden mini-build.
 - 👀 **Slow extension work is much easier to read from the UI**: preflight/build tasks now expose real file-level progress, current file labels, busy-bar fallback, and elapsed-time feedback when a single file or slow parser would otherwise look frozen.

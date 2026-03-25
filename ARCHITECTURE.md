@@ -1285,6 +1285,23 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 ## 2026-03-14 扩展格式阶段 3 记忆
 
 - PDF 扩展链已经明确与 Tika 彻底隔离：`parsers/pdf.py` 通过 `pypdf` 逐页抽取文本，`normalizers/pdf.py` 负责空白噪声清理、软换行缝合和有限跨页续句拼接；PDF 不会复用 Tika 的任何解析入口。
+
+## 2026-03-25 扩展超大解析结果分流合同
+
+- 扩展链对“超大解析结果”的判断继续使用输出级阈值，而不是文件大小或扩展名体积猜测：`chunk_count > 5000` 或 `parsed_text_chars > 2_000_000`。
+- 但超大后的处理不再一刀切。当前硬分层是：
+  - 大文本载体：`pdf / doc / docx / epub / txt / rtf / odt / eml / msg`
+  - 结构/噪音风险载体：`html / htm / mhtml / mht / xml / xls / xlsx / ppt / pptx / zip / tar / rar`
+  - 其他未明确列出的 Tika 格式默认归入风险桶
+- 大文本载体即使超大，也必须保留全文内容：当前做法是不改 parser，只在 parse 之后按原始顺序 regroup，目标块约 `180-260` 中文字、硬上限 `300`；英文目标约 `80-140` 词、硬上限 `180`。这里的“全文保留”指内容不丢，但允许放弃原始过碎 chunk 边界。
+- 结构/未知格式一旦超大，直接策略性跳过，不入 store、不入 lexical、不入 vector；这是为了防止网页代码/结构噪音或其他高风险结构化载体污染索引并拖死建库。
+- 每次扩展构建都允许写文件级问题日志到 `workspaces/<workspace>/extensions/<pipeline>/logs/issues/<build_id>.jsonl`。当前至少记录：
+  - `regrouped_oversized_text_carrier`
+  - `skipped_oversized_structured`
+  - `error_parse_failed`
+  - `error_runtime_failed`
+  - `error_io_failed`
+- 活动日志只做汇总，不逐文件刷屏；详细路径和 advice 进入问题日志。Why: 这条链要先保证稳定、可诊断、不中毒，后面再单独做命中后的邻接上下文增强。
 - `extensions/service.py` 里的 `PdfExtensionService` 已打通 PDF 的预检、全量建库、一次扫描变动更新、删除索引与独立查询，且所有索引都固定落在 `extensions/pdf/` 的独立 SQLite / 向量目录下，不会写进 Markdown 主库。
 - PDF 源目录如果临时失联，当前实现会把目录状态标记为 `missing_temporarily` 并拒绝危险的全量重建，而不是把旧索引清空；单个 PDF 文件损坏时只记 warning 并跳过，不会中断整轮任务。
 - 主查询层已经接入扩展 broker：PDF 命中会以 `source_family='pdf'` 返回，并强制组装成 `PDF · 文件名 · 第 N 页` 的来源标签，避免跨来源融合后丢失具体 PDF 身份。
@@ -1573,5 +1590,7 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - 2026-03-24 再补充：`PDF preflight` 必须保持“轻量预检”合同，只允许做文件可读性、文件大小与精确页数读取，禁止再为了算页数去跑逐页 `extract_text()`。Why：预检的职责是快速确认“能不能做、多大范围”，不是提前半跑一遍正文解析；单文件 PDF 场景下全文抽取会把预检做得像卡死。
 - 扩展预检/建库的 UI 现在必须区分“真的有可靠分母的确定性进度”和“任务还活着、但没有细粒度分母”的阶段；`inspect_pdf / inspect_tika / parse_pdf / parse_tika` 在单文件或无可靠分母场景下要用 busy/indeterminate + 已用时提示，而不是硬显示误导性的假百分比。Why：单文件 PDF/Tika 最容易让用户误以为任务停住，真正需要的是活性反馈，而不是精度虚假的进度条。
 - Windows 下扩展 lease/build-state 的 JSON 写入必须容忍并发与瞬时共享冲突。当前实现已经增加写入锁、短重试，以及“lease 心跳写入失败只降级、不炸整轮建库”的保护。Why：lease 心跳是诊断与互斥辅助，不值得因为一次写盘抖动把整轮扩展建库打成失败。
+- 2026-03-24 再补充：扩展 `scan_once` 以前在 `write_vector` 阶段仍走旧的 `vector_index.upsert(documents)` 黑盒路径，没有增量进度、也没有 cooperative cancel。结果是 Tika 在少量超大网页归一化成大量 chunk 后，会长时间停在静态 `92%`，用户点击停止也要等完整 upsert 结束才生效。现在 `PDF / Tika` 的增量向量写入必须复用和 full rebuild 同级的控制面：`upsert()` 接受 `on_progress / pause_event / cancel_event`，LanceDB 的增量 upsert 直接复用 `rebuild(reset_index=False)` 管线，`scan_once` 在 `write_vector` 期间必须持续推进 `92% -> 99%` 并允许及时响应取消。Why：这条链真正慢的不是 oversize 文件本身，而是增量向量落盘曾经是不可见、不可停的黑盒。
+- 2026-03-24 再补充：`清理中断状态` 按钮的产品语义已经固定为“只清掉当前扩展残留的 interrupted/resume checkpoint，不删除原始文件，也不删除现有扩展索引数据；唯一后果是这次没做完的续建点作废，下次建库从头重来”。Why：用户需要一个明确、自救级但不危险的恢复入口，不能把它做成含糊的“清理一下试试”。
 - Frozen 验证时，`desktop.py --selfcheck-query` 目前固定只查 `allowed_families=('markdown',)`；它适合验证打包后的 EXE 能否正常执行查询自检，但**不适合**拿来判断扩展命中链是否工作。Why：这条入口本来是 Markdown 查询诊断，不是扩展查询验收器；以后验证扩展 frozen 行为时不要被“自检能跑但没扩展命中”误导。
 - 当前 PyInstaller `warn-OmniClipRAG.txt` 里仍可能出现 `pypdf` 的可选 `Crypto.*` 提供者告警，以及 `modelscope.hub*` 的条件导入告警；只要没有重新出现 `omniclip_rag.extensions.parsers.pdf / tika` 缺失，就不应把这些可选告警误判成扩展 parser 漏包回归。Why：扩展建库强化这轮真正要封死的是 parser 漏包与依赖缺失，不是顺手清零所有条件导入告警。

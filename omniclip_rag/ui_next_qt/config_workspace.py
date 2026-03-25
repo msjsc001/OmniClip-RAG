@@ -1734,6 +1734,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         support_actions.addWidget(self.ext_open_diagnostics_button)
         self.ext_clear_resume_button = QtWidgets.QPushButton(self._tr('extensions_clear_build_state'), card)
         self._set_button_variant(self.ext_clear_resume_button, 'secondary')
+        self.ext_clear_resume_button.setToolTip(self._tip('extensions_clear_build_state'))
         self.ext_clear_resume_button.clicked.connect(self._clear_extension_build_state_for_current_pipeline)
         support_actions.addWidget(self.ext_clear_resume_button)
         support_actions.addStretch(1)
@@ -3076,6 +3077,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             )
             missing_dirs = tuple(str(item) for item in (getattr(report, 'missing_directories', ()) or ()))
         message = self._append_extension_recent_issues(message, report)
+        message = self._append_extension_issue_summary(message, report)
         self.statusMessageChanged.emit(message)
         self._append_log(message)
         if missing_dirs:
@@ -3397,6 +3399,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
                     skipped=skipped_files,
                 )
         message = self._append_extension_recent_issues(message, report)
+        message = self._append_extension_issue_summary(message, report)
         self._set_extension_source_progress(pipeline, source_path, message)
         self.statusMessageChanged.emit(message)
         self._append_log(message)
@@ -3830,6 +3833,21 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return message
         summary = ' / '.join(recent_issues[:3])
         return f"{message}\n{self._tr('extensions_progress_recent_issue', reason=summary)}"
+
+    def _append_extension_issue_summary(self, message: str, report: object) -> str:
+        regrouped_files = int(getattr(report, 'regrouped_files', 0) or 0)
+        oversized_skipped_files = int(getattr(report, 'oversized_skipped_files', 0) or 0)
+        issue_log_path = str(getattr(report, 'issue_log_path', '') or '').strip()
+        detail_lines: list[str] = []
+        if regrouped_files > 0:
+            detail_lines.append(self._tr('extensions_issue_summary_regrouped', count=regrouped_files))
+        if oversized_skipped_files > 0:
+            detail_lines.append(self._tr('extensions_issue_summary_skipped', count=oversized_skipped_files))
+        if issue_log_path:
+            detail_lines.append(self._tr('extensions_issue_summary_log_path', path=issue_log_path))
+        if not detail_lines:
+            return message
+        return '\n'.join([message, *detail_lines])
 
     def _refresh_tika_runtime_progress_ui(self, runtime: TikaRuntimeStatus) -> None:
         payload = self._tika_runtime_install_progress

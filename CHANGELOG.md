@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## V0.4.5 - 2026-03-25
+
+### Added
+
+- Added [RELEASE_NOTES_v0.4.5](releases/RELEASE_NOTES_v0.4.5.md) for the extension oversized-routing and issue-log hardening release.
+- Added file-level extension issue reports under `workspaces/<workspace>/extensions/<pipeline>/logs/issues/<build_id>.jsonl`, so regrouped oversize carriers, structured skips, and parse/runtime failures can be audited after a build instead of being reduced to one vague UI hint.
+
+### Changed
+
+- Changed visible app/package/release metadata to `v0.4.5` across the desktop app, MCP line, README badges, setup examples, release notes, example client configs, and Registry-facing release URLs.
+- Changed oversized extension handling from one-size-fits-all skipping into a stable split contract: text-heavy carriers such as `PDF / DOC / DOCX / EPUB / TXT / RTF / ODT / EML / MSG` now regroup oversize parse results before indexing, while structured/noisy carriers and unknown Tika formats are skipped before they can poison indexes or stall vector writes.
+- Changed extension activity feedback so builds now summarize regrouped oversize text carriers, structured oversize skips, and the exact issue-log path without spamming one line per file.
+
+### Fixed
+
+- Fixed the long `Tika write_vector` stall pattern where oversized `.mhtml`-style pages could keep an incremental build visually pinned around `92%` by letting oversized structured inputs exit the indexing path before vector writes.
+- Fixed the silent diagnosability gap where users could see `skipped` counts but still had no durable per-file reason log telling them which file was regrouped, skipped, or failed and why.
+
 ## V0.4.4 - 2026-03-24
 
 ### Added
@@ -560,4 +578,3 @@
 - The current stable default remains `torch + bge-m3`.
 - ONNX remains a future optimization path, not the default production route for `V0.1.0`.
 - CLI remains available for debugging and automation, but GUI is now the primary workflow.
-

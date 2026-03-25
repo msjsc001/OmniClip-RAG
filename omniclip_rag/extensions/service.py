@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -43,11 +45,24 @@ EXTENSION_BUILD_WATCHDOG_REPEAT_SECONDS = 60.0
 EXTENSION_TIKA_PARSE_TIMEOUT_SECONDS = 20.0
 EXTENSION_MAX_PARSED_TEXT_CHARS = 2_000_000
 EXTENSION_MAX_PARSED_CHUNKS = 5000
+EXTENSION_TEXT_CARRIER_TARGET_CJK = 220
+EXTENSION_TEXT_CARRIER_TARGET_CJK_MIN = 180
+EXTENSION_TEXT_CARRIER_TARGET_CJK_MAX = 260
+EXTENSION_TEXT_CARRIER_HARD_CJK = 300
+EXTENSION_TEXT_CARRIER_TARGET_WORDS = 110
+EXTENSION_TEXT_CARRIER_TARGET_WORDS_MIN = 80
+EXTENSION_TEXT_CARRIER_TARGET_WORDS_MAX = 140
+EXTENSION_TEXT_CARRIER_HARD_WORDS = 180
 EXTENSION_PDF_PARSER_SCHEMA_VERSION = 'pdf-parser-v1'
 EXTENSION_TIKA_PARSER_SCHEMA_VERSION = 'tika-parser-v1'
 EXTENSION_SUPPORTED_PYPDF_RANGE = '>=5.0.0,<6.0.0'
 EXTENSION_SUPPORTED_TIKA_SERVER_VERSION = '3.2.3'
 EXTENSION_SUPPORTED_JAVA_RANGE = '21+'
+EXTENSION_TEXT_CARRIER_TIKA_FORMATS = frozenset({'doc', 'docx', 'epub', 'txt', 'rtf', 'odt', 'eml', 'msg'})
+EXTENSION_STRUCTURED_RISK_TIKA_FORMATS = frozenset({'html', 'htm', 'mhtml', 'mht', 'xml', 'xls', 'xlsx', 'ppt', 'pptx', 'zip', 'tar', 'rar'})
+_CJK_CHAR_RE = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]')
+_LATIN_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['_-][A-Za-z0-9]+)?")
+_GENERIC_TIKA_ANCHOR_RE = re.compile(r'^chunk\s+\d+$', re.IGNORECASE)
 
 
 def _extract_pdf_pages(pdf_path: Path) -> list[dict[str, object]]:
@@ -148,6 +163,9 @@ class PdfBuildReport:
     missing_directories: tuple[str, ...] = ()
     recent_issues: tuple[str, ...] = ()
     rebuilt: bool = False
+    regrouped_files: int = 0
+    oversized_skipped_files: int = 0
+    issue_log_path: str = ''
 
 
 @dataclass(slots=True)
@@ -180,6 +198,24 @@ class TikaBuildReport:
     missing_directories: tuple[str, ...] = ()
     recent_issues: tuple[str, ...] = ()
     rebuilt: bool = False
+    regrouped_files: int = 0
+    oversized_skipped_files: int = 0
+    issue_log_path: str = ''
+
+
+@dataclass(slots=True)
+class ExtensionFileOutcome:
+    """One extension file result after parse/regroup/storage handling."""
+
+    status: str
+    reason: str = ''
+    path: str = ''
+    chunk_count: int = 0
+    parsed_text_chars: int = 0
+    issue_type: str = ''
+    advice: str = ''
+    regrouped: bool = False
+    file_size: int = 0
 
 
 @dataclass(slots=True)
@@ -190,6 +226,11 @@ class TikaFileOutcome:
     reason: str = ''
     path: str = ''
     chunk_count: int = 0
+    parsed_text_chars: int = 0
+    issue_type: str = ''
+    advice: str = ''
+    regrouped: bool = False
+    file_size: int = 0
 
 
 @dataclass(slots=True)
@@ -226,7 +267,54 @@ class ExtensionBuildContext:
     resume_requested: bool = False
     resume_state: dict[str, object] | None = None
     state_payload: dict[str, object] | None = None
+    issue_log: ExtensionIssueLog | None = None
     start_monotonic: float = field(default_factory=time.monotonic)
+
+
+@dataclass(slots=True)
+class ExtensionIssueLog:
+    """Append-only per-build issue report used for user diagnostics."""
+
+    path: Path
+    regrouped_files: int = 0
+    oversized_skipped_files: int = 0
+    total_entries: int = 0
+
+    def append(
+        self,
+        *,
+        pipeline: str,
+        build_id: str,
+        source_path: str,
+        format_id: str,
+        issue_type: str,
+        reason: str,
+        chunk_count: int = 0,
+        parsed_text_chars: int = 0,
+        file_size: int = 0,
+        advice: str = '',
+    ) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            'timestamp': utc_now(),
+            'pipeline': str(pipeline or '').strip().lower(),
+            'build_id': str(build_id or '').strip(),
+            'source_path': str(source_path or '').strip(),
+            'format_id': str(format_id or '').strip().lower(),
+            'issue_type': str(issue_type or '').strip(),
+            'reason': str(reason or '').strip(),
+            'chunk_count': max(int(chunk_count or 0), 0),
+            'parsed_text_chars': max(int(parsed_text_chars or 0), 0),
+            'file_size': max(int(file_size or 0), 0),
+            'advice': str(advice or '').strip(),
+        }
+        with self.path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + '\n')
+        self.total_entries += 1
+        if payload['issue_type'] == 'regrouped_oversized_text_carrier':
+            self.regrouped_files += 1
+        elif payload['issue_type'] == 'skipped_oversized_structured':
+            self.oversized_skipped_files += 1
 
 
 class ExtensionBuildProgressMonitor:
@@ -759,6 +847,7 @@ class PdfExtensionService:
             extension_paths=self.extension_paths,
             on_progress=on_progress,
         )
+        issue_log = _make_issue_log(self.extension_paths, pipeline='pdf', build_id=build_id)
         build_context = ExtensionBuildContext(
             pipeline='pdf',
             build_id=build_id,
@@ -774,6 +863,7 @@ class PdfExtensionService:
             resume_requested=requested_resume,
             resume_state=resume_state,
             state_payload=build_payload,
+            issue_log=issue_log,
         )
         self._update_pdf_status(
             index_state=ExtensionIndexState.BUILDING,
@@ -819,6 +909,9 @@ class PdfExtensionService:
                 missing_directories=tuple(str(item) for item in missing_dirs),
                 recent_issues=tuple(recent_issues),
                 rebuilt=not incremental,
+                regrouped_files=issue_log.regrouped_files,
+                oversized_skipped_files=issue_log.oversized_skipped_files,
+                issue_log_path=str(issue_log.path) if issue_log.total_entries else '',
             )
         except BuildCancelledError:
             resumable = bool(not incremental and not bool(source_paths))
@@ -852,6 +945,9 @@ class PdfExtensionService:
                 missing_directories=tuple(str(item) for item in missing_dirs),
                 recent_issues=tuple(recent_issues),
                 rebuilt=not incremental,
+                regrouped_files=issue_log.regrouped_files,
+                oversized_skipped_files=issue_log.oversized_skipped_files,
+                issue_log_path=str(issue_log.path) if issue_log.total_entries else '',
             )
         except Exception as exc:
             resumable = bool(not incremental and not bool(source_paths))
@@ -978,11 +1074,11 @@ class PdfExtensionService:
             if stored_fingerprint and fingerprint_matches(pdf_path, stored_fingerprint):
                 indexed_paths.append(path_key)
                 continue
-            indexed, reason = self._replace_one_pdf(source_root, pdf_path)
-            if not indexed:
+            outcome = self._replace_one_pdf(source_root, pdf_path, build_context=build_context)
+            if outcome.status != 'indexed':
                 skipped_files += 1
-                if reason:
-                    _remember_recent_issue(recent_issues, reason)
+                if outcome.reason:
+                    _remember_recent_issue(recent_issues, outcome.reason)
                 continue
             completed_files[path_key] = file_fingerprint(pdf_path)
             indexed_paths.append(path_key)
@@ -1049,7 +1145,17 @@ class PdfExtensionService:
         )
         if build_context.targeted:
             if indexed_paths:
-                self._upsert_vectors_for_paths(indexed_paths)
+                self._upsert_vectors_for_paths(
+                    indexed_paths,
+                    build_context=build_context,
+                    stage='pdf_build',
+                    total_files=total,
+                    processed_files=len(indexed_paths),
+                    skipped_files=skipped_files,
+                    failed_files=skipped_files,
+                    deleted_files=len(existing_paths) if build_context.targeted else 0,
+                    recent_issue=recent_issues[-1] if recent_issues else '',
+                )
         else:
             self._rebuild_vectors(build_context=build_context)
         _emit_extension_stage(
@@ -1159,11 +1265,11 @@ class PdfExtensionService:
                 eta_seconds=_estimate_eta_seconds(started_at=build_context.start_monotonic, current=current, total=total),
             )
             self._delete_paths_from_index([path])
-            indexed, reason = self._replace_one_pdf(source_root, pdf_path)
-            if not indexed:
+            outcome = self._replace_one_pdf(source_root, pdf_path, build_context=build_context)
+            if outcome.status != 'indexed':
                 skipped_files += 1
-                if reason:
-                    _remember_recent_issue(recent_issues, reason)
+                if outcome.reason:
+                    _remember_recent_issue(recent_issues, outcome.reason)
         if changed_paths:
             _wait_for_extension_controls(build_context.pause_event, build_context.cancel_event)
             _emit_extension_stage(
@@ -1181,7 +1287,38 @@ class PdfExtensionService:
                 build_id=build_context.build_id,
                 pipeline=build_context.pipeline,
             )
-            self._upsert_vectors_for_paths(changed_paths)
+            _update_build_state_payload(
+                self.extension_paths,
+                payload=build_context.state_payload or {
+                    'state_version': EXTENSION_BUILD_STATE_VERSION,
+                    'pipeline': build_context.pipeline,
+                    'build_id': build_context.build_id,
+                    'manifest_signature': build_context.manifest_signature,
+                    'parser_schema_version': build_context.parser_schema_version,
+                    'source_roots': list(build_context.source_roots),
+                    'enabled_formats': list(build_context.enabled_formats),
+                    'completed_files': {},
+                },
+                phase='write_vector',
+                status='building',
+                processed_files=len(changed_paths) - skipped_files,
+                skipped_files=skipped_files,
+                failed_files=skipped_files,
+                deleted_files=len(deleted_paths),
+                current=len(changed_paths) - skipped_files,
+                total=total,
+            )
+            self._upsert_vectors_for_paths(
+                changed_paths,
+                build_context=build_context,
+                stage='pdf_scan_once',
+                total_files=total,
+                processed_files=len(changed_paths) - skipped_files,
+                skipped_files=skipped_files,
+                failed_files=skipped_files,
+                deleted_files=len(deleted_paths),
+                recent_issue=recent_issues[-1] if recent_issues else '',
+            )
         _emit_extension_stage(
             build_context.on_progress,
             stage='pdf_scan_once',
@@ -1199,16 +1336,44 @@ class PdfExtensionService:
         )
         return len(deleted_paths), skipped_files, recent_issues
 
-    def _replace_one_pdf(self, source_root: Path, pdf_path: Path) -> tuple[bool, str]:
+    def _replace_one_pdf(self, source_root: Path, pdf_path: Path, *, build_context: ExtensionBuildContext | None = None) -> ExtensionFileOutcome:
+        resolved = pdf_path.resolve()
         try:
-            parsed = _parse_pdf_file(source_root, pdf_path)
+            parsed = _parse_pdf_file(source_root, resolved)
         except Exception as exc:
-            LOGGER.warning('PDF extension skipped broken file: %s (%s: %s)', pdf_path, type(exc).__name__, exc)
-            return False, f'{Path(pdf_path).name} · {type(exc).__name__}'
-        limit_reason = _parsed_file_limit_reason(parsed)
-        if limit_reason:
-            LOGGER.warning('PDF extension skipped oversize file: %s (%s)', pdf_path, limit_reason)
-            return False, f'{Path(pdf_path).name} · {limit_reason}'
+            LOGGER.warning('PDF extension skipped broken file: %s (%s: %s)', resolved, type(exc).__name__, exc)
+            reason = f'{resolved.name} · {type(exc).__name__}'
+            _append_issue_log(
+                getattr(build_context, 'issue_log', None),
+                pipeline='pdf',
+                build_id=str(getattr(build_context, 'build_id', '') or ''),
+                source_path=str(resolved),
+                format_id='pdf',
+                issue_type='error_parse_failed',
+                reason=reason,
+                file_size=int(resolved.stat().st_size) if resolved.exists() else 0,
+                advice='请检查 PDF 是否损坏，或先重新导出为更稳定的 PDF 后再导入。',
+            )
+            return ExtensionFileOutcome(status='expected_skip', reason=reason, path=str(resolved), issue_type='error_parse_failed')
+        chunk_count, total_chars = _parsed_file_metrics(parsed)
+        if chunk_count > EXTENSION_MAX_PARSED_CHUNKS or total_chars > EXTENSION_MAX_PARSED_TEXT_CHARS:
+            parsed = _regroup_parsed_file(parsed, pipeline='pdf')
+            regrouped_count, regrouped_chars = _parsed_file_metrics(parsed)
+            reason = f'{resolved.name} · 超大正文已重组（原始 {chunk_count} 片段 / {total_chars} 字符，重组后 {regrouped_count} 片段）'
+            _append_issue_log(
+                getattr(build_context, 'issue_log', None),
+                pipeline='pdf',
+                build_id=str(getattr(build_context, 'build_id', '') or ''),
+                source_path=str(resolved),
+                format_id='pdf',
+                issue_type='regrouped_oversized_text_carrier',
+                reason=reason,
+                chunk_count=chunk_count,
+                parsed_text_chars=total_chars,
+                file_size=int(getattr(parsed, 'size', 0) or 0),
+                advice=_regroup_advice(),
+            )
+            LOGGER.info('PDF extension regrouped oversize text carrier: %s (%s chunks -> %s chunks)', resolved, chunk_count, regrouped_count)
         self.store.replace_file(parsed)
         rendered_payloads = [
             (chunk.chunk_id, chunk.raw_text)
@@ -1217,7 +1382,14 @@ class PdfExtensionService:
         ]
         if rendered_payloads:
             self.store.update_rendered_chunks(rendered_payloads)
-        return True, ''
+        return ExtensionFileOutcome(
+            status='indexed',
+            path=str(resolved),
+            chunk_count=len(parsed.chunks),
+            parsed_text_chars=sum(len(chunk.raw_text) for chunk in parsed.chunks),
+            regrouped=bool(chunk_count > EXTENSION_MAX_PARSED_CHUNKS or total_chars > EXTENSION_MAX_PARSED_TEXT_CHARS),
+            file_size=int(getattr(parsed, 'size', 0) or 0),
+        )
 
     def _rebuild_vectors(self, *, build_context: ExtensionBuildContext) -> None:
         if not self._vector_enabled:
@@ -1252,15 +1424,55 @@ class PdfExtensionService:
             reset_index=True,
         )
 
-    def _upsert_vectors_for_paths(self, source_paths: list[str]) -> None:
+    def _upsert_vectors_for_paths(
+        self,
+        source_paths: list[str],
+        *,
+        build_context: ExtensionBuildContext | None = None,
+        stage: str = 'pdf_scan_once',
+        total_files: int = 0,
+        processed_files: int = 0,
+        skipped_files: int = 0,
+        failed_files: int = 0,
+        deleted_files: int = 0,
+        recent_issue: str = '',
+    ) -> None:
         if not self._vector_enabled:
             return
-        chunk_ids = self.store.get_chunk_ids_for_paths(source_paths)
-        if chunk_ids:
-            self.vector_index.delete(chunk_ids)
         documents = self.store.fetch_vector_documents(source_paths)
         if documents:
-            self.vector_index.upsert(documents)
+            document_total = len(documents)
+
+            def handle_vector_progress(payload: dict[str, object]) -> None:
+                if build_context is None:
+                    return
+                written = max(int(payload.get('written_count') or payload.get('current') or 0), 0)
+                ratio = min(max((written / document_total) if document_total else 1.0, 0.0), 1.0)
+                write_percent = 92.0 + (ratio * 7.0)
+                _emit_extension_stage(
+                    build_context.on_progress,
+                    stage=stage,
+                    stage_status='write_vector',
+                    current=processed_files,
+                    total=total_files,
+                    processed_files=processed_files,
+                    skipped_files=skipped_files,
+                    error_count=failed_files,
+                    deleted_files=deleted_files,
+                    overall_percent=write_percent,
+                    close_safe=False,
+                    recent_issue=recent_issue,
+                    build_id=build_context.build_id,
+                    pipeline=build_context.pipeline,
+                    eta_seconds=int(payload.get('eta_seconds') or 0),
+                )
+
+            self.vector_index.upsert(
+                documents,
+                on_progress=handle_vector_progress if build_context is not None else None,
+                pause_event=build_context.pause_event if build_context is not None else None,
+                cancel_event=build_context.cancel_event if build_context is not None else None,
+            )
 
     def _delete_paths_from_index(self, source_paths: list[str]) -> None:
         clean_paths = [item for item in source_paths if item]
@@ -1771,6 +1983,7 @@ class TikaExtensionService:
             extension_paths=self.extension_paths,
             on_progress=on_progress,
         )
+        issue_log = _make_issue_log(self.extension_paths, pipeline='tika', build_id=build_id)
         build_context = ExtensionBuildContext(
             pipeline='tika',
             build_id=build_id,
@@ -1787,6 +2000,7 @@ class TikaExtensionService:
             resume_requested=requested_resume,
             resume_state=resume_state,
             state_payload=build_payload,
+            issue_log=issue_log,
         )
         self._update_tika_status(
             index_state=ExtensionIndexState.BUILDING,
@@ -1850,6 +2064,9 @@ class TikaExtensionService:
                 missing_directories=tuple(str(item) for item in missing_dirs),
                 recent_issues=tuple(build_stats.recent_issues),
                 rebuilt=not incremental,
+                regrouped_files=issue_log.regrouped_files,
+                oversized_skipped_files=issue_log.oversized_skipped_files,
+                issue_log_path=str(issue_log.path) if issue_log.total_entries else '',
             )
         except BuildCancelledError:
             resumable = bool(not incremental and not bool(source_paths))
@@ -1885,6 +2102,9 @@ class TikaExtensionService:
                 missing_directories=tuple(str(item) for item in missing_dirs),
                 recent_issues=tuple(str(item) for item in (build_payload.get('recent_issues') or ()) if str(item).strip()),
                 rebuilt=not incremental,
+                regrouped_files=issue_log.regrouped_files,
+                oversized_skipped_files=issue_log.oversized_skipped_files,
+                issue_log_path=str(issue_log.path) if issue_log.total_entries else '',
             )
         except Exception as exc:
             resumable = bool(not incremental and not bool(source_paths))
@@ -2014,7 +2234,7 @@ class TikaExtensionService:
             if stored_fingerprint and fingerprint_matches(file_path, stored_fingerprint):
                 indexed_paths.append(path_key)
                 continue
-            outcome = self._replace_one_tika_file(source_root, file_path, format_id)
+            outcome = self._replace_one_tika_file(source_root, file_path, format_id, build_context=build_context)
             if outcome.status != 'indexed':
                 self._apply_tika_outcome(build_stats, outcome)
                 _emit_extension_stage(
@@ -2125,7 +2345,17 @@ class TikaExtensionService:
         )
         if build_context.targeted:
             if indexed_paths:
-                self._upsert_vectors_for_paths(indexed_paths)
+                self._upsert_vectors_for_paths(
+                    indexed_paths,
+                    build_context=build_context,
+                    stage='tika_build',
+                    total_files=total,
+                    processed_files=len(indexed_paths),
+                    skipped_files=build_stats.skipped_files,
+                    failed_files=build_stats.failed_files,
+                    deleted_files=len(existing_paths) if build_context.targeted else 0,
+                    recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
+                )
         else:
             self._rebuild_vectors(build_context=build_context)
         _emit_extension_stage(
@@ -2211,7 +2441,7 @@ class TikaExtensionService:
                 eta_seconds=_estimate_eta_seconds(started_at=build_context.start_monotonic, current=current, total=total),
             )
             self._delete_paths_from_index([path])
-            outcome = self._replace_one_tika_file(source_root, file_path, format_id)
+            outcome = self._replace_one_tika_file(source_root, file_path, format_id, build_context=build_context)
             if outcome.status != 'indexed':
                 self._apply_tika_outcome(build_stats, outcome)
                 _emit_extension_stage(
@@ -2250,7 +2480,38 @@ class TikaExtensionService:
                 build_id=build_context.build_id,
                 pipeline=build_context.pipeline,
             )
-            self._upsert_vectors_for_paths(changed_paths)
+            _update_build_state_payload(
+                self.extension_paths,
+                payload=build_context.state_payload or {
+                    'state_version': EXTENSION_BUILD_STATE_VERSION,
+                    'pipeline': build_context.pipeline,
+                    'build_id': build_context.build_id,
+                    'manifest_signature': build_context.manifest_signature,
+                    'parser_schema_version': build_context.parser_schema_version,
+                    'source_roots': list(build_context.source_roots),
+                    'enabled_formats': list(build_context.enabled_formats),
+                    'completed_files': {},
+                },
+                phase='write_vector',
+                status='building',
+                processed_files=len(changed_paths) - build_stats.skipped_files,
+                skipped_files=build_stats.skipped_files,
+                failed_files=build_stats.failed_files,
+                deleted_files=len(deleted_paths),
+                current=len(changed_paths) - build_stats.skipped_files,
+                total=total,
+            )
+            self._upsert_vectors_for_paths(
+                changed_paths,
+                build_context=build_context,
+                stage='tika_scan_once',
+                total_files=total,
+                processed_files=len(changed_paths) - build_stats.skipped_files,
+                skipped_files=build_stats.skipped_files,
+                failed_files=build_stats.failed_files,
+                deleted_files=len(deleted_paths),
+                recent_issue=build_stats.recent_issues[-1] if build_stats.recent_issues else '',
+            )
         _emit_extension_stage(
             build_context.on_progress,
             stage='tika_scan_once',
@@ -2269,8 +2530,16 @@ class TikaExtensionService:
         )
         return len(deleted_paths), build_stats
 
-    def _replace_one_tika_file(self, source_root: Path, file_path: Path, format_id: str) -> TikaFileOutcome:
+    def _replace_one_tika_file(
+        self,
+        source_root: Path,
+        file_path: Path,
+        format_id: str,
+        *,
+        build_context: ExtensionBuildContext | None = None,
+    ) -> TikaFileOutcome:
         resolved = file_path.resolve()
+        normalized_format = _normalized_format_id(format_id)
         try:
             stat = resolved.stat()
         except OSError as exc:
@@ -2295,19 +2564,101 @@ class TikaExtensionService:
                 except Exception:
                     pass
             LOGGER.warning('Tika extension failed for file: %s (%s: %s)', resolved, type(exc).__name__, exc)
-            return TikaFileOutcome(status='failed', reason=_format_tika_failure_reason(resolved, exc), path=str(resolved))
+            reason = _format_tika_failure_reason(resolved, exc)
+            issue_type = 'error_runtime_failed' if isinstance(exc, TikaParseError) else 'error_parse_failed'
+            _append_issue_log(
+                getattr(build_context, 'issue_log', None),
+                pipeline='tika',
+                build_id=str(getattr(build_context, 'build_id', '') or ''),
+                source_path=str(resolved),
+                format_id=normalized_format,
+                issue_type=issue_type,
+                reason=reason,
+                file_size=int(stat.st_size or 0),
+                advice='请检查该文件是否损坏、格式是否兼容，或改为导出成更稳定的文本/PDF 后再导入。',
+            )
+            return TikaFileOutcome(
+                status='failed',
+                reason=reason,
+                path=str(resolved),
+                issue_type=issue_type,
+                file_size=int(stat.st_size or 0),
+            )
         if not parsed.chunks:
             LOGGER.info('Tika extension skipped file without extracted text: %s', resolved)
             return TikaFileOutcome(status='expected_skip', reason=f'未提取到正文 · {resolved.name}', path=str(resolved))
+        chunk_count, total_chars = _parsed_file_metrics(parsed)
         limit_reason = _parsed_file_limit_reason(parsed)
+        regrouped = False
+        reason = ''
         if limit_reason:
-            LOGGER.warning('Tika extension skipped oversize file: %s (%s)', resolved, limit_reason)
-            return TikaFileOutcome(status='expected_skip', reason=f'{resolved.name} · {limit_reason}', path=str(resolved))
+            if _is_text_carrier_format('tika', normalized_format):
+                regrouped = True
+                parsed = _regroup_parsed_file(parsed, pipeline='tika')
+                regrouped_count, regrouped_chars = _parsed_file_metrics(parsed)
+                reason = (
+                    f'{resolved.name} · 超大正文已重组（原始 {chunk_count} 片段 / {total_chars} 字符，'
+                    f'重组后 {regrouped_count} 片段）'
+                )
+                _append_issue_log(
+                    getattr(build_context, 'issue_log', None),
+                    pipeline='tika',
+                    build_id=str(getattr(build_context, 'build_id', '') or ''),
+                    source_path=str(resolved),
+                    format_id=normalized_format,
+                    issue_type='regrouped_oversized_text_carrier',
+                    reason=reason,
+                    chunk_count=chunk_count,
+                    parsed_text_chars=total_chars,
+                    file_size=int(getattr(parsed, 'size', 0) or stat.st_size or 0),
+                    advice=_regroup_advice(),
+                )
+                LOGGER.info(
+                    'Tika extension regrouped oversize text carrier: %s (%s chunks -> %s chunks)',
+                    resolved,
+                    chunk_count,
+                    regrouped_count,
+                )
+            else:
+                reason = f'{resolved.name} · {limit_reason}'
+                advice = _structured_oversize_advice(normalized_format)
+                _append_issue_log(
+                    getattr(build_context, 'issue_log', None),
+                    pipeline='tika',
+                    build_id=str(getattr(build_context, 'build_id', '') or ''),
+                    source_path=str(resolved),
+                    format_id=normalized_format,
+                    issue_type='skipped_oversized_structured',
+                    reason=reason,
+                    chunk_count=chunk_count,
+                    parsed_text_chars=total_chars,
+                    file_size=int(getattr(parsed, 'size', 0) or stat.st_size or 0),
+                    advice=advice,
+                )
+                LOGGER.warning('Tika extension skipped oversize structured file: %s (%s)', resolved, limit_reason)
+                return TikaFileOutcome(
+                    status='expected_skip',
+                    reason=reason,
+                    path=str(resolved),
+                    chunk_count=chunk_count,
+                    parsed_text_chars=total_chars,
+                    issue_type='skipped_oversized_structured',
+                    advice=advice,
+                    file_size=int(getattr(parsed, 'size', 0) or stat.st_size or 0),
+                )
         self.store.replace_file(parsed)
         rendered_payloads = [(chunk.chunk_id, chunk.raw_text) for chunk in parsed.chunks if chunk.raw_text.strip()]
         if rendered_payloads:
             self.store.update_rendered_chunks(rendered_payloads)
-        return TikaFileOutcome(status='indexed', path=str(resolved), chunk_count=len(parsed.chunks))
+        return TikaFileOutcome(
+            status='indexed',
+            reason=reason,
+            path=str(resolved),
+            chunk_count=len(parsed.chunks),
+            parsed_text_chars=sum(len(str(chunk.raw_text or '')) for chunk in parsed.chunks),
+            regrouped=regrouped,
+            file_size=int(getattr(parsed, 'size', 0) or stat.st_size or 0),
+        )
 
     def _apply_tika_outcome(self, build_stats: TikaBuildStats, outcome: TikaFileOutcome) -> None:
         if outcome.status == 'indexed':
@@ -2353,15 +2704,55 @@ class TikaExtensionService:
             reset_index=True,
         )
 
-    def _upsert_vectors_for_paths(self, source_paths: list[str]) -> None:
+    def _upsert_vectors_for_paths(
+        self,
+        source_paths: list[str],
+        *,
+        build_context: ExtensionBuildContext | None = None,
+        stage: str = 'tika_scan_once',
+        total_files: int = 0,
+        processed_files: int = 0,
+        skipped_files: int = 0,
+        failed_files: int = 0,
+        deleted_files: int = 0,
+        recent_issue: str = '',
+    ) -> None:
         if not self._vector_enabled:
             return
-        chunk_ids = self.store.get_chunk_ids_for_paths(source_paths)
-        if chunk_ids:
-            self.vector_index.delete(chunk_ids)
         documents = self.store.fetch_vector_documents(source_paths)
         if documents:
-            self.vector_index.upsert(documents)
+            document_total = len(documents)
+
+            def handle_vector_progress(payload: dict[str, object]) -> None:
+                if build_context is None:
+                    return
+                written = max(int(payload.get('written_count') or payload.get('current') or 0), 0)
+                ratio = min(max((written / document_total) if document_total else 1.0, 0.0), 1.0)
+                write_percent = 92.0 + (ratio * 7.0)
+                _emit_extension_stage(
+                    build_context.on_progress,
+                    stage=stage,
+                    stage_status='write_vector',
+                    current=processed_files,
+                    total=total_files,
+                    processed_files=processed_files,
+                    skipped_files=skipped_files,
+                    error_count=failed_files,
+                    deleted_files=deleted_files,
+                    overall_percent=write_percent,
+                    close_safe=False,
+                    recent_issue=recent_issue,
+                    build_id=build_context.build_id,
+                    pipeline=build_context.pipeline,
+                    eta_seconds=int(payload.get('eta_seconds') or 0),
+                )
+
+            self.vector_index.upsert(
+                documents,
+                on_progress=handle_vector_progress if build_context is not None else None,
+                pause_event=build_context.pause_event if build_context is not None else None,
+                cancel_event=build_context.cancel_event if build_context is not None else None,
+            )
 
     def _delete_paths_from_index(self, source_paths: list[str]) -> None:
         clean_paths = [item for item in source_paths if item]
@@ -2951,14 +3342,272 @@ def _ensure_tika_parser_ready() -> dict[str, str]:
     }
 
 
+def _normalized_format_id(format_id: str) -> str:
+    return str(format_id or '').strip().lower().lstrip('.')
+
+
+def _is_text_carrier_format(pipeline: str, format_id: str = '') -> bool:
+    normalized_pipeline = str(pipeline or '').strip().lower()
+    if normalized_pipeline == 'pdf':
+        return True
+    return _normalized_format_id(format_id) in EXTENSION_TEXT_CARRIER_TIKA_FORMATS
+
+
+def _is_structured_risk_format(format_id: str) -> bool:
+    return _normalized_format_id(format_id) in EXTENSION_STRUCTURED_RISK_TIKA_FORMATS
+
+
+def _parsed_file_metrics(parsed) -> tuple[int, int]:
+    chunks = getattr(parsed, 'chunks', ()) or ()
+    chunk_count = len(chunks)
+    total_chars = sum(len(str(getattr(chunk, 'raw_text', '') or '')) for chunk in chunks)
+    return chunk_count, total_chars
+
+
 def _parsed_file_limit_reason(parsed) -> str:
-    chunk_count = len(getattr(parsed, 'chunks', ()) or ())
-    total_chars = sum(len(str(getattr(chunk, 'raw_text', '') or '')) for chunk in getattr(parsed, 'chunks', ()) or ())
+    chunk_count, total_chars = _parsed_file_metrics(parsed)
     if chunk_count > EXTENSION_MAX_PARSED_CHUNKS:
         return f'片段数量过大（{chunk_count}）'
     if total_chars > EXTENSION_MAX_PARSED_TEXT_CHARS:
         return f'正文过大（{total_chars} 字符）'
     return ''
+
+
+def _make_issue_log(extension_paths: DataPaths, *, pipeline: str, build_id: str) -> ExtensionIssueLog:
+    issues_dir = extension_paths.logs_dir / 'issues'
+    return ExtensionIssueLog(path=issues_dir / f'{build_id}.jsonl')
+
+
+def _web_noise_advice() -> str:
+    return '文件可能包含大量无意义网页代码或结构化噪音。如需进入搜索库，请先转为 PDF 或 Markdown 后再导入。'
+
+
+def _structured_oversize_advice(format_id: str) -> str:
+    normalized = _normalized_format_id(format_id)
+    if normalized in {'html', 'htm', 'mhtml', 'mht'}:
+        return _web_noise_advice()
+    return '解析结果规模过大，已跳过以避免污染索引或拖慢建库。如需进入搜索库，请先拆分、裁剪或转换为更适合检索的文本载体。'
+
+
+def _regroup_advice() -> str:
+    return '该文件属于大文本载体，已按顺序重组成更稳的检索块，并保留全部正文内容。'
+
+
+def _append_issue_log(
+    issue_log: ExtensionIssueLog | None,
+    *,
+    pipeline: str,
+    build_id: str,
+    source_path: str,
+    format_id: str,
+    issue_type: str,
+    reason: str,
+    chunk_count: int = 0,
+    parsed_text_chars: int = 0,
+    file_size: int = 0,
+    advice: str = '',
+) -> None:
+    if issue_log is None:
+        return
+    issue_log.append(
+        pipeline=pipeline,
+        build_id=build_id,
+        source_path=source_path,
+        format_id=format_id,
+        issue_type=issue_type,
+        reason=reason,
+        chunk_count=chunk_count,
+        parsed_text_chars=parsed_text_chars,
+        file_size=file_size,
+        advice=advice,
+    )
+
+
+def _contains_cjk(text: str) -> bool:
+    return bool(_CJK_CHAR_RE.search(str(text or '')))
+
+
+def _count_cjk_units(text: str) -> int:
+    return len(re.sub(r'\s+', '', str(text or '')))
+
+
+def _count_word_units(text: str) -> int:
+    return len(_LATIN_WORD_RE.findall(str(text or '')))
+
+
+def _chunk_unit_mode(text: str) -> str:
+    return 'cjk' if _contains_cjk(text) else 'word'
+
+
+def _chunk_unit_count(text: str, mode: str) -> int:
+    if mode == 'cjk':
+        return _count_cjk_units(text)
+    return _count_word_units(text)
+
+
+def _chunk_targets(mode: str) -> tuple[int, int, int]:
+    if mode == 'cjk':
+        return (
+            EXTENSION_TEXT_CARRIER_TARGET_CJK_MIN,
+            EXTENSION_TEXT_CARRIER_TARGET_CJK_MAX,
+            EXTENSION_TEXT_CARRIER_HARD_CJK,
+        )
+    return (
+        EXTENSION_TEXT_CARRIER_TARGET_WORDS_MIN,
+        EXTENSION_TEXT_CARRIER_TARGET_WORDS_MAX,
+        EXTENSION_TEXT_CARRIER_HARD_WORDS,
+    )
+
+
+def _merge_group_text(group: list[object]) -> str:
+    parts = [str(getattr(chunk, 'raw_text', '') or '').strip() for chunk in group if str(getattr(chunk, 'raw_text', '') or '').strip()]
+    return '\n\n'.join(parts).strip()
+
+
+def _meaningful_tika_anchor(anchor: str) -> str:
+    text = str(anchor or '').strip()
+    if not text or _GENERIC_TIKA_ANCHOR_RE.match(text):
+        return ''
+    return text
+
+
+def _regroup_pdf_anchor(group: list[object]) -> str:
+    page_numbers = [
+        _extract_page_no(str(getattr(chunk, 'anchor', '') or ''))
+        for chunk in group
+    ]
+    page_numbers = [page for page in page_numbers if page > 0]
+    if not page_numbers:
+        return str(getattr(group[0], 'anchor', '') or '第 1 页').strip() or '第 1 页'
+    first_page = min(page_numbers)
+    last_page = max(page_numbers)
+    if first_page == last_page:
+        return f'第 {first_page} 页'
+    return f'第 {first_page}-{last_page} 页'
+
+
+def _regroup_tika_anchor(group: list[object]) -> str:
+    meaningful = [_meaningful_tika_anchor(str(getattr(chunk, 'anchor', '') or '')) for chunk in group]
+    meaningful = [item for item in meaningful if item]
+    if meaningful:
+        return meaningful[-1]
+    first_anchor = str(getattr(group[0], 'anchor', '') or '').strip()
+    if first_anchor:
+        return first_anchor
+    first_position = int(getattr(group[0], 'position', 1) or 1)
+    return f'Chunk {first_position}'
+
+
+def _regroup_chunk_id(parsed, pipeline: str, *, group_index: int, start_position: int, end_position: int, text: str, anchor: str) -> str:
+    digest = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f'{parsed.relative_path}|{pipeline}|{group_index}|{start_position}|{end_position}|{anchor}|{text}',
+    ).hex[:24]
+    return f'{pipeline}:regroup:{group_index}:{digest}'
+
+
+def _flush_regrouped_group(
+    regrouped_chunks: list[object],
+    group: list[object],
+    *,
+    pipeline: str,
+    parsed,
+) -> None:
+    if not group:
+        return
+    text = _merge_group_text(group)
+    if not text:
+        return
+    first = group[0]
+    last = group[-1]
+    group_index = len(regrouped_chunks) + 1
+    if pipeline == 'pdf':
+        anchor = _regroup_pdf_anchor(group)
+        kind = 'pdf_regrouped'
+        properties = dict(getattr(first, 'properties', {}) or {})
+    else:
+        anchor = _regroup_tika_anchor(group)
+        format_id = str((getattr(first, 'properties', {}) or {}).get('format_id') or '').strip().lower()
+        kind = f'tika_{format_id}_regrouped' if format_id else 'tika_regrouped'
+        properties = dict(getattr(first, 'properties', {}) or {})
+    properties['regrouped'] = 'true'
+    properties['regroup_start_position'] = str(int(getattr(first, 'position', group_index) or group_index))
+    properties['regroup_end_position'] = str(int(getattr(last, 'position', group_index) or group_index))
+    regrouped_chunks.append(
+        type(first)(
+            chunk_id=_regroup_chunk_id(
+                parsed,
+                pipeline,
+                group_index=group_index,
+                start_position=int(getattr(first, 'position', group_index) or group_index),
+                end_position=int(getattr(last, 'position', group_index) or group_index),
+                text=text,
+                anchor=anchor,
+            ),
+            source_path=str(getattr(first, 'source_path', parsed.relative_path) or parsed.relative_path),
+            kind=kind,
+            block_id=None,
+            parent_chunk_id=None,
+            title=str(getattr(first, 'title', parsed.title) or parsed.title),
+            anchor=anchor,
+            raw_text=text,
+            properties=properties,
+            refs=[],
+            position=group_index,
+            depth=0,
+            line_start=int(getattr(first, 'line_start', getattr(first, 'position', group_index)) or group_index),
+            line_end=int(getattr(last, 'line_end', getattr(last, 'position', group_index)) or group_index),
+        )
+    )
+
+
+def _regroup_parsed_file(parsed, *, pipeline: str):
+    chunks = [chunk for chunk in getattr(parsed, 'chunks', ()) or () if str(getattr(chunk, 'raw_text', '') or '').strip()]
+    if not chunks:
+        return parsed
+    regrouped_chunks: list[object] = []
+    group: list[object] = []
+    group_mode = ''
+    current_units = 0
+    for chunk in chunks:
+        text = str(getattr(chunk, 'raw_text', '') or '').strip()
+        if not text:
+            continue
+        chunk_mode = _chunk_unit_mode(text)
+        if not group:
+            group = [chunk]
+            group_mode = chunk_mode
+            current_units = _chunk_unit_count(text, group_mode)
+            continue
+        if group_mode == 'word' and chunk_mode == 'cjk':
+            group_mode = 'cjk'
+            current_units = sum(_chunk_unit_count(str(getattr(item, 'raw_text', '') or '').strip(), group_mode) for item in group)
+        target_min, target_max, hard_max = _chunk_targets(group_mode)
+        next_units = _chunk_unit_count(text, group_mode)
+        prospective_units = current_units + next_units
+        should_flush = False
+        if current_units >= target_min and prospective_units > target_max:
+            should_flush = True
+        elif prospective_units > hard_max and current_units > 0:
+            should_flush = True
+        if should_flush:
+            _flush_regrouped_group(regrouped_chunks, group, pipeline=pipeline, parsed=parsed)
+            group = [chunk]
+            group_mode = chunk_mode
+            current_units = _chunk_unit_count(text, group_mode)
+            continue
+        group.append(chunk)
+        current_units = prospective_units
+    _flush_regrouped_group(regrouped_chunks, group, pipeline=pipeline, parsed=parsed)
+    if regrouped_chunks:
+        parsed.chunks = regrouped_chunks
+        parsed.page_properties = {
+            **dict(getattr(parsed, 'page_properties', {}) or {}),
+            'regrouped': 'true',
+            'original_chunk_count': str(len(chunks)),
+            'regrouped_chunk_count': str(len(regrouped_chunks)),
+        }
+    return parsed
 
 
 def _vector_contract(store: MetadataStore, vector_index, vector_enabled: bool) -> tuple[bool, bool]:

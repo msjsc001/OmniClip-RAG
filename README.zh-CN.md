@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-v0.4.4-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.5-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md) | [官网](https://msjsc001.github.io/OmniClip-RAG/)
 
@@ -40,7 +40,7 @@
 > **MCP 快速入口**
 >
 > 如果你想把方寸引接到 Jan.ai、OpenClaw、Claude Desktop、Cursor 或其他支持 MCP 的客户端，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
-> 从 `v0.4.4` 起，MCP 线在继续提供手动 ZIP 的同时，也已经把共享环境根、诚实降级提示、标准 MCPB 发布物和仓库内可复现构建链全部收紧到同一版发布面。
+> 从 `v0.4.5` 起，MCP 线在继续提供手动 ZIP 的同时，也已经把共享环境根、诚实降级提示、标准 MCPB 发布物和仓库内可复现构建链全部收紧到同一版发布面。
 
 ---
 
@@ -178,9 +178,9 @@
 - 桌面版 `OmniClipRAG.exe` 负责正常建库、维护和可视化使用
 - `OmniClipRAG-MCP.exe` 负责安静地在后台给 AI 提供“只读搜索接口”
 
-从 `v0.4.4` 开始，MCP 这条线会同时提供两种分发形态：
-- `OmniClipRAG-MCP-v0.4.4-win64.zip`：给手动配置 `stdio` 的用户
-- `omniclip-rag-mcp-win-x64-v0.4.4.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
+从 `v0.4.5` 开始，MCP 这条线会同时提供两种分发形态：
+- `OmniClipRAG-MCP-v0.4.5-win64.zip`：给手动配置 `stdio` 的用户
+- `omniclip-rag-mcp-win-x64-v0.4.5.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
 
 > [!CAUTION]
 > **使用前要先做什么？**
@@ -199,7 +199,7 @@
 - 如果客户端已经支持从 Registry 发现 MCP Server，请直接搜索或添加：
   - `io.github.msjsc001/omniclip-rag-mcp`
 - 如果客户端支持官方 MCPB 安装流，请优先使用 Release 中的：
-  - `omniclip-rag-mcp-win-x64-v0.4.4.mcpb`
+  - `omniclip-rag-mcp-win-x64-v0.4.5.mcpb`
 - 更详细的官方发布线、MCPB 与 ZIP 的区别、以及不同客户端的接入说明，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
 
 ### 传统手动路线（Jan.ai / OpenClaw）
@@ -221,7 +221,7 @@
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.4\\OmniClipRAG-MCP.exe",
+      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.5\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -372,8 +372,8 @@ python launcher_mcp.py --mcp-selfcheck
 
 <br/>
 
-### V0.4.4 重点更新
-`v0.4.4` 的重点，是把扩展格式这条线从“勉强能用但体验脆弱”收口成“更值得公开交付”的状态：PDF/Tika 的预检与建库不再像黑箱，打包版 PDF 预检也不再被元数据误伤，扩展建库控制面终于开始说真话。
+### V0.4.5 重点更新
+`v0.4.5` 的重点，是把扩展格式里“超大解析结果”这类最容易拖垮建库体验的输入，正式收口成稳定合同：文本型大载体不再因为碎块过多而整份丢掉，结构/噪音型载体也不再继续污染索引或把任务拖死；同时每轮扩展构建都会留下可审计的问题日志，用户终于能清楚看到哪些文件被重组、哪些被跳过、为什么。
 - 🧱 **扩展建库控制面明显收紧**：PDF/Tika 任务现在有更完整的构建状态、进度协议、中断感知、保守恢复与 `READY / query_ready / vector_ready` 真相合同，不再是薄薄一层 fire-and-forget 任务。
 - 📄 **PDF 预检终于回到“真正的预检”**：现在保留精确页数，但走轻量页树/元信息读取，而不是为了统计页数悄悄跑一段类似抽正文的小半建库过程。
 - 👀 **慢文件时的可观察性补起来了**：单文件 PDF、慢 Tika 文件、无细粒度分母时，界面现在会明确切到忙碌态并展示当前文件与已用时，不再长时间像卡死。
