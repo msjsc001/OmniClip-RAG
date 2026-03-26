@@ -219,7 +219,7 @@ def main() -> int:
             ui_language=startup_language,
         )
         theme = build_theme(recovery_config.ui_theme, recovery_config.ui_scale_percent)
-        apply_application_style(app, theme)
+        apply_application_style(app, theme, tooltips_enabled=bool(getattr(recovery_config, 'ui_tooltips_enabled', True)))
         icon = _load_app_icon()
         if icon is not None:
             app.setWindowIcon(icon)
@@ -279,7 +279,7 @@ def main() -> int:
         _trace_startup('build theme')
         from .theme import apply_application_style, build_theme
         theme = build_theme(bundle.theme_code, bundle.scale_percent)
-        apply_application_style(app, theme)
+        apply_application_style(app, theme, tooltips_enabled=bool(getattr(bundle.config, 'ui_tooltips_enabled', True)))
         _trace_startup('load icon')
         icon = _load_app_icon()
         if icon is not None:
@@ -371,4 +371,3 @@ def _resource_path(name: str) -> Path:
     else:
         base = Path(__file__).resolve().parents[2]
     return base / 'resources' / name
-

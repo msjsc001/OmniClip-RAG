@@ -69,6 +69,7 @@ class AppConfig:
     vault_path: str
     data_root: str
     vault_paths: list[str] = field(default_factory=list)
+    md_selected_vault_paths: list[str] = field(default_factory=list)
     ignore_dirs: list[str] = field(
         default_factory=lambda: [
             ".git",
@@ -106,6 +107,7 @@ class AppConfig:
     ui_language: str = field(default_factory=detect_system_language)
     ui_theme: str = DEFAULT_UI_THEME
     ui_scale_percent: int = 100
+    ui_tooltips_enabled: bool = True
     ui_quick_start_expanded: bool = True
     ui_window_geometry: str = ''
     ui_main_sash: int = 900
@@ -291,6 +293,9 @@ def probe_data_root(
             )
         if shape["legacy_complete"]:
             return DataRootProbe(candidate, "existing", legacy_environment=True)
+        if shape["has_shared"] and not shape["has_config"] and not shape["has_workspaces"] and not shape["has_marker"]:
+            if _is_tolerable_partial_environment(candidate):
+                return DataRootProbe(candidate, "new")
         if shape["has_any_trace"]:
             return DataRootProbe(
                 candidate,
@@ -383,6 +388,11 @@ def ensure_data_directories(paths: DataPaths) -> DataPaths:
 def save_config(config: AppConfig, paths: DataPaths) -> None:
     config.vault_path = normalize_vault_path(config.vault_path)
     config.vault_paths = _clean_vault_paths(config.vault_paths, active_vault=config.vault_path)
+    config.md_selected_vault_paths = _clean_selected_vault_paths(
+        config.md_selected_vault_paths,
+        saved_vaults=config.vault_paths,
+        active_vault=config.vault_path,
+    )
     config.data_root = str(paths.global_root)
     payload = asdict(config)
     payload["ui_language"] = normalize_language(payload.get("ui_language"))
@@ -410,6 +420,11 @@ def load_config(paths: DataPaths) -> AppConfig | None:
     cleaned = {key: value for key, value in payload.items() if key in allowed}
     cleaned["vault_path"] = normalize_vault_path(cleaned.get("vault_path"))
     cleaned["vault_paths"] = _clean_vault_paths(cleaned.get("vault_paths") or [], active_vault=cleaned["vault_path"])
+    cleaned["md_selected_vault_paths"] = _clean_selected_vault_paths(
+        cleaned.get("md_selected_vault_paths") or [],
+        saved_vaults=cleaned["vault_paths"],
+        active_vault=cleaned["vault_path"],
+    )
     cleaned["data_root"] = str(paths.global_root)
     cleaned["ui_language"] = normalize_language(cleaned.get("ui_language"))
     cleaned["ui_theme"] = normalize_ui_theme(cleaned.get("ui_theme"))
@@ -437,6 +452,29 @@ def _clean_vault_paths(vault_paths: list[str], active_vault: str | None = None) 
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
+def _clean_selected_vault_paths(
+    selected_vaults: list[str],
+    *,
+    saved_vaults: list[str],
+    active_vault: str | None = None,
+) -> list[str]:
+    allowed = _clean_vault_paths(saved_vaults, active_vault=active_vault)
+    allowed_set = {item.lower() for item in allowed}
+    ordered: list[str] = []
+    seen: set[str] = set()
+    values = list(selected_vaults or [])
+    if not values and active_vault:
+        values = [active_vault]
+    for value in values:
+        normalized = normalize_vault_path(value)
+        lowered = normalized.lower()
+        if not normalized or lowered in seen or lowered not in allowed_set:
+            continue
+        seen.add(lowered)
         ordered.append(normalized)
     return ordered
 
@@ -521,6 +559,26 @@ def _probe_environment_shape(global_root: Path) -> dict[str, bool]:
         "has_any_trace": has_any_trace,
         "legacy_complete": legacy_complete,
     }
+
+
+def _is_tolerable_partial_environment(global_root: Path) -> bool:
+    try:
+        root_entries = {entry.name.lower() for entry in global_root.iterdir()}
+    except OSError:
+        return False
+    if root_entries - {"shared"}:
+        return False
+    shared_root = global_root / "shared"
+    if not shared_root.exists():
+        return False
+    try:
+        shared_entries = {entry.name.lower() for entry in shared_root.iterdir()}
+    except OSError:
+        return False
+    # Why: file logging may materialize `shared/logs` before the environment
+    # marker/config/workspaces are written. That transient state should still be
+    # treated as a brand-new environment instead of a broken one.
+    return not (shared_entries - {"logs"})
 
 
 def _probe_writeable(target: Path) -> tuple[bool, str]:

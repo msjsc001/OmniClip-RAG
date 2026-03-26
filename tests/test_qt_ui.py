@@ -20,7 +20,7 @@ from omniclip_rag.config import AppConfig, ensure_data_paths, load_config, save_
 from omniclip_rag.data_root_bootstrap import write_bootstrap_pointer
 from omniclip_rag.errors import BuildCancelledError
 from omniclip_rag.models import QueryInsights, QueryResult, SearchHit, SpaceEstimate
-from omniclip_rag.ui_i18n import data_root_reason_text, text
+from omniclip_rag.ui_i18n import data_root_reason_text, text, tooltip
 from omniclip_rag.preflight import estimate_storage_for_vault
 from omniclip_rag.vector_index import get_local_model_dir, hf_repo_cache_dir
 from omniclip_rag.reranker import get_local_reranker_dir, get_local_reranker_repo_cache_dir
@@ -252,6 +252,30 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_query_workspace_shows_scope_label_for_multiple_md_vaults(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        vault_a = TEST_ROOT / 'query_scope_a'
+        vault_b = TEST_ROOT / 'query_scope_b'
+        vault_a.mkdir(parents=True, exist_ok=True)
+        vault_b.mkdir(parents=True, exist_ok=True)
+        paths = ensure_data_paths(str(TEST_ROOT / 'query_scope_root'), str(vault_a))
+        config = AppConfig(
+            vault_path=str(vault_a),
+            data_root=str(paths.global_root),
+            vault_paths=[str(vault_a), str(vault_b)],
+            md_selected_vault_paths=[str(vault_a), str(vault_b)],
+            vector_backend='disabled',
+        )
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            self.assertFalse(workspace.query_scope_label.isHidden())
+            self.assertIn('2', workspace.query_scope_label.text())
+            self.assertIn('搜索范围', workspace.query_scope_label.text())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_query_workspace_requires_at_least_one_source_family(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -456,6 +480,19 @@ class QtUiTests(unittest.TestCase):
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             self.assertEqual(workspace.sub_tabs.tabText(workspace.sub_tabs.indexOf(workspace.runtime_page)), text('zh-CN', 'left_tab_runtime'))
+            ordered_tabs = [workspace.sub_tabs.tabText(index) for index in range(workspace.sub_tabs.count())]
+            self.assertEqual(
+                ordered_tabs,
+                [
+                    text('zh-CN', 'left_tab_start'),
+                    text('zh-CN', 'left_tab_settings'),
+                    text('zh-CN', 'left_tab_runtime'),
+                    text('zh-CN', 'left_tab_extensions'),
+                    text('zh-CN', 'left_tab_retrieval'),
+                    text('zh-CN', 'left_tab_ui'),
+                    text('zh-CN', 'left_tab_data'),
+                ],
+            )
             self.assertEqual(workspace.runtime_refresh_button.text(), text('zh-CN', 'runtime_refresh'))
             self.assertEqual(workspace.runtime_open_dir_button.text(), text('zh-CN', 'runtime_open_dir'))
             self.assertEqual(workspace.runtime_components_table.rowCount(), 3)
@@ -505,7 +542,9 @@ class QtUiTests(unittest.TestCase):
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         seen_preferences: list[tuple[str, int]] = []
+        seen_tooltip_preferences: list[bool] = []
         workspace.uiPreferencesChanged.connect(lambda code, scale: seen_preferences.append((code, scale)))
+        workspace.tooltipPreferencesChanged.connect(seen_tooltip_preferences.append)
         try:
             workspace._on_page_blocklist_saved('1\t^foo$')
             self.assertEqual(workspace._config.page_blocklist_rules, '1\t^foo$')
@@ -515,8 +554,10 @@ class QtUiTests(unittest.TestCase):
             self.assertEqual(workspace._config.rag_filter_custom_rules, 'custom-rule')
             workspace.ui_scale_spin.setValue(120)
             workspace.ui_theme_combo.setCurrentText(workspace._ui_theme_label('dark'))
+            workspace.ui_tooltips_check.setChecked(False)
             workspace._apply_ui_preferences()
             self.assertEqual(seen_preferences[-1], ('dark', 120))
+            self.assertEqual(seen_tooltip_preferences[-1], False)
             loaded = load_config(paths)
             self.assertIsNotNone(loaded)
             assert loaded is not None
@@ -526,6 +567,7 @@ class QtUiTests(unittest.TestCase):
             self.assertEqual(loaded.rag_filter_custom_rules, 'custom-rule')
             self.assertEqual(loaded.ui_theme, 'dark')
             self.assertEqual(loaded.ui_scale_percent, 120)
+            self.assertFalse(loaded.ui_tooltips_enabled)
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -626,14 +668,51 @@ class QtUiTests(unittest.TestCase):
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             labels = [label.text().strip() for label in workspace.quick_steps_widget.findChildren(QtWidgets.QLabel)]
-            self.assertEqual(len(labels), 3)
+            self.assertEqual(len(labels), 4)
             self.assertTrue(all(labels))
-            self.assertIn('runtime', labels[1].lower())
-            self.assertIn('下载当前模型', labels[1])
-            self.assertIn('预检查空间时间', labels[2])
+            self.assertIn('主库', labels[1])
+            self.assertIn('纳入范围', labels[1])
+            self.assertIn('Runtime', labels[2])
+            self.assertIn('下载当前模型', labels[2])
+            self.assertIn('预检查空间时间', labels[3])
         finally:
             workspace.deleteLater()
             app.processEvents()
+
+    def test_config_workspace_md_vault_table_uses_primary_and_scope_labels(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        second_vault = TEST_ROOT / 'second-vault'
+        second_vault.mkdir(parents=True, exist_ok=True)
+        config = AppConfig(
+            vault_path=str(SAMPLE_ROOT),
+            data_root=str(paths.global_root),
+            vault_paths=[str(SAMPLE_ROOT), str(second_vault)],
+            md_selected_vault_paths=[str(SAMPLE_ROOT)],
+        )
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            self.assertEqual(workspace.md_vault_table.horizontalHeaderItem(0).text(), text('zh-CN', 'md_vault_col_current'))
+            self.assertEqual(workspace.md_vault_table.horizontalHeaderItem(1).text(), text('zh-CN', 'md_vault_col_enabled'))
+            self.assertTrue(workspace.md_vault_table.horizontalHeaderItem(0).toolTip())
+            self.assertTrue(workspace.md_vault_table.horizontalHeaderItem(1).toolTip())
+            self.assertEqual(workspace.md_vault_table.item(0, 0).toolTip(), tooltip('zh-CN', 'md_primary_vault'))
+            self.assertEqual(workspace.md_vault_table.item(0, 1).toolTip(), tooltip('zh-CN', 'md_selected_scope'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_apply_application_style_updates_global_tooltip_property(self) -> None:
+        app = get_app()
+        theme = build_theme('dark', 110)
+        from omniclip_rag.ui_next_qt.theme import apply_application_style
+
+        apply_application_style(app, theme, tooltips_enabled=False)
+        self.assertFalse(bool(app.property('_omniclip_tooltips_enabled')))
+        self.assertIn('QToolTip', app.styleSheet())
+        apply_application_style(app, theme, tooltips_enabled=True)
+        self.assertTrue(bool(app.property('_omniclip_tooltips_enabled')))
 
     def test_query_workspace_migrates_key_tooltips(self) -> None:
         app = get_app()
@@ -1013,6 +1092,39 @@ class QtUiTests(unittest.TestCase):
             live_config, live_paths = workspace.current_runtime_snapshot()
             self.assertEqual(str(live_paths.global_root), str(paths_a.global_root))
             self.assertEqual(live_config.data_root, str(paths_a.global_root))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_current_runtime_snapshot_keeps_md_selected_vault_scope(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        vault_a = TEST_ROOT / 'runtime_scope_a'
+        vault_b = TEST_ROOT / 'runtime_scope_b'
+        vault_a.mkdir(parents=True, exist_ok=True)
+        vault_b.mkdir(parents=True, exist_ok=True)
+        paths = ensure_data_paths(str(TEST_ROOT / 'runtime_scope_root'), str(vault_a))
+        config = AppConfig(
+            vault_path=str(vault_a),
+            data_root=str(paths.global_root),
+            vault_paths=[str(vault_a), str(vault_b)],
+            md_selected_vault_paths=[str(vault_a), str(vault_b)],
+            vector_backend='disabled',
+        )
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            live_config, live_paths = workspace.current_runtime_snapshot()
+            self.assertEqual(
+                live_config.md_selected_vault_paths,
+                [str(vault_a.resolve()), str(vault_b.resolve())],
+            )
+            self.assertEqual(str(live_paths.global_root), str(paths.global_root))
+            item = workspace.md_vault_table.item(1, 1)
+            self.assertIsNotNone(item)
+            item.setCheckState(QtCore.Qt.CheckState.Unchecked)
+            app.processEvents()
+            live_config, _live_paths = workspace.current_runtime_snapshot()
+            self.assertEqual(live_config.md_selected_vault_paths, [str(vault_a.resolve())])
         finally:
             workspace.deleteLater()
             app.processEvents()

@@ -181,6 +181,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config_workspace.resultSummaryChanged.connect(self._set_config_result_summary)
         self.config_workspace.runtimeConfigChanged.connect(self._on_runtime_config_changed)
         self.config_workspace.uiPreferencesChanged.connect(self.apply_ui_preferences)
+        self.config_workspace.tooltipPreferencesChanged.connect(self.apply_tooltip_preferences)
         if not self._recovery_mode:
             self.query_workspace = QueryWorkspace(
                 config=self._config,
@@ -459,11 +460,17 @@ class MainWindow(QtWidgets.QMainWindow):
         theme = build_theme(theme_code, scale_percent)
         app = QtWidgets.QApplication.instance()
         if app is not None:
-            apply_application_style(app, theme)
+            apply_application_style(app, theme, tooltips_enabled=bool(getattr(self._config, 'ui_tooltips_enabled', True)))
         self._theme = theme
         if self.query_workspace is not None:
             self.query_workspace.update_theme(theme)
         self.config_workspace.update_theme(theme)
+
+    def apply_tooltip_preferences(self, enabled: bool) -> None:
+        self._config.ui_tooltips_enabled = bool(enabled)
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            apply_application_style(app, self._theme, tooltips_enabled=bool(enabled))
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         try:

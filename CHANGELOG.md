@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## V0.4.6 - 2026-03-26
+
+### Added
+
+- Added [RELEASE_NOTES_v0.4.6](releases/RELEASE_NOTES_v0.4.6.md) for the Markdown multi-vault UI wording, tab-order, and hover-help polish release.
+- Added a global UI-level hover-help preference so themed tooltip hints can be enabled or disabled without restarting the app.
+
+### Changed
+
+- Changed visible app/package/release metadata to `v0.4.6` across the desktop app, MCP line, README badges, setup examples, release notes, example client configs, and Registry-facing release URLs.
+- Changed the configuration tab order to the current product flow: `开始 -> 设置 -> Runtime -> 拓展格式 -> 检索强化 -> UI -> 数据`.
+- Changed the Markdown source-directory console wording from `当前 / 启用` to the clearer `主库 / 纳入范围`, while keeping the existing single-primary plus multi-selected-range data model intact.
+- Changed the in-app quick-start and guide copy so they now describe the current software structure: data root first, then MD source directories, then Runtime/model readiness, then preflight/build/search.
+
+### Fixed
+
+- Fixed the growing UI cognition gap where the multi-vault Start page had already evolved beyond the old single-vault wording but the labels, guide text, and page order still reflected earlier app structure.
+- Fixed the lack of a consistent, theme-aligned hover-help layer by routing tooltip styling and fast-display behavior through one app-wide control surface instead of scattered default Qt tooltips.
+
 ## V0.4.5 - 2026-03-25
 
 ### Added

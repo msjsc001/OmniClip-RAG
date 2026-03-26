@@ -5,6 +5,7 @@ import time
 import logging
 from collections.abc import Callable
 from dataclasses import asdict, replace
+from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
 
@@ -17,9 +18,14 @@ from ..vector_index import get_local_model_dir, is_local_model_ready
 from .query_table_model import QueryResultsTableModel
 from .searchable_text_panel import SearchableTextPanel
 from .theme import ThemeState, scaled
-from .workers import QueryTaskResult, QueryWorker
+from .workers import MultiVaultQueryWorker, QueryTaskResult, QueryWorker
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _SplitterFriendlyFrame(QtWidgets.QFrame):
+    def minimumSizeHint(self) -> QtCore.QSize:
+        return QtCore.QSize(0, 0)
 
 
 class QueryWorkspace(QtWidgets.QWidget):
@@ -59,7 +65,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._context_sections: list[dict[str, object]] = []
         self._log_lines: list[str] = []
         self._query_limit_recommendation: dict[str, object] | None = None
-        self._worker: QueryWorker | None = None
+        self._worker: QtCore.QObject | None = None
         self._pending_query_splitter_state: bytes | None = None
         self._pending_results_splitter_state: bytes | None = None
         self._splitter_restore_queued = False
@@ -208,6 +214,10 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.query_limit_hint_label.setProperty('role', 'muted')
         self.query_limit_hint_label.setWordWrap(True)
         meta_row.addWidget(self.query_limit_hint_label, 1, 0, 1, 4)
+        self.query_scope_label = QtWidgets.QLabel(self.search_card)
+        self.query_scope_label.setProperty('role', 'muted')
+        self.query_scope_label.setWordWrap(True)
+        meta_row.addWidget(self.query_scope_label, 2, 0, 1, 4)
 
         self.source_widget = QtWidgets.QWidget(self.search_details_widget)
         source_row = QtWidgets.QHBoxLayout(self.source_widget)
@@ -358,7 +368,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         title: str,
         subtitle: str,
     ) -> tuple[QtWidgets.QFrame, QtWidgets.QVBoxLayout, QtWidgets.QWidget, QtWidgets.QHBoxLayout]:
-        card = QtWidgets.QFrame(self)
+        card = _SplitterFriendlyFrame(self)
         card.setProperty('card', True)
         layout = QtWidgets.QVBoxLayout(card)
         margin = scaled(self._theme, 14, minimum=10)
@@ -425,6 +435,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.preview_panel.set_text(self._tr('preview_empty'))
         self.context_panel.set_text(self._tr('context_empty'))
         self.log_panel.set_text(self._tr('log_empty'))
+        self._refresh_query_scope_label()
 
     def default_query_splitter_sizes(self) -> list[int]:
         return [max(scaled(self._theme, 250, minimum=220), 220), max(scaled(self._theme, 620, minimum=440), 440)]
@@ -480,6 +491,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.clear_runtime_feedback()
         self._refresh_page_blocklist_summary()
         self._refresh_query_limit_hint()
+        self._refresh_query_scope_label()
 
     def clear_runtime_feedback(self) -> None:
         self._query_runtime_warnings = ()
@@ -567,6 +579,38 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._refresh_context_selection_summary()
         self._refresh_page_sort_button()
         self._apply_search_controls_collapsed()
+        self._refresh_query_scope_label()
+
+    def _selected_markdown_vaults_from_config(self, config) -> tuple[str, ...]:
+        vault_path = normalize_vault_path(getattr(config, 'vault_path', ''))
+        ordered: list[str] = []
+        seen: set[str] = set()
+        raw_values = list(getattr(config, 'md_selected_vault_paths', ()) or ()) or ([vault_path] if vault_path else [])
+        for raw_value in raw_values:
+            normalized = normalize_vault_path(raw_value)
+            lowered = normalized.lower()
+            if not normalized or lowered in seen:
+                continue
+            seen.add(lowered)
+            ordered.append(normalized)
+        return tuple(ordered)
+
+    def _refresh_query_scope_label(self, config=None) -> None:
+        config_value = config or self._config
+        selected_vaults = self._selected_markdown_vaults_from_config(config_value)
+        current_vault = normalize_vault_path(getattr(config_value, 'vault_path', ''))
+        if len(selected_vaults) <= 1:
+            self.query_scope_label.clear()
+            self.query_scope_label.setVisible(False)
+            return
+        self.query_scope_label.setText(
+            self._tr(
+                'query_scope_summary',
+                current=(Path(current_vault).name or current_vault or self._tr('none_value')),
+                count=len(selected_vaults),
+            )
+        )
+        self.query_scope_label.setVisible(True)
 
     def search_controls_collapsed(self) -> bool:
         return bool(self._search_controls_collapsed)
@@ -598,6 +642,9 @@ class QueryWorkspace(QtWidgets.QWidget):
         restore_sizes = self._expanded_query_splitter_sizes
         if restore_sizes and len(restore_sizes) == 2 and min(restore_sizes) > 0:
             self.query_splitter.setSizes(restore_sizes)
+            return
+        current_sizes = list(self.query_splitter.sizes())
+        if self._splitter_state_applied and len(current_sizes) == 2 and min(current_sizes) > 0:
             return
         self.query_splitter.setSizes(self.default_query_splitter_sizes())
 
@@ -950,7 +997,17 @@ class QueryWorkspace(QtWidgets.QWidget):
         if not vault_path:
             QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), self._tr('choose_vault_first'))
             return None
-        config = replace(config, vault_path=vault_path, query_limit=limit, query_score_threshold=score_threshold)
+        selected_vaults = self._selected_markdown_vaults_from_config(config)
+        if 'markdown' in allowed_families and not selected_vaults:
+            QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), self._tr('choose_vault_first'))
+            return None
+        config = replace(
+            config,
+            vault_path=vault_path,
+            query_limit=limit,
+            query_score_threshold=score_threshold,
+            md_selected_vault_paths=list(selected_vaults),
+        )
         paths = ensure_data_paths(getattr(config, 'data_root', None), vault_path)
         if self._backend_enabled(config) and not is_local_model_ready(config, paths):
             model_dir = get_local_model_dir(config, paths)
@@ -967,6 +1024,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         if prepared is None:
             return
         query_text, score_threshold, config, paths, copy_result, allowed_families = prepared
+        selected_vaults = self._selected_markdown_vaults_from_config(config)
         self._busy = True
         self._query_progress_payload = {'overall_percent': 0.0, 'stage_status': 'prepare'}
         self.search_button.setEnabled(False)
@@ -976,16 +1034,25 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.sensitive_filter_button.setEnabled(False)
         self.statusMessageChanged.emit(f"{self._tr('search_button')}…")
         self._append_log(f"{self._tr('search_button')}：{query_text}")
+        self._refresh_query_scope_label(config)
         self._refresh_query_status_banner()
-
-        worker = QueryWorker(
-            config=config,
-            paths=paths,
-            query_text=query_text,
-            copy_result=copy_result,
-            score_threshold=score_threshold,
-            allowed_families=allowed_families,
-        )
+        if len(selected_vaults) > 1:
+            worker = MultiVaultQueryWorker(
+                config=replace(config, md_selected_vault_paths=list(selected_vaults)),
+                query_text=query_text,
+                copy_result=copy_result,
+                score_threshold=score_threshold,
+                allowed_families=allowed_families,
+            )
+        else:
+            worker = QueryWorker(
+                config=config,
+                paths=paths,
+                query_text=query_text,
+                copy_result=copy_result,
+                score_threshold=score_threshold,
+                allowed_families=allowed_families,
+            )
         worker.progress.connect(self._on_query_progress)
         worker.succeeded.connect(self._on_query_success)
         worker.failed.connect(self._on_query_failure)

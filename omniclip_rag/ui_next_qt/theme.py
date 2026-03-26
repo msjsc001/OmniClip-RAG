@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from PySide6 import QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 LIGHT_THEME_COLORS = {
     'bg': '#F5F7FA',
@@ -311,6 +311,34 @@ class ThemeState:
     colors: dict[str, str]
 
 
+class _TooltipProxyStyle(QtWidgets.QProxyStyle):
+    def __init__(self, base: QtWidgets.QStyle, *, wakeup_delay_ms: int = 120) -> None:
+        super().__init__(base)
+        self._wakeup_delay_ms = max(0, int(wakeup_delay_ms))
+
+    def styleHint(
+        self,
+        hint: QtWidgets.QStyle.StyleHint,
+        option: QtWidgets.QStyleOption | None = None,
+        widget: QtWidgets.QWidget | None = None,
+        returnData: QtWidgets.QStyleHintReturn | None = None,
+    ) -> int:
+        if hint == QtWidgets.QStyle.StyleHint.SH_ToolTip_WakeUpDelay:
+            return self._wakeup_delay_ms
+        return super().styleHint(hint, option, widget, returnData)
+
+
+class _TooltipVisibilityFilter(QtCore.QObject):
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() == QtCore.QEvent.Type.ToolTip:
+            app = QtWidgets.QApplication.instance()
+            if app is not None and not bool(app.property('_omniclip_tooltips_enabled')):
+                QtWidgets.QToolTip.hideText()
+                event.ignore()
+                return True
+        return super().eventFilter(watched, event)
+
+
 def detect_system_theme_mode() -> str:
     if sys.platform != 'win32':
         return 'light'
@@ -348,9 +376,26 @@ def scaled(theme: ThemeState, value: int, *, minimum: int = 0) -> int:
     return max(int(round(value * factor)), minimum)
 
 
-def apply_application_style(app: QtWidgets.QApplication, theme: ThemeState) -> None:
+def _configure_tooltip_behavior(app: QtWidgets.QApplication, *, enabled: bool) -> None:
+    tooltip_filter = getattr(app, '_omniclip_tooltip_filter', None)
+    if tooltip_filter is None:
+        tooltip_filter = _TooltipVisibilityFilter(app)
+        app.installEventFilter(tooltip_filter)
+        setattr(app, '_omniclip_tooltip_filter', tooltip_filter)
+    app.setProperty('_omniclip_tooltips_enabled', bool(enabled))
+    if not enabled:
+        QtWidgets.QToolTip.hideText()
+
+
+def apply_application_style(
+    app: QtWidgets.QApplication,
+    theme: ThemeState,
+    *,
+    tooltips_enabled: bool = True,
+) -> None:
     colors = theme.colors
-    app.setStyle('Fusion')
+    base_style = QtWidgets.QStyleFactory.create('Fusion') or app.style()
+    app.setStyle(_TooltipProxyStyle(base_style))
     font = QtGui.QFont('Segoe UI', max(int(round(10 * theme.scale_percent / 100.0)), 9))
     app.setFont(font)
     palette = app.palette()
@@ -364,6 +409,7 @@ def apply_application_style(app: QtWidgets.QApplication, theme: ThemeState) -> N
     palette.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(colors['select']))
     palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(colors['ink']))
     app.setPalette(palette)
+    _configure_tooltip_behavior(app, enabled=tooltips_enabled)
     app.setStyleSheet(build_stylesheet(theme))
 
 
@@ -381,6 +427,13 @@ def build_stylesheet(theme: ThemeState) -> str:
         color: {colors['ink']};
         font-family: 'Segoe UI';
         font-size: {font_size}pt;
+    }}
+    QToolTip {{
+        background: {colors['card']};
+        color: {colors['muted']};
+        border: 1px solid {colors['border']};
+        border-radius: {max(radius - 2, 6)}px;
+        padding: {scaled(theme, 6, minimum=4)}px {scaled(theme, 9, minimum=7)}px;
     }}
     QWidget#AppRoot {{
         background: {colors['bg']};

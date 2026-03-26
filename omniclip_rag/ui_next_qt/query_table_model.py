@@ -69,7 +69,13 @@ class QueryResultsTableModel(QtCore.QAbstractTableModel):
             if column == self.COLUMN_INCLUDE:
                 return ''
             if column == self.COLUMN_TITLE:
-                return getattr(hit, 'title', '')
+                source_label = str(getattr(hit, 'source_label', '') or '').strip()
+                title = str(getattr(hit, 'title', '') or '').strip()
+                if source_label and title:
+                    if source_label.endswith(title):
+                        return source_label
+                    return f'{source_label} · {title}'
+                return source_label or title
             if column == self.COLUMN_REASON:
                 return getattr(hit, 'reason', '') or self._tr('reason_fallback')
             if column == self.COLUMN_ANCHOR:

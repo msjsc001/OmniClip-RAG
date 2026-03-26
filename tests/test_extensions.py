@@ -118,7 +118,7 @@ class ExtensionSkeletonTests(unittest.TestCase):
             replacement.deleteLater()
             app.processEvents()
 
-    def test_unchecking_extension_directory_requires_confirmation(self) -> None:
+    def test_unchecking_extension_directory_cancel_restores_selection(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT / 'data_uncheck_confirm'), str(SAMPLE_ROOT))
@@ -133,12 +133,61 @@ class ExtensionSkeletonTests(unittest.TestCase):
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
             item = workspace.ext_pdf_source_table.item(0, 0)
-            with patch('omniclip_rag.ui_next_qt.config_workspace.QtWidgets.QMessageBox.question', return_value=QtWidgets.QMessageBox.StandardButton.No):
+            def _cancel_uncheck(box: QtWidgets.QMessageBox) -> int:
+                for button in box.buttons():
+                    if button.text() == text('zh-CN', 'extensions_source_unselect_cancel'):
+                        button.click()
+                        break
+                return 0
+
+            with patch.object(QtWidgets.QMessageBox, 'exec', _cancel_uncheck):
                 item.setCheckState(QtCore.Qt.CheckState.Unchecked)
                 app.processEvents()
             refreshed_item = workspace.ext_pdf_source_table.item(0, 0)
             self.assertIsNotNone(refreshed_item)
             self.assertEqual(refreshed_item.checkState(), QtCore.Qt.CheckState.Checked)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_unchecking_extension_directory_can_keep_index_without_search(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_uncheck_keep'), str(SAMPLE_ROOT))
+        registry = ExtensionRegistry()
+        state = registry.load(paths)
+        state.pdf_config.enabled = True
+        state.pdf_config.source_directories = [
+            ExtensionSourceDirectory(path=str(SAMPLE_ROOT), selected=True, state=ExtensionDirectoryState.ENABLED, managed_by_workspace=True)
+        ]
+        registry.save(paths, state)
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            item = workspace.ext_pdf_source_table.item(0, 0)
+
+            def _keep_uncheck(box: QtWidgets.QMessageBox) -> int:
+                for button in box.buttons():
+                    if button.text() == text('zh-CN', 'extensions_source_unselect_keep'):
+                        button.click()
+                        break
+                return 0
+
+            with patch.object(QtWidgets.QMessageBox, 'exec', _keep_uncheck):
+                item.setCheckState(QtCore.Qt.CheckState.Unchecked)
+                app.processEvents()
+
+            refreshed_item = workspace.ext_pdf_source_table.item(0, 0)
+            self.assertIsNotNone(refreshed_item)
+            self.assertEqual(refreshed_item.checkState(), QtCore.Qt.CheckState.Unchecked)
+            status_item = workspace.ext_pdf_source_table.item(0, 2)
+            self.assertIsNotNone(status_item)
+            self.assertIn(text('zh-CN', 'extensions_source_state_unselected_kept'), status_item.text())
+            action_widget = workspace.ext_pdf_source_table.cellWidget(0, 4)
+            self.assertIsNotNone(action_widget)
+            buttons = action_widget.findChildren(QtWidgets.QPushButton)
+            self.assertTrue(buttons)
+            self.assertTrue(all(button.isEnabled() for button in buttons))
         finally:
             workspace.deleteLater()
             app.processEvents()

@@ -119,6 +119,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
     logMessageAdded = QtCore.Signal(str)
     showQueryLogRequested = QtCore.Signal()
     uiPreferencesChanged = QtCore.Signal(str, int)
+    tooltipPreferencesChanged = QtCore.Signal(bool)
     def __init__(
         self,
         *,
@@ -142,6 +143,17 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._recovery_reason_code = str(recovery_reason_code or '').strip()
         self._recovery_reason_text = str(recovery_reason_text or '').strip()
         self._saved_vaults = list(getattr(config, 'vault_paths', []))
+        self._md_selected_vaults = list(getattr(config, 'md_selected_vault_paths', []) or ([getattr(config, 'vault_path', '')] if getattr(config, 'vault_path', '') else []))
+        self._md_vault_table_sync = False
+        self._md_vault_snapshots: dict[str, dict[str, object] | None] = {}
+        self._md_status_worker: FunctionWorker | None = None
+        self._md_watch_workers: dict[str, WatchWorker] = {}
+        self._md_watch_modes: dict[str, str] = {}
+        self._md_batch_queue: list[dict[str, object]] = []
+        self._md_batch_results: list[dict[str, object]] = []
+        self._md_batch_snapshot: tuple[str, ...] = ()
+        self._md_batch_label_key: str | None = None
+        self._md_batch_current_vault: str = ''
         self._known_data_roots = bootstrap_known_data_roots()
         if str(getattr(paths, 'global_root', '') or '').strip():
             self._known_data_roots = [str(paths.global_root), *self._known_data_roots]
@@ -251,18 +263,18 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.runtime_page, self.runtime_body = self._make_scroll_tab()
         self.sub_tabs.addTab(self.start_page, self._tr('left_tab_start'))
         self.sub_tabs.addTab(self.settings_page, self._tr('left_tab_settings'))
-        self.sub_tabs.addTab(self.ui_page, self._tr('left_tab_ui'))
-        self.sub_tabs.addTab(self.retrieval_page, self._tr('left_tab_retrieval'))
-        self.sub_tabs.addTab(self.data_page, self._tr('left_tab_data'))
-        self.sub_tabs.addTab(self.extensions_page, self._tr('left_tab_extensions'))
         self.sub_tabs.addTab(self.runtime_page, self._tr('left_tab_runtime'))
+        self.sub_tabs.addTab(self.extensions_page, self._tr('left_tab_extensions'))
+        self.sub_tabs.addTab(self.retrieval_page, self._tr('left_tab_retrieval'))
+        self.sub_tabs.addTab(self.ui_page, self._tr('left_tab_ui'))
+        self.sub_tabs.addTab(self.data_page, self._tr('left_tab_data'))
         self._build_start_page(self.start_body)
         self._build_settings_page(self.settings_body)
-        self._build_ui_page(self.ui_body)
-        self._build_retrieval_page(self.retrieval_body)
-        self._build_data_page(self.data_body)
-        self._build_extensions_page(self.extensions_body)
         self._build_runtime_page(self.runtime_body)
+        self._build_extensions_page(self.extensions_body)
+        self._build_retrieval_page(self.retrieval_body)
+        self._build_ui_page(self.ui_body)
+        self._build_data_page(self.data_body)
         self.device_combo.currentTextChanged.connect(self._on_device_selection_changed)
         self.backend_combo.currentTextChanged.connect(self._on_runtime_sensitive_setting_changed)
         self.runtime_combo.currentTextChanged.connect(self._on_runtime_sensitive_setting_changed)
@@ -732,7 +744,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         steps_layout = QtWidgets.QVBoxLayout(self.quick_steps_widget)
         steps_layout.setContentsMargins(0, 0, 0, 0)
         steps_layout.setSpacing(8)
-        for index, key in enumerate(('step_1', 'step_2', 'step_3'), start=1):
+        for index, key in enumerate(('step_1', 'step_2', 'step_3', 'step_4'), start=1):
             step = QtWidgets.QLabel(self._tr(key), self.quick_steps_widget)
             step.setWordWrap(True)
             step.setProperty('role', 'guide')
@@ -786,32 +798,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(10)
         workspace_layout.addLayout(form)
-        saved_caption = QtWidgets.QLabel(self._tr('saved_vaults_label'), workspace_card)
-        saved_caption.setProperty('role', 'muted')
-        form.addWidget(saved_caption, 0, 0)
         self.saved_vault_combo = QtWidgets.QComboBox(workspace_card)
         self.saved_vault_combo.currentTextChanged.connect(self._on_saved_vault_selected)
-        self.saved_vault_combo.setToolTip(self._tip('saved_vaults'))
-        form.addWidget(self.saved_vault_combo, 0, 1)
-        remove_button = QtWidgets.QPushButton(self._tr('remove_saved_vault'), workspace_card)
-        self._set_button_variant(remove_button, 'secondary')
-        remove_button.setToolTip(self._tip('remove_saved_vault'))
-        remove_button.clicked.connect(self._remove_selected_vault)
-        form.addWidget(remove_button, 0, 2)
-        vault_label = QtWidgets.QLabel(self._tr('vault_label'), workspace_card)
-        vault_label.setProperty('role', 'muted')
-        form.addWidget(vault_label, 1, 0)
+        self.saved_vault_combo.hide()
         self.vault_edit = QtWidgets.QLineEdit(workspace_card)
-        self.vault_edit.setToolTip(self._tip('vault'))
-        form.addWidget(self.vault_edit, 1, 1)
-        browse_vault = QtWidgets.QPushButton('...', workspace_card)
-        browse_vault.setToolTip(self._tip('browse_vault'))
-        self._set_button_variant(browse_vault, 'secondary')
-        browse_vault.clicked.connect(self._browse_vault)
-        form.addWidget(browse_vault, 1, 2)
+        self.vault_edit.hide()
         data_label = QtWidgets.QLabel(self._tr('data_dir_label'), workspace_card)
         data_label.setProperty('role', 'muted')
-        form.addWidget(data_label, 2, 0)
+        form.addWidget(data_label, 0, 0)
         self.data_root_combo = QtWidgets.QComboBox(workspace_card)
         self.data_root_combo.setEditable(True)
         self.data_root_combo.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
@@ -820,16 +814,66 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.data_root_combo.activated.connect(lambda _index: self._request_pending_data_root_switch())
         self.data_dir_edit = self.data_root_combo.lineEdit()
         self.data_dir_edit.editingFinished.connect(self._request_pending_data_root_switch)
-        form.addWidget(self.data_root_combo, 2, 1)
+        form.addWidget(self.data_root_combo, 0, 1)
         browse_data = QtWidgets.QPushButton('...', workspace_card)
         browse_data.setToolTip(self._tip('browse_data'))
         self._set_button_variant(browse_data, 'secondary')
         browse_data.clicked.connect(self._browse_data_root)
-        form.addWidget(browse_data, 2, 2)
+        form.addWidget(browse_data, 0, 2)
         self.remove_data_root_button = QtWidgets.QPushButton(self._tr('remove_saved_data_root'), workspace_card)
         self._set_button_variant(self.remove_data_root_button, 'secondary')
         self.remove_data_root_button.clicked.connect(self._remove_selected_data_root)
-        form.addWidget(self.remove_data_root_button, 2, 3)
+        form.addWidget(self.remove_data_root_button, 0, 3)
+        md_label = QtWidgets.QLabel(self._tr('md_vault_table_title'), workspace_card)
+        md_label.setProperty('role', 'muted')
+        form.addWidget(md_label, 1, 0)
+        md_toolbar = QtWidgets.QHBoxLayout()
+        md_toolbar.setSpacing(8)
+        form.addLayout(md_toolbar, 1, 1, 1, 3)
+        self.add_md_vault_button = QtWidgets.QPushButton(self._tr('add_md_vault_button'), workspace_card)
+        self._set_button_variant(self.add_md_vault_button, 'secondary')
+        self.add_md_vault_button.clicked.connect(self._browse_vault)
+        md_toolbar.addWidget(self.add_md_vault_button)
+        md_toolbar.addStretch(1)
+        self.md_vault_table = QtWidgets.QTableWidget(workspace_card)
+        self.md_vault_table.setColumnCount(6)
+        self.md_vault_table.setHorizontalHeaderLabels(
+            [
+                self._tr('md_vault_col_current'),
+                self._tr('md_vault_col_enabled'),
+                self._tr('md_vault_col_directory'),
+                self._tr('md_vault_col_status'),
+                self._tr('md_vault_col_stats'),
+                self._tr('md_vault_col_actions'),
+            ]
+        )
+        header_tooltips = {
+            0: self._tip('md_primary_vault'),
+            1: self._tip('md_selected_scope'),
+            2: self._tip('vault'),
+            3: self._tr('md_vault_col_status'),
+            4: self._tr('md_vault_col_stats'),
+            5: self._tr('md_vault_col_actions'),
+        }
+        for column, tip in header_tooltips.items():
+            header_item = self.md_vault_table.horizontalHeaderItem(column)
+            if header_item is not None:
+                header_item.setToolTip(tip)
+        self.md_vault_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.md_vault_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.md_vault_table.setAlternatingRowColors(True)
+        self.md_vault_table.setWordWrap(True)
+        self.md_vault_table.verticalHeader().setVisible(False)
+        self.md_vault_table.verticalHeader().setDefaultSectionSize(scaled(self._theme, 60, minimum=52))
+        md_header = self.md_vault_table.horizontalHeader()
+        md_header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        md_header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        md_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        md_header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        md_header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        md_header.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.md_vault_table.itemChanged.connect(self._handle_md_vault_table_item_changed)
+        form.addWidget(self.md_vault_table, 2, 0, 1, 4)
         self.workspace_summary_label = QtWidgets.QLabel(workspace_card)
         self.workspace_summary_label.setWordWrap(True)
         self.workspace_summary_label.setProperty('role', 'guide')
@@ -1043,6 +1087,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.ui_theme_combo.setToolTip(self._tip('ui_theme'))
         self.ui_theme_combo.addItems(self._ui_theme_choices())
         form.addWidget(self.ui_theme_combo, 1, 1)
+        tooltips_label = QtWidgets.QLabel(self._tr('ui_tooltips_label'), card)
+        tooltips_label.setProperty('role', 'muted')
+        form.addWidget(tooltips_label, 2, 0)
+        self.ui_tooltips_check = QtWidgets.QCheckBox(card)
+        self.ui_tooltips_check.setToolTip(self._tip('ui_tooltips_enabled'))
+        form.addWidget(self.ui_tooltips_check, 2, 1)
         hint = QtWidgets.QLabel(self._tr('ui_scale_hint'), card)
         hint.setProperty('role', 'muted')
         hint.setWordWrap(True)
@@ -1348,6 +1398,30 @@ class ConfigWorkspace(QtWidgets.QWidget):
         return 'missing'
     def _index_ready(self, snapshot: dict[str, object] | None = None) -> bool:
         return self._current_index_state(snapshot) == 'ready'
+
+    def _selected_markdown_index_ready(self) -> bool:
+        selected = self._selected_markdown_vaults()
+        if not selected:
+            return False
+        for vault in selected:
+            snapshot = self._md_vault_snapshots.get(vault)
+            if isinstance(snapshot, dict) and self._index_ready(snapshot):
+                return True
+            if vault == normalize_vault_path(self.vault_edit.text().strip()) and self._index_ready(self._status_snapshot):
+                return True
+        return False
+
+    def _selected_markdown_ready_vaults(self) -> list[str]:
+        ready: list[str] = []
+        for vault in self._selected_markdown_vaults():
+            snapshot = self._md_vault_snapshots.get(vault)
+            if isinstance(snapshot, dict) and self._index_ready(snapshot):
+                ready.append(vault)
+                continue
+            if vault == normalize_vault_path(self.vault_edit.text().strip()) and self._index_ready(self._status_snapshot):
+                ready.append(vault)
+        return ready
+
     def _watch_allowed(self, snapshot: dict[str, object] | None = None) -> bool:
         source = snapshot if isinstance(snapshot, dict) else self._status_snapshot
         if isinstance(source, dict) and 'watch_allowed' in source:
@@ -1438,6 +1512,188 @@ class ConfigWorkspace(QtWidgets.QWidget):
             seen.add(normalized)
             ordered.append(normalized)
         return ordered
+
+    def _normalize_md_selected_vaults(self, selected_vaults: list[str] | tuple[str, ...] | None = None, *, active_vault: str = '') -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        allowed = {item.lower() for item in self._collect_vault_paths(active_vault)}
+        for raw_value in list(selected_vaults or []):
+            normalized = normalize_vault_path(raw_value)
+            lowered = normalized.lower()
+            if not normalized or lowered in seen or lowered not in allowed:
+                continue
+            seen.add(lowered)
+            ordered.append(normalized)
+        if not ordered and active_vault:
+            normalized_active = normalize_vault_path(active_vault)
+            if normalized_active:
+                ordered.append(normalized_active)
+        return ordered
+
+    def _selected_markdown_vaults(self) -> list[str]:
+        return list(self._normalize_md_selected_vaults(self._md_selected_vaults, active_vault=self.vault_edit.text().strip()))
+
+    def _is_md_vault_selected(self, vault: str) -> bool:
+        normalized = normalize_vault_path(vault).lower()
+        return any(normalize_vault_path(item).lower() == normalized for item in self._selected_markdown_vaults())
+
+    def _ready_md_vault_snapshots(self) -> list[dict[str, object]]:
+        ready: list[dict[str, object]] = []
+        for vault in self._selected_markdown_vaults():
+            snapshot = self._md_vault_snapshots.get(vault)
+            if isinstance(snapshot, dict) and snapshot.get('index_ready'):
+                ready.append(snapshot)
+        return ready
+
+    def _md_vault_status_text(self, vault: str, snapshot: dict[str, object] | None) -> str:
+        if normalize_vault_path(vault) == normalize_vault_path(self.vault_edit.text().strip()):
+            if self._watch_active and vault in self._md_watch_workers:
+                return self._tr('md_vault_state_watching')
+        if vault in self._md_watch_workers:
+            return self._tr('md_vault_state_watching')
+        if not isinstance(snapshot, dict):
+            return self._tr('md_vault_state_unknown')
+        if snapshot.get('pending_rebuild'):
+            return self._tr('md_vault_state_pending')
+        if snapshot.get('index_ready'):
+            return self._tr('md_vault_state_ready')
+        if snapshot.get('index_state') == 'checking':
+            return self._tr('md_vault_state_checking')
+        return self._tr('md_vault_state_missing')
+
+    def _md_vault_stats_text(self, snapshot: dict[str, object] | None) -> str:
+        if not isinstance(snapshot, dict):
+            return self._tr('md_vault_stats_empty')
+        stats = snapshot.get('stats') if isinstance(snapshot.get('stats'), dict) else {}
+        return self._tr(
+            'md_vault_stats_summary',
+            files=int(stats.get('files', 0) or 0),
+            chunks=int(stats.get('chunks', 0) or 0),
+            refs=int(stats.get('refs', 0) or 0),
+        )
+
+    def _build_md_vault_actions_widget(self, vault: str, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget(parent)
+        layout = QtWidgets.QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        normalized = normalize_vault_path(vault)
+
+        def _add_button(text_key: str, variant: str, handler) -> None:
+            button = QtWidgets.QPushButton(self._tr(text_key), container)
+            self._set_button_variant(button, variant)
+            button.setMinimumHeight(scaled(self._theme, 28, minimum=26))
+            button.clicked.connect(handler)
+            button.setEnabled(not self._busy)
+            layout.addWidget(button)
+
+        _add_button('md_vault_row_preflight', 'secondary', lambda _checked=False, v=normalized: self._run_markdown_preflight_for_vault(v))
+        _add_button('md_vault_row_rebuild', 'primary', lambda _checked=False, v=normalized: self._run_markdown_rebuild_for_vault(v))
+        watch_key = 'md_vault_row_watch_stop' if normalized in self._md_watch_workers else 'md_vault_row_watch_start'
+        _add_button(watch_key, 'secondary', lambda _checked=False, v=normalized: self._toggle_watch_for_vault(v))
+        _add_button('remove_saved_vault', 'danger', lambda _checked=False, v=normalized: self._remove_vault_path(v))
+        layout.addStretch(1)
+        return container
+
+    def _refresh_md_vault_table(self) -> None:
+        if not hasattr(self, 'md_vault_table'):
+            return
+        active_vault = normalize_vault_path(self.vault_edit.text().strip())
+        selected = self._selected_markdown_vaults()
+        selected_set = {item.lower() for item in selected}
+        self._md_vault_table_sync = True
+        try:
+            table = self.md_vault_table
+            table.blockSignals(True)
+            table.setRowCount(len(self._saved_vaults))
+            for row, vault in enumerate(self._saved_vaults):
+                normalized = normalize_vault_path(vault)
+                snapshot = self._md_vault_snapshots.get(normalized)
+                current_item = QtWidgets.QTableWidgetItem()
+                current_item.setFlags(QtCore.Qt.ItemFlag.ItemIsUserCheckable | QtCore.Qt.ItemFlag.ItemIsEnabled)
+                current_item.setCheckState(QtCore.Qt.CheckState.Checked if normalized == active_vault else QtCore.Qt.CheckState.Unchecked)
+                current_item.setData(QtCore.Qt.ItemDataRole.UserRole, normalized)
+                current_item.setToolTip(self._tip('md_primary_vault'))
+                table.setItem(row, 0, current_item)
+                enabled_item = QtWidgets.QTableWidgetItem()
+                enabled_item.setFlags(QtCore.Qt.ItemFlag.ItemIsUserCheckable | QtCore.Qt.ItemFlag.ItemIsEnabled)
+                enabled_item.setCheckState(QtCore.Qt.CheckState.Checked if normalized.lower() in selected_set else QtCore.Qt.CheckState.Unchecked)
+                enabled_item.setData(QtCore.Qt.ItemDataRole.UserRole, normalized)
+                enabled_item.setToolTip(self._tip('md_selected_scope'))
+                table.setItem(row, 1, enabled_item)
+                directory_item = QtWidgets.QTableWidgetItem(normalized)
+                directory_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+                directory_item.setToolTip(normalized)
+                table.setItem(row, 2, directory_item)
+                status_item = QtWidgets.QTableWidgetItem(self._md_vault_status_text(normalized, snapshot))
+                status_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+                table.setItem(row, 3, status_item)
+                stats_item = QtWidgets.QTableWidgetItem(self._md_vault_stats_text(snapshot))
+                stats_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+                table.setItem(row, 4, stats_item)
+                table.setCellWidget(row, 5, self._build_md_vault_actions_widget(normalized, table))
+        finally:
+            self.md_vault_table.blockSignals(False)
+            self._md_vault_table_sync = False
+
+    def _handle_md_vault_table_item_changed(self, item: QtWidgets.QTableWidgetItem) -> None:
+        if self._md_vault_table_sync:
+            return
+        vault = normalize_vault_path(str(item.data(QtCore.Qt.ItemDataRole.UserRole) or ''))
+        if not vault:
+            return
+        if item.column() == 0 and item.checkState() == QtCore.Qt.CheckState.Checked:
+            self._activate_vault(vault, refresh_status=True)
+            return
+        if item.column() == 0 and item.checkState() != QtCore.Qt.CheckState.Checked:
+            self._md_vault_table_sync = True
+            try:
+                item.setCheckState(QtCore.Qt.CheckState.Checked if vault == normalize_vault_path(self.vault_edit.text().strip()) else QtCore.Qt.CheckState.Unchecked)
+            finally:
+                self._md_vault_table_sync = False
+            return
+        if item.column() == 1:
+            selected = self._selected_markdown_vaults()
+            lowered = vault.lower()
+            selected = [entry for entry in selected if normalize_vault_path(entry).lower() != lowered]
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                selected.append(vault)
+            self._md_selected_vaults = self._normalize_md_selected_vaults(selected, active_vault=self.vault_edit.text().strip())
+            self._refresh_md_vault_table()
+            self._refresh_status_summary(self._status_snapshot)
+
+    def _remove_vault_path(self, vault: str) -> None:
+        normalized = normalize_vault_path(vault)
+        if not normalized:
+            return
+        current_active = normalize_vault_path(self.vault_edit.text().strip())
+        removed_current = normalized.lower() == current_active.lower()
+        if normalized in self._md_watch_workers:
+            worker = self._md_watch_workers.pop(normalized)
+            worker.stop()
+            self._md_watch_modes.pop(normalized, None)
+            self._refresh_markdown_watch_state()
+        remaining = [item for item in self._saved_vaults if normalize_vault_path(item).lower() != normalized.lower()]
+        next_active = current_active
+        if removed_current:
+            next_active = remaining[0] if remaining else ''
+        self._md_selected_vaults = [item for item in self._selected_markdown_vaults() if normalize_vault_path(item).lower() != normalized.lower()]
+        self._md_vault_snapshots.pop(normalized, None)
+        if removed_current:
+            self._current_report = None
+            self._status_snapshot = None
+            self._latest_preflight_snapshot = None
+        self._set_saved_vaults(remaining, active_vault=next_active)
+        self.vault_edit.setText(next_active)
+        self._refresh_workspace_summary()
+        if removed_current and next_active and not self._busy and not self._watch_active:
+            self._load_initial_status()
+        elif removed_current:
+            self.statusMessageChanged.emit(self._tr('status_ready'))
+            self._refresh_status_summary(snapshot=None)
+        else:
+            self._refresh_status_summary(self._status_snapshot)
+        self._append_log(self._tr('log_vault_removed', vault=Path(normalized).name or normalized))
     def _set_saved_vaults(self, vaults: list[str], active_vault: str = '') -> None:
         ordered: list[str] = []
         seen: set[str] = set()
@@ -1448,6 +1704,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             seen.add(normalized)
             ordered.append(normalized)
         self._saved_vaults = ordered
+        self._md_selected_vaults = self._normalize_md_selected_vaults(self._md_selected_vaults, active_vault=active_vault or self.vault_edit.text().strip())
         self.saved_vault_combo.blockSignals(True)
         self.saved_vault_combo.clear()
         self.saved_vault_combo.addItems(self._saved_vaults)
@@ -1456,6 +1713,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         elif self._saved_vaults:
             self.saved_vault_combo.setCurrentIndex(0)
         self.saved_vault_combo.blockSignals(False)
+        self._refresh_md_vault_table()
         if self._extension_state_loaded:
             self._refresh_extension_saved_vault_sources()
 
@@ -1493,11 +1751,61 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 )
             except OSError:
                 summary = self._tr('workspace_pending', vault=Path(vault).name or vault)
+        selected_count = len(self._selected_markdown_vaults())
+        if selected_count > 1:
+            summary = f"{summary}\n\n{self._tr('md_vault_scope_summary', current=Path(vault).name or vault or self._tr('none_value'), count=selected_count)}"
         if show_probe_summary:
             summary = f"{self._selected_data_root_preview_summary()}\n\n{summary}"
         self.workspace_summary_label.setText(summary)
         self.data_workspace_label.setText(summary)
         self._refresh_log_storage_summary()
+
+    def _gather_markdown_status_snapshots(self, vaults: list[str], data_root: str) -> dict[str, dict[str, object] | None]:
+        snapshots: dict[str, dict[str, object] | None] = {}
+        for vault in vaults:
+            normalized = normalize_vault_path(vault)
+            if not normalized:
+                continue
+            config = replace(
+                self._config,
+                vault_path=normalized,
+                md_selected_vault_paths=self._normalize_md_selected_vaults(self._md_selected_vaults, active_vault=normalized),
+            )
+            paths = ensure_data_paths(data_root, normalized)
+            service = OmniClipService(config, paths)
+            try:
+                snapshots[normalized] = service.status_snapshot()
+            finally:
+                service.close()
+        return snapshots
+
+    def _schedule_markdown_status_refresh(self) -> None:
+        if self._md_status_worker is not None or self._busy or self._recovery_mode:
+            return
+        vaults = self._collect_vault_paths(self.vault_edit.text().strip())
+        if not vaults:
+            self._md_vault_snapshots = {}
+            self._refresh_md_vault_table()
+            return
+        data_root = self._active_data_root()
+        worker = FunctionWorker(fn=lambda vaults=list(vaults), root=data_root: self._gather_markdown_status_snapshots(vaults, root))
+        worker.succeeded.connect(self._on_markdown_status_refresh_success)
+        worker.failed.connect(self._on_markdown_status_refresh_failed)
+        worker.finished.connect(self._on_markdown_status_refresh_finished)
+        self._md_status_worker = worker
+        worker.start()
+
+    def _on_markdown_status_refresh_success(self, payload: object) -> None:
+        if isinstance(payload, dict):
+            self._md_vault_snapshots.update({normalize_vault_path(key): value for key, value in payload.items() if normalize_vault_path(key)})
+            self._refresh_md_vault_table()
+            self._refresh_status_summary(self._status_snapshot)
+
+    def _on_markdown_status_refresh_failed(self, message: str, traceback_text: str) -> None:
+        LOGGER.warning('Markdown multi-vault status refresh failed: %s', message)
+
+    def _on_markdown_status_refresh_finished(self) -> None:
+        self._md_status_worker = None
     def _on_data_root_text_changed(self) -> None:
         self._refresh_workspace_summary()
         if self._recovery_mode:
@@ -2585,7 +2893,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             layout.addWidget(button, row, column)
             buttons.append(button)
 
-        source_ready = source.selected and source.state not in {ExtensionDirectoryState.MISSING_TEMPORARILY, ExtensionDirectoryState.REMOVED_CONFIRMED}
+        source_ready = source.state not in {ExtensionDirectoryState.MISSING_TEMPORARILY, ExtensionDirectoryState.REMOVED_CONFIRMED}
         source_path = source.path
         _add_button(0, 0, 'extensions_row_preflight', 'secondary', lambda _checked=False, p=pipeline, s=source_path: self._run_extension_source_preflight(p, s), enabled=source_ready)
         _add_button(0, 1, 'extensions_row_scan_once', 'secondary', lambda _checked=False, p=pipeline, s=source_path: self._run_extension_source_scan_once(p, s), enabled=source_ready)
@@ -2643,7 +2951,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if source.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
             return self._tr('extensions_source_state_removed')
         if not source.selected:
-            return self._tr('extensions_source_state_disabled')
+            return self._tr('extensions_source_state_unselected_kept')
         if source.last_error:
             return self._tr('extensions_status_error')
         return self._tr('extensions_status_ready') if source.state == ExtensionDirectoryState.ENABLED else self._tr('extensions_status_not_built')
@@ -4100,6 +4408,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('extensions_stop_noop'))
 
     def shutdown_extension_runtimes(self) -> None:
+        for worker in list(self._md_watch_workers.values()):
+            try:
+                worker.stop()
+            except Exception:
+                pass
+        self._md_watch_workers.clear()
+        self._md_watch_modes.clear()
+        self._refresh_markdown_watch_state()
         try:
             self._tika_runtime_manager.shutdown()
         finally:
@@ -4169,20 +4485,28 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if new_selected == source.selected:
             return
         if not new_selected:
-            answer = QtWidgets.QMessageBox.question(
-                self,
-                self._tr('extensions_source_remove_confirm_title'),
-                self._tr('extensions_source_remove_confirm_body'),
-            )
-            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            box = QtWidgets.QMessageBox(self)
+            box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+            box.setWindowTitle(self._tr('extensions_source_remove_confirm_title'))
+            box.setText(self._tr('extensions_source_remove_confirm_body'))
+            keep_button = box.addButton(self._tr('extensions_source_unselect_keep'), QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+            clear_button = box.addButton(self._tr('extensions_source_unselect_delete'), QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+            cancel_button = box.addButton(self._tr('extensions_source_unselect_cancel'), QtWidgets.QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked == cancel_button or clicked is None:
                 self._extension_ui_sync = True
                 try:
                     item.setCheckState(QtCore.Qt.CheckState.Checked)
                 finally:
                     self._extension_ui_sync = False
                 return
-            config.source_directories[target_index] = replace(source, selected=False, state=ExtensionDirectoryState.REMOVED_CONFIRMED)
-            self._set_extension_source_progress(pipeline, normalized, self._tr('extensions_progress_pending_cleanup'))
+            if clicked == clear_button:
+                config.source_directories[target_index] = replace(source, selected=False, state=ExtensionDirectoryState.REMOVED_CONFIRMED)
+                self._set_extension_source_progress(pipeline, normalized, self._tr('extensions_progress_pending_cleanup'))
+            else:
+                config.source_directories[target_index] = replace(source, selected=False, last_error='')
+                self._set_extension_source_progress(pipeline, normalized, self._tr('extensions_source_state_unselected_kept'))
         else:
             config.source_directories[target_index] = replace(source, selected=True, state=ExtensionDirectoryState.ENABLED, last_error='')
             self._set_extension_source_progress(pipeline, normalized, self._tr('extensions_progress_idle'))
@@ -4968,18 +5292,22 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return
         if isinstance(snapshot, dict):
             self._status_snapshot = snapshot
+            current_vault = normalize_vault_path(str(snapshot.get('vault_path') or self.vault_edit.text().strip()))
+            if current_vault:
+                self._md_vault_snapshots[current_vault] = snapshot
             stats = snapshot.get('stats') or {}
-            self.files_value.setText(str(int(stats.get('files', 0) or 0)))
-            self.chunks_value.setText(str(int(stats.get('chunks', 0) or 0)))
-            self.refs_value.setText(str(int(stats.get('refs', 0) or 0)))
             latest = snapshot.get('latest_preflight')
             self._latest_preflight_snapshot = dict(latest) if isinstance(latest, dict) else None
         else:
             self._status_snapshot = None
-            self.files_value.setText('0')
-            self.chunks_value.setText('0')
-            self.refs_value.setText('0')
             self._latest_preflight_snapshot = None
+        ready_snapshots = self._ready_md_vault_snapshots()
+        files_total = sum(int((item.get('stats') or {}).get('files', 0) or 0) for item in ready_snapshots)
+        chunks_total = sum(int((item.get('stats') or {}).get('chunks', 0) or 0) for item in ready_snapshots)
+        refs_total = sum(int((item.get('stats') or {}).get('refs', 0) or 0) for item in ready_snapshots)
+        self.files_value.setText(str(files_total))
+        self.chunks_value.setText(str(chunks_total))
+        self.refs_value.setText(str(refs_total))
         if self._current_report is not None:
             self.preflight_label.setText(summarize_preflight(self._current_report, self._language_code))
         elif self._latest_preflight_snapshot is not None:
@@ -4993,9 +5321,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 seconds = float(self.interval_edit.text().strip() or '2.0')
             except ValueError:
                 seconds = 2.0
-            self.watch_summary_label.setText(self._tr('watch_running', mode=self._watch_mode_label(self._watch_mode), seconds=seconds))
+            active_watchers = max(len(self._md_watch_workers), 1)
+            if active_watchers > 1:
+                self.watch_summary_label.setText(self._tr('md_watch_running_multi', count=active_watchers, seconds=seconds))
+            else:
+                self.watch_summary_label.setText(self._tr('watch_running', mode=self._watch_mode_label(self._watch_mode), seconds=seconds))
         else:
             self.watch_summary_label.setText(self._default_watch_summary())
+        self._refresh_md_vault_table()
         self._refresh_workspace_summary()
         self._refresh_overview_chips()
         self._refresh_reranker_state(snapshot)
@@ -5030,7 +5363,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if self._watch_active:
             self.queryBlockStateChanged.emit(True, self._tr('query_status_blocked_title'), self._tr('query_status_blocked_detail_watch'))
             return
-        if not self._index_ready():
+        if not self._selected_markdown_vaults():
+            self.queryBlockStateChanged.emit(True, self._tr('query_status_blocked_title'), self._tr('md_vault_query_empty'))
+            return
+        if not self._selected_markdown_index_ready():
             detail_key = 'query_status_blocked_detail_index_checking' if self._current_index_state() == 'checking' else 'query_status_blocked_detail_index'
             self.queryBlockStateChanged.emit(True, self._tr('query_status_blocked_title'), self._tr(detail_key))
             return
@@ -5048,13 +5384,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _refresh_watch_button(self) -> None:
         self.watch_button.setText(self._tr('watch_stop') if self._watch_active else self._tr('watch_start'))
         self._set_button_variant(self.watch_button, 'danger' if self._watch_active else 'primary')
+        ready_vaults = self._selected_markdown_ready_vaults()
         index_state = self._current_index_state()
         if self._watch_active:
             self.watch_button.setEnabled(not self._watch_stopping)
             self.watch_button.setToolTip(self._tip('watch'))
             return
-        self.watch_button.setEnabled(not self._busy)
-        if index_state == 'ready':
+        self.watch_button.setEnabled(not self._busy and bool(self._selected_markdown_vaults()))
+        if ready_vaults:
             self.watch_button.setToolTip(self._tip('watch'))
         elif index_state == 'pending':
             self.watch_button.setToolTip(self._tr('watch_start_blocked_pending_body'))
@@ -5074,6 +5411,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.vault_edit.setText(config.vault_path)
             self._set_known_data_roots([config.data_root, *bootstrap_known_data_roots(), *self._known_data_roots], active_root=config.data_root)
             self._set_saved_vaults(config.vault_paths, active_vault=config.vault_path)
+            self._md_selected_vaults = self._normalize_md_selected_vaults(
+                list(getattr(config, 'md_selected_vault_paths', ()) or []),
+                active_vault=config.vault_path,
+            )
+            self._refresh_md_vault_table()
             self.backend_combo.setCurrentText(config.vector_backend or 'disabled')
             self.model_edit.setText(config.vector_model)
             self.runtime_combo.setCurrentText(config.vector_runtime)
@@ -5089,6 +5431,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.polling_check.setChecked(False)
             self.ui_scale_spin.setValue(normalize_ui_scale_percent(getattr(config, 'ui_scale_percent', 100), 100))
             self.ui_theme_combo.setCurrentText(self._ui_theme_label(getattr(config, 'ui_theme', 'system')))
+            self.ui_tooltips_check.setChecked(bool(getattr(config, 'ui_tooltips_enabled', True)))
             self.reranker_enabled_check.setChecked(getattr(config, 'reranker_enabled', False))
             self.export_ai_check.setChecked(getattr(config, 'context_export_mode', 'standard') == 'ai-collab')
             self.reranker_model_edit.setText(getattr(config, 'reranker_model', 'BAAI/bge-reranker-v2-m3'))
@@ -5106,10 +5449,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.device_summary_label.setText(self._device_summary())
         self.device_runtime_status_label.setText(self._device_runtime_status_text())
         self._load_extension_state(paths, getattr(config, 'vault_path', ''))
+        self._schedule_markdown_status_refresh()
         if activate:
             self.runtimeConfigChanged.emit(self._config, self._paths)
-    def _collect_config(self, require_vault: bool, *, use_data_root_input: bool = False) -> tuple[AppConfig, Any]:
-        vault = normalize_vault_path(self.vault_edit.text().strip())
+    def _collect_config(self, require_vault: bool, *, use_data_root_input: bool = False, vault_override: str | None = None) -> tuple[AppConfig, Any]:
+        vault = normalize_vault_path(vault_override or self.vault_edit.text().strip())
         if require_vault:
             if not vault:
                 raise ValueError(self._tr('choose_vault_first'))
@@ -5129,6 +5473,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         config = AppConfig(
             vault_path=vault,
             vault_paths=self._collect_vault_paths(vault),
+            md_selected_vault_paths=self._normalize_md_selected_vaults(self._md_selected_vaults, active_vault=vault),
             data_root=str(paths.global_root),
             query_limit=int(getattr(self._config, 'query_limit', 15) or 15),
             query_score_threshold=float(getattr(self._config, 'query_score_threshold', 35.0) or 35.0),
@@ -5154,6 +5499,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             ui_language=getattr(self._config, 'ui_language', self._language_code),
             ui_theme=self._ui_theme_code(self.ui_theme_combo.currentText()),
             ui_scale_percent=self.ui_scale_spin.value(),
+            ui_tooltips_enabled=self.ui_tooltips_check.isChecked(),
             ui_quick_start_expanded=getattr(self._config, 'ui_quick_start_expanded', True),
             ui_window_geometry=getattr(self._config, 'ui_window_geometry', ''),
             ui_main_sash=getattr(self._config, 'ui_main_sash', 900),
@@ -5333,6 +5679,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._current_report = None
         self._status_snapshot = None
         self._latest_preflight_snapshot = None
+        self._md_selected_vaults = self._normalize_md_selected_vaults(self._md_selected_vaults + [normalized], active_vault=normalized)
         self._set_saved_vaults(self._saved_vaults + [normalized], active_vault=normalized)
         self._refresh_workspace_summary()
         self._refresh_status_summary(snapshot=None)
@@ -5343,20 +5690,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if not selected:
             QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), self._tr('saved_vault_missing'))
             return
-        remaining = [vault for vault in self._saved_vaults if vault != selected]
-        next_active = remaining[0] if remaining else ''
-        self._current_report = None
-        self._status_snapshot = None
-        self._latest_preflight_snapshot = None
-        self._set_saved_vaults(remaining, active_vault=next_active)
-        self.vault_edit.setText(next_active)
-        self._refresh_workspace_summary()
-        if next_active and not self._busy and not self._watch_active:
-            self._load_initial_status()
-        else:
-            self.statusMessageChanged.emit(self._tr('status_ready'))
-            self._refresh_status_summary(snapshot=None)
-        self._append_log(self._tr('log_vault_removed', vault=Path(selected).name or selected))
+        self._remove_vault_path(selected)
 
     def _remove_selected_data_root(self) -> None:
         selected = self._selected_data_root()
@@ -5452,6 +5786,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             'vault_text': self.vault_edit.text(),
             'data_dir_text': self.data_dir_edit.text(),
             'saved_vaults': list(self._saved_vaults),
+            'md_selected_vaults': list(self._md_selected_vaults),
             'backend': self.backend_combo.currentText(),
             'model_text': self.model_edit.text(),
             'runtime': self.runtime_combo.currentText(),
@@ -5466,6 +5801,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             'polling': self.polling_check.isChecked(),
             'ui_scale': self.ui_scale_spin.value(),
             'ui_theme': self._ui_theme_code(self.ui_theme_combo.currentText()),
+            'ui_tooltips_enabled': self.ui_tooltips_check.isChecked(),
             'reranker_enabled': self.reranker_enabled_check.isChecked(),
             'export_ai': self.export_ai_check.isChecked(),
             'reranker_model_text': self.reranker_model_edit.text(),
@@ -5481,6 +5817,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.vault_edit.setText(str(payload.get('vault_text') or self.vault_edit.text()))
             self.data_dir_edit.setText(str(payload.get('data_dir_text') or self.data_dir_edit.text()))
             self._set_saved_vaults(list(payload.get('saved_vaults') or self._saved_vaults), active_vault=self.vault_edit.text().strip())
+            self._md_selected_vaults = self._normalize_md_selected_vaults(
+                list(payload.get('md_selected_vaults') or self._md_selected_vaults),
+                active_vault=self.vault_edit.text().strip(),
+            )
+            self._refresh_md_vault_table()
             self.backend_combo.setCurrentText(str(payload.get('backend') or self.backend_combo.currentText()))
             self.model_edit.setText(str(payload.get('model_text') or self.model_edit.text()))
             self.runtime_combo.setCurrentText(str(payload.get('runtime') or self.runtime_combo.currentText()))
@@ -5496,6 +5837,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.polling_check.setChecked(bool(payload.get('polling', self.polling_check.isChecked())))
             self.ui_scale_spin.setValue(int(payload.get('ui_scale', self.ui_scale_spin.value()) or self.ui_scale_spin.value()))
             self.ui_theme_combo.setCurrentText(self._ui_theme_label(payload.get('ui_theme') or self._ui_theme_code(self.ui_theme_combo.currentText())))
+            self.ui_tooltips_check.setChecked(bool(payload.get('ui_tooltips_enabled', self.ui_tooltips_check.isChecked())))
             self.reranker_enabled_check.setChecked(bool(payload.get('reranker_enabled', self.reranker_enabled_check.isChecked())))
             self.export_ai_check.setChecked(bool(payload.get('export_ai', self.export_ai_check.isChecked())))
             self.reranker_model_edit.setText(str(payload.get('reranker_model_text') or self.reranker_model_edit.text()))
@@ -5516,12 +5858,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
             config, paths = self._collect_config(False)
             config.ui_theme = self._ui_theme_code(self.ui_theme_combo.currentText())
             config.ui_scale_percent = self.ui_scale_spin.value()
+            config.ui_tooltips_enabled = self.ui_tooltips_check.isChecked()
             save_config(config, paths)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, self._tr('save_failed_title'), str(exc))
             return
         self._apply_config_to_controls(config, paths)
         self.uiPreferencesChanged.emit(config.ui_theme, config.ui_scale_percent)
+        self.tooltipPreferencesChanged.emit(bool(getattr(config, 'ui_tooltips_enabled', True)))
         self.statusMessageChanged.emit(self._tr('status_saved', path=paths.config_file))
         self._append_log(self._tr('log_saved_config', path=paths.config_file))
     def _is_model_ready(self) -> bool:
@@ -5862,6 +6206,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._task_paused_total_seconds = 0.0
         self._task_last_eta_text = self._tr('task_eta_label', value=eta_text)
         self.task_state_label.setText(self._tr('task_running', task=self._tr(label_key)))
+        if self._md_batch_current_vault and self._md_batch_snapshot:
+            detail_text = f"{detail_text}\n{self._tr('md_batch_detail', current=Path(self._md_batch_current_vault).name or self._md_batch_current_vault, index=len(self._md_batch_results) + 1, total=len(self._md_batch_snapshot))}"
         self.task_detail_label.setText(detail_text)
         self.task_percent_label.setText(self._tr('task_percent_idle'))
         self.task_elapsed_label.setText(self._tr('task_elapsed', value='00:00'))
@@ -6009,7 +6355,17 @@ class ConfigWorkspace(QtWidgets.QWidget):
         elif payload.get('watchdog_stalled'):
             self.task_detail_label.setText(self._tr('task_detail_rebuild_watchdog', seconds=float(payload.get('watchdog_wait_seconds', 0.0) or 0.0), report=str(payload.get('watchdog_report_path') or self._tr('none_value'))))
         self._refresh_task_controls()
-    def _start_service_task(self, label_key: str, runner, on_success, *, require_vault: bool) -> None:
+    def _start_service_task(
+        self,
+        label_key: str,
+        runner,
+        on_success,
+        *,
+        require_vault: bool,
+        vault_override: str | None = None,
+        persist_config: bool = True,
+        activate_runtime: bool = True,
+    ) -> None:
         if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
             return
         if self._busy:
@@ -6019,12 +6375,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, self._tr('stop_watch_first_title'), self._tr('stop_watch_first_body'))
             return
         try:
-            config, paths = self._collect_config(require_vault)
-            save_config(config, paths)
+            config, paths = self._collect_config(require_vault, vault_override=vault_override)
+            if persist_config:
+                save_config(config, paths)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, self._tr('cannot_start_title'), str(exc))
             return
-        self._apply_config_to_controls(config, paths)
+        if activate_runtime:
+            self._apply_config_to_controls(config, paths)
         self._busy = True
         self.statusMessageChanged.emit(f"{self._tr(label_key)}…")
         self._task_success_handler = on_success
@@ -6076,6 +6434,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if outcome_kind == 'success':
             if handler is not None:
                 handler(outcome_payload)
+            self._handle_markdown_batch_outcome('success')
+            self._schedule_markdown_status_refresh()
             return
         if outcome_kind == 'cancelled':
             if isinstance(outcome_payload, dict):
@@ -6085,17 +6445,23 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 self._append_log(self._tr('log_rebuild_cancelled'))
             else:
                 self.statusMessageChanged.emit(self._tr('status_failed', label=self._tr(label_key or 'refresh_button')))
+            self._handle_markdown_batch_outcome('cancelled')
+            self._schedule_markdown_status_refresh()
             return
         if outcome_kind == 'runtime-error':
             self.statusMessageChanged.emit(self._tr('status_failed', label=self._tr(label_key or 'refresh_button')))
             self._append_log(outcome_message, focus_log=True)
             if not self._show_runtime_guidance_from_error(outcome_message):
                 QtWidgets.QMessageBox.critical(self, self._tr(label_key or 'refresh_button'), outcome_message)
+            self._handle_markdown_batch_outcome('failed', message=outcome_message)
+            self._schedule_markdown_status_refresh()
             return
         if outcome_kind == 'failed':
             self.statusMessageChanged.emit(self._tr('status_failed', label=self._tr(label_key or 'refresh_button')))
             self._append_log(outcome_traceback.strip() or outcome_message, focus_log=True)
             QtWidgets.QMessageBox.critical(self, self._tr(label_key or 'refresh_button'), outcome_message or outcome_traceback)
+            self._handle_markdown_batch_outcome('failed', message=outcome_message or outcome_traceback)
+            self._schedule_markdown_status_refresh()
     def _toggle_rebuild_pause(self) -> None:
         if not self._busy or not self._is_rebuild_task(self._active_task_key):
             return
@@ -6160,7 +6526,117 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_status_summary(snapshot)
         self.statusMessageChanged.emit(self._tr('status_resume_discarded'))
         self._append_log(self._tr('log_resume_discarded'))
+
+    def _markdown_batch_vaults(self) -> list[str]:
+        return self._selected_markdown_vaults()
+
+    def _start_markdown_batch_task(self, label_key: str, runner, on_success) -> bool:
+        if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
+            return False
+        if self._busy:
+            QtWidgets.QMessageBox.information(self, self._tr('busy_title'), self._tr('busy_body'))
+            return False
+        if self._watch_active:
+            QtWidgets.QMessageBox.information(self, self._tr('stop_watch_first_title'), self._tr('stop_watch_first_body'))
+            return False
+        vaults = self._markdown_batch_vaults()
+        if not vaults:
+            QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), self._tr('md_vault_query_empty'))
+            return False
+        self._md_batch_snapshot = tuple(vaults)
+        self._md_batch_queue = [{'vault': vault, 'label_key': label_key, 'runner': runner, 'on_success': on_success} for vault in vaults]
+        self._md_batch_results = []
+        self._md_batch_label_key = label_key
+        self._continue_markdown_batch_task()
+        return True
+
+    def _continue_markdown_batch_task(self) -> None:
+        if not self._md_batch_queue:
+            return
+        task = self._md_batch_queue.pop(0)
+        self._md_batch_current_vault = str(task.get('vault') or '')
+        self._start_service_task(
+            str(task.get('label_key') or 'refresh_button'),
+            task.get('runner'),
+            task.get('on_success'),
+            require_vault=True,
+            vault_override=self._md_batch_current_vault,
+            persist_config=False,
+            activate_runtime=False,
+        )
+
+    def _finalize_markdown_batch(self) -> None:
+        success_count = sum(1 for item in self._md_batch_results if item.get('outcome') == 'success')
+        failed_count = sum(1 for item in self._md_batch_results if item.get('outcome') == 'failed')
+        cancelled_count = sum(1 for item in self._md_batch_results if item.get('outcome') == 'cancelled')
+        self._append_log(
+            self._tr(
+                'md_batch_finished',
+                total=len(self._md_batch_snapshot),
+                success=success_count,
+                failed=failed_count,
+                cancelled=cancelled_count,
+            )
+        )
+        self._md_batch_queue = []
+        self._md_batch_snapshot = ()
+        self._md_batch_label_key = None
+        self._md_batch_current_vault = ''
+        self._schedule_markdown_status_refresh()
+
+    def _handle_markdown_batch_outcome(self, outcome_kind: str, *, message: str = '') -> bool:
+        if not self._md_batch_snapshot or not self._md_batch_current_vault:
+            return False
+        self._md_batch_results.append(
+            {
+                'vault': self._md_batch_current_vault,
+                'outcome': outcome_kind,
+                'message': message,
+            }
+        )
+        if outcome_kind == 'cancelled':
+            self._md_batch_queue = []
+        if self._md_batch_queue:
+            QtCore.QTimer.singleShot(0, self._continue_markdown_batch_task)
+        else:
+            self._finalize_markdown_batch()
+        return True
+
+    def _run_markdown_preflight_for_vault(self, vault: str) -> None:
+        self._start_service_task(
+            'preflight_button',
+            lambda service, emit, pause, cancel: {'report': service.estimate_space(on_progress=emit, pause_event=pause, cancel_event=cancel), 'status': service.status_snapshot()},
+            self._after_preflight,
+            require_vault=True,
+            vault_override=vault,
+            persist_config=False,
+            activate_runtime=False,
+        )
+
+    def _run_markdown_rebuild_for_vault(self, vault: str) -> None:
+        def runner(service, emit, pause, cancel):
+            report = service.estimate_space(on_progress=emit, pause_event=pause, cancel_event=cancel)
+            if not report.can_proceed and not self.force_check.isChecked():
+                return {'blocked': True, 'report': report}
+            stats = service.rebuild_index(resume=False, on_progress=emit, pause_event=pause, cancel_event=cancel)
+            return {'blocked': False, 'report': report, 'stats': stats, 'status': service.status_snapshot(), 'resumed': False}
+        self._start_service_task(
+            'rebuild_button',
+            runner,
+            self._after_rebuild,
+            require_vault=True,
+            vault_override=vault,
+            persist_config=False,
+            activate_runtime=False,
+        )
     def _run_preflight(self) -> None:
+        if len(self._selected_markdown_vaults()) > 1:
+            self._start_markdown_batch_task(
+                'preflight_button',
+                lambda service, emit, pause, cancel: {'report': service.estimate_space(on_progress=emit, pause_event=pause, cancel_event=cancel), 'status': service.status_snapshot()},
+                self._after_preflight,
+            )
+            return
         self._start_service_task('preflight_button', lambda service, emit, pause, cancel: {'report': service.estimate_space(on_progress=emit, pause_event=pause, cancel_event=cancel), 'status': service.status_snapshot()}, self._after_preflight, require_vault=True)
     def _run_bootstrap_model(self, *, followup=None, download_source: str | None = None) -> None:
         if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
@@ -6448,6 +6924,15 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('status_reranker_deleted', model=config.reranker_model))
         self._append_log(self._tr('log_reranker_deleted', model=config.reranker_model, path=self._delete_target_summary(targets)))
     def _run_rebuild(self, *, resume: bool = False) -> None:
+        if not resume and len(self._selected_markdown_vaults()) > 1:
+            def batch_runner(service, emit, pause, cancel):
+                report = service.estimate_space(on_progress=emit, pause_event=pause, cancel_event=cancel)
+                if not report.can_proceed and not self.force_check.isChecked():
+                    return {'blocked': True, 'report': report}
+                stats = service.rebuild_index(resume=False, on_progress=emit, pause_event=pause, cancel_event=cancel)
+                return {'blocked': False, 'report': report, 'stats': stats, 'status': service.status_snapshot(), 'resumed': False}
+            self._start_markdown_batch_task('rebuild_button', batch_runner, self._after_rebuild)
+            return
         if not self._guard_pending_data_root_switch(title_key='cannot_start_title'):
             return
         try:
@@ -6511,76 +6996,107 @@ class ConfigWorkspace(QtWidgets.QWidget):
             service.clear_data(clear_index=self.clear_index_check.isChecked(), clear_logs=self.clear_logs_check.isChecked(), clear_cache=self.clear_cache_check.isChecked(), clear_exports=self.clear_exports_check.isChecked())
             return service.status_snapshot()
         self._start_service_task('clear_button', runner, self._after_clear, require_vault=True)
+    def _refresh_markdown_watch_state(self) -> None:
+        self._watch_active = bool(self._md_watch_workers)
+        self._watch_worker = next(iter(self._md_watch_workers.values()), None)
+        if not self._watch_active:
+            self._watch_stopping = False
+        self._refresh_watch_button()
+        self._emit_query_block_state()
+
+    def _start_watch_for_vault(self, vault: str) -> bool:
+        normalized = normalize_vault_path(vault)
+        if not normalized or normalized in self._md_watch_workers:
+            return False
+        config, paths = self._collect_config(True, vault_override=normalized)
+        service = OmniClipService(config, paths)
+        try:
+            snapshot = service.status_snapshot()
+        finally:
+            service.close()
+        self._md_vault_snapshots[normalized] = snapshot
+        index_state = self._current_index_state(snapshot)
+        if index_state != 'ready':
+            self._append_log(self._tr('md_watch_skip_not_ready', vault=Path(normalized).name or normalized))
+            return False
+        backend_enabled = (config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
+        if backend_enabled and not is_local_model_ready(config, paths):
+            self._append_log(self._tr('md_watch_skip_model_missing', vault=Path(normalized).name or normalized), focus_log=True)
+            return False
+        worker = WatchWorker(config=config, paths=paths, interval=config.poll_interval_seconds, force_polling=self.polling_check.isChecked())
+        worker.updated.connect(lambda payload, v=normalized: self._on_watch_updated_for_vault(v, payload))
+        worker.failed.connect(lambda message, traceback_text, v=normalized: self._on_watch_failed_for_vault(v, message, traceback_text))
+        worker.stopped.connect(lambda raw_mode, v=normalized: self._on_watch_stopped_for_vault(v, raw_mode))
+        worker.finished.connect(lambda v=normalized: self._on_watch_finished_for_vault(v))
+        self._md_watch_modes[normalized] = 'polling' if self.polling_check.isChecked() or not WATCHDOG_AVAILABLE else 'watchdog'
+        self._md_watch_workers[normalized] = worker
+        worker.start()
+        self._refresh_markdown_watch_state()
+        self._append_log(self._tr('md_watch_started_for_vault', vault=Path(normalized).name or normalized, mode=self._watch_mode_label(self._md_watch_modes.get(normalized, 'watchdog'))))
+        return True
+
+    def _stop_watch_for_vault(self, vault: str) -> bool:
+        normalized = normalize_vault_path(vault)
+        worker = self._md_watch_workers.get(normalized)
+        if worker is None:
+            return False
+        worker.stop()
+        self._watch_stopping = True
+        self._append_log(self._tr('md_watch_stop_requested_for_vault', vault=Path(normalized).name or normalized))
+        self._refresh_markdown_watch_state()
+        return True
+
+    def _toggle_watch_for_vault(self, vault: str) -> None:
+        if normalize_vault_path(vault) in self._md_watch_workers:
+            self._stop_watch_for_vault(vault)
+            return
+        if self._busy:
+            QtWidgets.QMessageBox.information(self, self._tr('busy_title'), self._tr('busy_body'))
+            return
+        self._start_watch_for_vault(vault)
+
     def _toggle_watch(self) -> None:
-        if self._watch_active:
-            if self._watch_worker is not None:
-                self._watch_worker.stop()
-            self._watch_stopping = True
-            self.statusMessageChanged.emit(self._tr('status_watch_stopping'))
-            self._append_log(self._tr('log_watch_requested_stop'))
-            self._refresh_watch_button()
+        selected_vaults = self._selected_markdown_vaults()
+        if not selected_vaults:
+            QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), self._tr('md_vault_query_empty'))
+            return
+        if all(vault in self._md_watch_workers for vault in selected_vaults):
+            stopped_any = False
+            for vault in selected_vaults:
+                stopped_any = self._stop_watch_for_vault(vault) or stopped_any
+            if stopped_any:
+                self.statusMessageChanged.emit(self._tr('status_watch_stopping'))
             return
         if not self._guard_pending_data_root_switch(title_key='watch_start_failed_title'):
             return
         if self._busy:
             QtWidgets.QMessageBox.information(self, self._tr('busy_title'), self._tr('busy_body'))
             return
-        try:
-            config, paths = self._collect_config(True)
-            save_config(config, paths)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, self._tr('watch_start_failed_title'), str(exc))
-            return
-        service = OmniClipService(config, paths)
-        try:
-            snapshot = service.status_snapshot()
-        finally:
-            service.close()
-        self._refresh_status_summary(snapshot)
-        index_state = self._current_index_state(snapshot)
-        if index_state != 'ready':
-            if index_state == 'pending':
-                body_key = 'watch_start_blocked_pending_body'
-            elif index_state == 'checking':
-                body_key = 'watch_start_blocked_checking_body'
-            else:
-                body_key = 'watch_start_blocked_missing_body'
-            message = self._tr(body_key)
-            self.statusMessageChanged.emit(message)
-            QtWidgets.QMessageBox.information(self, self._tr('watch_start_blocked_title'), message)
-            return
-        backend_enabled = (config.vector_backend or 'disabled').strip().lower() not in {'', 'disabled', 'none', 'off'}
-        resolved_device = resolve_vector_device(config.vector_device)
-        if backend_enabled and str(config.vector_device or '').strip().lower() == 'cuda' and resolved_device != 'cuda':
-            self._append_log(self._tr('log_rebuild_cuda_fell_back_to_cpu'))
-        if backend_enabled and not self._ensure_vector_runtime_ready(config):
-            return
-        if backend_enabled and not is_local_model_ready(config, paths):
-            self._prepare_model_for_followup('watch_start', True, self._toggle_watch)
-            return
-        self._apply_config_to_controls(config, paths)
-        self._watch_active = True
-        self._watch_stopping = False
-        self._watch_mode = 'polling' if self.polling_check.isChecked() or not WATCHDOG_AVAILABLE else 'watchdog'
-        self.statusMessageChanged.emit(self._tr('status_watch_running'))
-        self._append_log(self._tr('log_watch_started', mode=self._watch_mode_label(self._watch_mode)))
+        started_any = False
+        for vault in selected_vaults:
+            if vault in self._md_watch_workers:
+                continue
+            started_any = self._start_watch_for_vault(vault) or started_any
+        if started_any:
+            self.statusMessageChanged.emit(self._tr('status_watch_running'))
         self._refresh_status_summary(self._status_snapshot)
-        worker = WatchWorker(config=config, paths=paths, interval=config.poll_interval_seconds, force_polling=self.polling_check.isChecked())
-        worker.updated.connect(self._on_watch_updated)
-        worker.failed.connect(self._on_watch_failed)
-        worker.stopped.connect(self._on_watch_stopped)
-        worker.finished.connect(self._on_watch_finished)
-        self._watch_worker = worker
-        worker.start()
-    def _on_watch_updated(self, payload: object) -> None:
+
+    def _on_watch_updated_for_vault(self, vault: str, payload: object) -> None:
         if not isinstance(payload, dict):
             return
         stats = payload.get('stats', {})
-        if self._status_snapshot is None:
-            self._status_snapshot = {}
-        self._status_snapshot = dict(self._status_snapshot)
-        self._status_snapshot['stats'] = stats
-        self._refresh_status_summary(self._status_snapshot)
+        normalized = normalize_vault_path(vault)
+        source_snapshot = dict(self._md_vault_snapshots.get(normalized) or {})
+        source_snapshot['stats'] = stats
+        self._md_vault_snapshots[normalized] = source_snapshot
+        if normalized == normalize_vault_path(self.vault_edit.text().strip()):
+            if self._status_snapshot is None:
+                self._status_snapshot = {}
+            self._status_snapshot = dict(self._status_snapshot)
+            self._status_snapshot['stats'] = stats
+            self._refresh_status_summary(self._status_snapshot)
+        else:
+            self._refresh_md_vault_table()
         events = payload.get('events', []) or []
         for event in events:
             kind = str(event.get('kind') or '').strip().lower()
@@ -6594,23 +7110,25 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 self._append_log(self._tr('log_watch_batch_retry', changed=', '.join(event.get('changed', [])[:3]) or self._tr('none_value'), deleted=', '.join(event.get('deleted', [])[:3]) or self._tr('none_value'), error=str(event.get('error') or self._tr('none_value'))), focus_log=True)
         if not payload.get('note_only'):
             self.statusMessageChanged.emit(self._tr('status_watch_update'))
-            self._append_log(self._tr('log_watch_update', changed=', '.join(payload.get('changed', [])[:3]) or self._tr('none_value'), deleted=', '.join(payload.get('deleted', [])[:3]) or self._tr('none_value')))
-    def _on_watch_failed(self, message: str, traceback_text: str) -> None:
+            self._append_log(self._tr('md_watch_update_for_vault', vault=Path(normalized).name or normalized, changed=', '.join(payload.get('changed', [])[:3]) or self._tr('none_value'), deleted=', '.join(payload.get('deleted', [])[:3]) or self._tr('none_value')))
+    def _on_watch_failed_for_vault(self, vault: str, message: str, traceback_text: str) -> None:
         self.statusMessageChanged.emit(self._tr('status_watch_error'))
-        self._append_log(self._tr('log_watch_error'), focus_log=True)
+        self._append_log(self._tr('md_watch_failed_for_vault', vault=Path(vault).name or vault), focus_log=True)
         self._append_log(traceback_text.strip() or message, focus_log=True)
         QtWidgets.QMessageBox.critical(self, self._tr('watch_start_failed_title'), message or traceback_text)
-    def _on_watch_stopped(self, raw_mode: str) -> None:
-        self._watch_active = False
-        self._watch_stopping = False
-        self._watch_mode = raw_mode
+    def _on_watch_stopped_for_vault(self, vault: str, raw_mode: str) -> None:
+        normalized = normalize_vault_path(vault)
+        self._md_watch_workers.pop(normalized, None)
+        self._md_watch_modes.pop(normalized, None)
+        self._refresh_markdown_watch_state()
         self.watch_summary_label.setText(self._tr('watch_stopped', mode=self._watch_mode_label(raw_mode)))
         self.statusMessageChanged.emit(self._tr('status_watch_stopped'))
-        self._append_log(self._tr('log_watch_stopped'))
-        self._refresh_watch_button()
-        self._emit_query_block_state()
-    def _on_watch_finished(self) -> None:
-        self._watch_worker = None
+        self._append_log(self._tr('md_watch_stopped_for_vault', vault=Path(normalized).name or normalized))
+        self._refresh_status_summary(self._status_snapshot)
+    def _on_watch_finished_for_vault(self, vault: str) -> None:
+        normalized = normalize_vault_path(vault)
+        if normalized not in self._md_watch_workers:
+            self._refresh_markdown_watch_state()
         self._refresh_status_summary(self._status_snapshot)
     def _after_preflight(self, payload) -> None:
         report = payload['report']

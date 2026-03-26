@@ -122,6 +122,7 @@ class ConfigTests(unittest.TestCase):
             data_root=str(paths.global_root),
             ui_theme='night',
             ui_scale_percent=240,
+            ui_tooltips_enabled=False,
         )
 
         config_module.save_config(config, paths)
@@ -131,6 +132,36 @@ class ConfigTests(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.ui_theme, 'dark')
         self.assertEqual(loaded.ui_scale_percent, 200)
+        self.assertFalse(loaded.ui_tooltips_enabled)
+
+    def test_md_selected_vault_paths_roundtrip_as_saved_subset(self) -> None:
+        vault_a = ROOT / 'vault_selected_a'
+        vault_b = ROOT / 'vault_selected_b'
+        paths = config_module.ensure_data_paths(str(CUSTOM_ROOT), str(vault_a))
+        config = config_module.AppConfig(
+            vault_path=str(vault_a),
+            data_root=str(paths.global_root),
+            vault_paths=[str(vault_a), str(vault_b)],
+            md_selected_vault_paths=[str(vault_b), str(ROOT / 'missing_vault')],
+        )
+
+        config_module.save_config(config, paths)
+        loaded = config_module.load_config(paths)
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.vault_paths, [str(vault_a.resolve()), str(vault_b.resolve())])
+        self.assertEqual(loaded.md_selected_vault_paths, [str(vault_b.resolve())])
+
+    def test_probe_data_root_tolerates_shared_logs_only_trace(self) -> None:
+        partial_root = CUSTOM_ROOT / 'shared_logs_only'
+        logs_dir = partial_root / 'shared' / 'logs'
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        (logs_dir / 'omniclip.log').write_text('stub', encoding='utf-8')
+
+        probe = config_module.probe_data_root(partial_root, allow_create=True)
+
+        self.assertEqual(probe.state, 'new')
 
 
     def test_ensure_directory_accepts_existing_directory_after_permission_race(self) -> None:
