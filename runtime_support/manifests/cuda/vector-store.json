@@ -1,0 +1,256 @@
+{
+  "schema_version": 2,
+  "profile": "cuda",
+  "component": "vector-store",
+  "python_tag": "cp313",
+  "platform_tag": "win_amd64",
+  "requirements": [
+    {
+      "name": "lancedb",
+      "version": "0.29.0",
+      "requirement": "lancedb==0.29.0",
+      "source_key": "pypi"
+    },
+    {
+      "name": "onnxruntime",
+      "version": "1.24.4",
+      "requirement": "onnxruntime==1.24.4",
+      "source_key": "pypi"
+    },
+    {
+      "name": "pyarrow",
+      "version": "20.0.0",
+      "requirement": "pyarrow==20.0.0",
+      "source_key": "pypi"
+    },
+    {
+      "name": "pandas",
+      "version": "2.2.3",
+      "requirement": "pandas==2.2.3",
+      "source_key": "pypi"
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "annotated-types",
+      "version": "0.7.0",
+      "requirement": "annotated-types==0.7.0",
+      "filename": "annotated_types-0.7.0-py3-none-any.whl",
+      "sha256": "1f02e8b43a8fbbc3f3e0d4f0f4bfc8131bcb4eebe8849b8e5c773f3a1c582a53",
+      "source_key": "pypi"
+    },
+    {
+      "name": "colorama",
+      "version": "0.4.6",
+      "requirement": "colorama==0.4.6",
+      "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+      "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6",
+      "source_key": "pypi"
+    },
+    {
+      "name": "deprecation",
+      "version": "2.1.0",
+      "requirement": "deprecation==2.1.0",
+      "filename": "deprecation-2.1.0-py2.py3-none-any.whl",
+      "sha256": "a10811591210e1fb0e768a8c25517cabeabcba6f0bf96564f8ff45189f90b14a",
+      "source_key": "pypi"
+    },
+    {
+      "name": "flatbuffers",
+      "version": "25.12.19",
+      "requirement": "flatbuffers==25.12.19",
+      "filename": "flatbuffers-25.12.19-py2.py3-none-any.whl",
+      "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4",
+      "source_key": "pypi"
+    },
+    {
+      "name": "lance-namespace",
+      "version": "0.6.1",
+      "requirement": "lance-namespace==0.6.1",
+      "filename": "lance_namespace-0.6.1-py3-none-any.whl",
+      "sha256": "9699c9e3f12236e5e08ea979cc4e036a8e3c67ed2f37ae6f25c5353ab908e1be",
+      "source_key": "pypi"
+    },
+    {
+      "name": "lance-namespace-urllib3-client",
+      "version": "0.6.1",
+      "requirement": "lance-namespace-urllib3-client==0.6.1",
+      "filename": "lance_namespace_urllib3_client-0.6.1-py3-none-any.whl",
+      "sha256": "b9c103e1377ad46d2bd70eec894bfec0b1e2133dae0964d7e4de543c6e16293b",
+      "source_key": "pypi"
+    },
+    {
+      "name": "lancedb",
+      "version": "0.29.0",
+      "requirement": "lancedb==0.29.0",
+      "filename": "lancedb-0.29.0-cp39-abi3-win_amd64.whl",
+      "sha256": "d33ff1bc304b1ff8aebb10e1e9a8aee1cd95ba8791d1efcb3a4b02b679681732",
+      "source_key": "pypi"
+    },
+    {
+      "name": "numpy",
+      "version": "2.4.3",
+      "requirement": "numpy==2.4.3",
+      "filename": "numpy-2.4.3-cp313-cp313-win_amd64.whl",
+      "sha256": "0a60e17a14d640f49146cb38e3f105f571318db7826d9b6fef7e4dce758faecd",
+      "source_key": "pypi"
+    },
+    {
+      "name": "onnxruntime",
+      "version": "1.24.4",
+      "requirement": "onnxruntime==1.24.4",
+      "filename": "onnxruntime-1.24.4-cp313-cp313-win_amd64.whl",
+      "sha256": "3b6ba8b0181a3aa88edab00eb01424ffc06f42e71095a91186c2249415fcff93",
+      "source_key": "pypi"
+    },
+    {
+      "name": "packaging",
+      "version": "26.0",
+      "requirement": "packaging==26.0",
+      "filename": "packaging-26.0-py3-none-any.whl",
+      "sha256": "b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37529",
+      "source_key": "pypi"
+    },
+    {
+      "name": "pandas",
+      "version": "2.2.3",
+      "requirement": "pandas==2.2.3",
+      "filename": "pandas-2.2.3-cp313-cp313-win_amd64.whl",
+      "sha256": "61c5ad4043f791b61dd4752191d9f07f0ae412515d59ba8f005832a532f8736d",
+      "source_key": "pypi"
+    },
+    {
+      "name": "protobuf",
+      "version": "7.34.1",
+      "requirement": "protobuf==7.34.1",
+      "filename": "protobuf-7.34.1-cp310-abi3-win_amd64.whl",
+      "sha256": "e97b55646e6ce5cbb0954a8c28cd39a5869b59090dfaa7df4598a7fba869468c",
+      "source_key": "pypi"
+    },
+    {
+      "name": "pyarrow",
+      "version": "20.0.0",
+      "requirement": "pyarrow==20.0.0",
+      "filename": "pyarrow-20.0.0-cp313-cp313-win_amd64.whl",
+      "sha256": "30b3051b7975801c1e1d387e17c588d8ab05ced9b1e14eec57915f79869b5031",
+      "source_key": "pypi"
+    },
+    {
+      "name": "pydantic",
+      "version": "2.12.5",
+      "requirement": "pydantic==2.12.5",
+      "filename": "pydantic-2.12.5-py3-none-any.whl",
+      "sha256": "e561593fccf61e8a20fc46dfc2dfe075b8be7d0188df33f221ad1f0139180f9d",
+      "source_key": "pypi"
+    },
+    {
+      "name": "pydantic-core",
+      "version": "2.41.5",
+      "requirement": "pydantic-core==2.41.5",
+      "filename": "pydantic_core-2.41.5-cp313-cp313-win_amd64.whl",
+      "sha256": "79ec52ec461e99e13791ec6508c722742ad745571f234ea6255bed38c6480f11",
+      "source_key": "pypi"
+    },
+    {
+      "name": "python-dateutil",
+      "version": "2.9.0.post0",
+      "requirement": "python-dateutil==2.9.0.post0",
+      "filename": "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "sha256": "a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427",
+      "source_key": "pypi"
+    },
+    {
+      "name": "pytz",
+      "version": "2026.1.post1",
+      "requirement": "pytz==2026.1.post1",
+      "filename": "pytz-2026.1.post1-py2.py3-none-any.whl",
+      "sha256": "f2fd16142fda348286a75e1a524be810bb05d444e5a081f37f7affc635035f7a",
+      "source_key": "pypi"
+    },
+    {
+      "name": "six",
+      "version": "1.17.0",
+      "requirement": "six==1.17.0",
+      "filename": "six-1.17.0-py2.py3-none-any.whl",
+      "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274",
+      "source_key": "pypi"
+    },
+    {
+      "name": "tqdm",
+      "version": "4.67.3",
+      "requirement": "tqdm==4.67.3",
+      "filename": "tqdm-4.67.3-py3-none-any.whl",
+      "sha256": "ee1e4c0e59148062281c49d80b25b67771a127c85fc9676d3be5f243206826bf",
+      "source_key": "pypi"
+    },
+    {
+      "name": "typing-extensions",
+      "version": "4.15.0",
+      "requirement": "typing-extensions==4.15.0",
+      "filename": "typing_extensions-4.15.0-py3-none-any.whl",
+      "sha256": "f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548",
+      "source_key": "pypi"
+    },
+    {
+      "name": "typing-inspection",
+      "version": "0.4.2",
+      "requirement": "typing-inspection==0.4.2",
+      "filename": "typing_inspection-0.4.2-py3-none-any.whl",
+      "sha256": "4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7",
+      "source_key": "pypi"
+    },
+    {
+      "name": "tzdata",
+      "version": "2025.3",
+      "requirement": "tzdata==2025.3",
+      "filename": "tzdata-2025.3-py2.py3-none-any.whl",
+      "sha256": "06a47e5700f3081aab02b2e513160914ff0694bce9947d6b76ebd6bf57cfc5d1",
+      "source_key": "pypi"
+    },
+    {
+      "name": "urllib3",
+      "version": "2.6.3",
+      "requirement": "urllib3==2.6.3",
+      "filename": "urllib3-2.6.3-py3-none-any.whl",
+      "sha256": "bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4",
+      "source_key": "pypi"
+    }
+  ],
+  "source_profiles": {
+    "official": {
+      "pypi": {
+        "index_url": "https://pypi.org/simple",
+        "extra_index_urls": []
+      }
+    },
+    "mirror": {
+      "pypi": {
+        "index_url": "https://pypi.tuna.tsinghua.edu.cn/simple",
+        "extra_index_urls": []
+      }
+    }
+  },
+  "cleanup_patterns": [
+    "lancedb",
+    "lancedb-*dist-info",
+    "onnxruntime",
+    "onnxruntime-*dist-info",
+    "pyarrow",
+    "pyarrow-*dist-info",
+    "pyarrow.libs",
+    "pandas",
+    "pandas-*dist-info"
+  ],
+  "required_modules": [
+    "lancedb",
+    "onnxruntime",
+    "pyarrow",
+    "pandas"
+  ],
+  "validation_probes": [
+    "lancedb",
+    "onnxruntime",
+    "pyarrow",
+    "pandas"
+  ]
+}

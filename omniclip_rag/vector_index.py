@@ -32,6 +32,7 @@ from .runtime_layout import (
     runtime_component_live_roots,
     runtime_component_registry_path,
 )
+from .runtime_support import bundled_python_executable, bundled_python_ready
 
 
 class VectorCandidate(Protocol):
@@ -1037,7 +1038,7 @@ class LanceDbVectorIndex:
             _EMBEDDER_CACHE[cache_key] = embedder
             return embedder
 
-        try:
+        def _build_embedder() -> Embedder:
             # Why: the semantic runtime context must stay active for the whole
             # model-construction phase, not only for importing the Python module.
             # `SentenceTransformer(...)` loads local weights and extra
@@ -1047,15 +1048,44 @@ class LanceDbVectorIndex:
             with _runtime_import_environment(component_id='semantic-core'):
                 from sentence_transformers import SentenceTransformer
 
-                embedder = SentenceTransformer(
+                return SentenceTransformer(
                     str(local_model_dir),
                     device=resolved_device,
                     cache_folder=str(runtime_cache_dir),
                     backend=self.config.vector_runtime,
                     local_files_only=True,
                 )
+
+        try:
+            embedder = _build_embedder()
         except ImportError as exc:
             raise RuntimeDependencyError(_runtime_dependency_message(self.config.vector_runtime, self.config.vector_device)) from exc
+        except AttributeError as exc:
+            detail = str(exc or '')
+            repaired_files: list[str] = []
+            if _is_model_snapshot_compatibility_error(detail):
+                repaired_files = _sanitize_local_model_snapshot(local_model_dir)
+                if repaired_files:
+                    LOGGER.warning(
+                        'Retried semantic model load after sanitizing model snapshot %s: %s',
+                        local_model_dir,
+                        ', '.join(repaired_files),
+                    )
+                    try:
+                        embedder = _build_embedder()
+                    except AttributeError as retry_exc:
+                        retry_detail = str(retry_exc or '')
+                        if _is_model_snapshot_compatibility_error(retry_detail):
+                            raise _local_model_snapshot_repair_guidance(
+                                local_model_dir,
+                                retry_detail,
+                                repaired_files=repaired_files,
+                            ) from retry_exc
+                        raise
+                else:
+                    raise _local_model_snapshot_repair_guidance(local_model_dir, detail) from exc
+            else:
+                raise
         _EMBEDDER_CACHE[cache_key] = embedder
         return embedder
 
@@ -1099,6 +1129,25 @@ _MODELSCOPE_SUPPORTED_REPO_IDS = frozenset({
     'BAAI/bge-m3',
     'BAAI/bge-reranker-v2-m3',
 })
+_MODEL_SENTENCE_CONFIG_FILENAMES = (
+    'sentence_bert_config.json',
+    'sentence_roberta_config.json',
+    'sentence_distilbert_config.json',
+    'sentence_camembert_config.json',
+    'sentence_albert_config.json',
+    'sentence_xlm-roberta_config.json',
+    'sentence_xlnet_config.json',
+)
+_MODEL_SANITIZE_MAX_JSON_BYTES = 2 * 1024 * 1024
+_LOCAL_TOKENIZER_MISTRAL_MODEL_TYPES = {
+    'mistral',
+    'mistral3',
+    'voxtral',
+    'voxstral',
+    'ministral',
+    'pixtral',
+}
+_LOCAL_TOKENIZER_TRANSFORMERS_BUG_MAX_VERSION = (4, 57, 2)
 
 
 def build_repo_download_guidance_context(repo_id: str, model_dir: Path, hf_home_dir: Path) -> dict[str, str]:
@@ -1168,6 +1217,12 @@ def prepare_local_model_snapshot(
             download_source=download_source,
             download_log=download_log,
             missing_dependency_message="当前还缺少 huggingface-hub 运行时，暂时不能下载模型缓存。",
+        )
+    repaired_files = _sanitize_local_model_snapshot(local_model_dir, download_log=download_log)
+    if repaired_files:
+        _emit_model_download_log(
+            download_log,
+            '已修复模型目录里的兼容性配置：' + '、'.join(str(item) for item in repaired_files),
         )
 
     model_ready = is_local_model_ready(config, paths)
@@ -1765,6 +1820,9 @@ def _runtime_probe_python_command(runtime_root: Path) -> list[str]:
     python_exe = str(payload.get('python_exe') or '').strip()
     if python_exe and Path(python_exe).exists():
         return [python_exe]
+    bundled_python = bundled_python_executable()
+    if bundled_python_ready() and bundled_python.exists():
+        return [str(bundled_python)]
     for candidate in (['py', '-3.13'], ['python']):
         try:
             result = run_hidden(candidate + ['--version'], capture_output=True, text=True, timeout=5)
@@ -2729,8 +2787,9 @@ def runtime_guidance_context(
         '- 现在要么还没检测到可直接使用的 CUDA 条件，要么当前可用的 runtime 还没安装完整。',
         '',
         '为什么',
-        f'- 这个轻量发布包没有内置 {runtime_name}、PyTorch、LanceDB、sentence-transformers、pyarrow 这类大型运行时。',
+        f'- 这个轻量发布包没有内置 {runtime_name}、PyTorch、LanceDB、sentence-transformers、pyarrow 这类大型运行时载荷。',
         '- 主程序可以先打开，但要做本地语义建库或向量查询，还需要把外置运行时补齐；如果你想走 GPU，还要另外满足 CUDA 条件。',
+        '- Runtime 安装会优先使用随软件提供的内置 Python，不需要你先在系统里单独安装 Python。',
         '',
         '怎么做',
         f'{cuda_step_title}（状态：{cuda_step_status}）',
@@ -2743,7 +2802,7 @@ def runtime_guidance_context(
         f"- 镜像源（可复制）：{source_urls['mirror']}",
         f'- 镜像命令（可复制）：{mirror_command}',
         f'- 会安装到：{install_target_dir}',
-        '- 安装后会发生什么：会先把 PyTorch、LanceDB、sentence-transformers、pyarrow、onnxruntime 等本地运行时下载到待应用目录；关闭一次程序后后台会自动切换到新组件，下一次打开时就能正常执行本地语义建库、向量查询和 GPU 加速。',
+        '- 安装后会发生什么：会先下载并校验所需 Runtime wheel，再离线安装到当前数据目录的共享 Runtime；关闭一次程序后下一次打开时就能正常执行本地语义建库、向量查询和 GPU 加速。',
         f'- 预计落盘：{disk_usage}；预计下载：{download_usage}',
         '',
         '当前状态',
@@ -3235,6 +3294,214 @@ def _emit_model_download_log(download_log: Callable[[str], None] | None, message
         download_log(text_value)
 
 
+def _load_json_file(path: Path) -> object:
+    with path.open('r', encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+def _write_json_file(path: Path, payload: object) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + '\n',
+        encoding='utf-8',
+    )
+
+
+def _is_model_snapshot_compatibility_error(detail: str) -> bool:
+    lowered = str(detail or '').lower()
+    return 'model_type' in lowered or 'tokenizer' in lowered
+
+
+def _local_model_snapshot_repair_guidance(
+    local_model_dir: Path,
+    detail: str,
+    *,
+    repaired_files: list[str] | None = None,
+) -> RuntimeError:
+    repaired_text = ''
+    if repaired_files:
+        repaired_text = f" 已尝试自动修复这些配置：{', '.join(repaired_files)}。"
+    return RuntimeError(
+        f"本地模型缓存仍包含与当前 runtime 不兼容的模型元数据或配置，请删除该模型目录后重新下载：{local_model_dir}。"
+        f"{repaired_text} 原始错误：{detail}"
+    )
+
+
+def _sanitize_model_json_payload(payload: object) -> tuple[object, bool]:
+    if isinstance(payload, dict):
+        changed = False
+        copied: dict[object, object] = {}
+        for key, value in payload.items():
+            if key == 'config' and isinstance(value, dict):
+                changed = True
+                continue
+            sanitized_value, value_changed = _sanitize_model_json_payload(value)
+            copied[key] = sanitized_value
+            changed = changed or value_changed
+        return copied if changed else payload, changed
+    if isinstance(payload, list):
+        changed = False
+        items: list[object] = []
+        for item in payload:
+            sanitized_item, item_changed = _sanitize_model_json_payload(item)
+            items.append(sanitized_item)
+            changed = changed or item_changed
+        return items if changed else payload, changed
+    return payload, False
+
+
+def _parse_semantic_version_triplet(raw_value: object) -> tuple[int, int, int] | None:
+    match = re.search(r'(\d+)\.(\d+)\.(\d+)', str(raw_value or ''))
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def _sanitize_local_tokenizer_metadata_payload(
+    payload: object,
+    *,
+    relative_name: str,
+) -> tuple[object, bool]:
+    if not isinstance(payload, dict):
+        return payload, False
+    if relative_name.lower() != 'config.json':
+        return payload, False
+    transformers_version = _parse_semantic_version_triplet(payload.get('transformers_version'))
+    if not transformers_version or transformers_version > _LOCAL_TOKENIZER_TRANSFORMERS_BUG_MAX_VERSION:
+        return payload, False
+    model_type = str(payload.get('model_type') or '').strip().lower()
+    if not model_type or model_type in _LOCAL_TOKENIZER_MISTRAL_MODEL_TYPES:
+        return payload, False
+    if 'transformers_version' not in payload:
+        return payload, False
+    sanitized = dict(payload)
+    # Why: transformers 4.57.2 在本地大词表 tokenizer 的 mistral 兼容分支里错误地把 dict 当对象访问；
+    # 对非 mistral 模型去掉旧快照里的 transformers_version 元数据即可绕过这段错误分支，而且不影响模型加载。
+    sanitized.pop('transformers_version', None)
+    return sanitized, True
+
+
+def _load_model_module_dirs(
+    local_model_dir: Path,
+    *,
+    download_log: Callable[[str], None] | None = None,
+) -> list[Path]:
+    modules_path = local_model_dir / 'modules.json'
+    if not modules_path.exists() or not modules_path.is_file():
+        return []
+    try:
+        modules_payload = _load_json_file(modules_path)
+    except Exception as exc:
+        _emit_model_download_log(
+            download_log,
+            f'跳过 modules.json 模块目录扫描：读取失败（{exc.__class__.__name__}: {exc}）',
+        )
+        return []
+    if not isinstance(modules_payload, list):
+        return []
+    root_resolved = local_model_dir.resolve()
+    discovered: list[Path] = []
+    seen: set[str] = set()
+    for item in modules_payload:
+        if not isinstance(item, dict):
+            continue
+        raw_path = str(item.get('path') or '').strip()
+        if not raw_path:
+            continue
+        candidate = (local_model_dir / raw_path).resolve()
+        try:
+            candidate.relative_to(root_resolved)
+        except ValueError:
+            _emit_model_download_log(
+                download_log,
+                f'跳过 modules.json 模块目录扫描：路径越界（{raw_path}）',
+            )
+            continue
+        if not candidate.exists() or not candidate.is_dir():
+            continue
+        key = candidate.as_posix().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        discovered.append(candidate)
+    return discovered
+
+
+def _is_sanitizable_model_config_json(candidate: Path) -> bool:
+    if not candidate.exists() or not candidate.is_file():
+        return False
+    if candidate.suffix.lower() != '.json':
+        return False
+    file_name = candidate.name.lower()
+    if file_name == 'modules.json' or 'config' not in file_name:
+        return False
+    try:
+        return candidate.stat().st_size <= _MODEL_SANITIZE_MAX_JSON_BYTES
+    except OSError:
+        return False
+
+
+def _collect_local_model_config_candidates(
+    local_model_dir: Path,
+    *,
+    download_log: Callable[[str], None] | None = None,
+) -> list[Path]:
+    ordered: dict[str, Path] = {}
+
+    def _remember(candidate: Path) -> None:
+        if not _is_sanitizable_model_config_json(candidate):
+            return
+        try:
+            relative = candidate.relative_to(local_model_dir).as_posix()
+        except ValueError:
+            return
+        ordered.setdefault(relative, candidate)
+
+    _remember(local_model_dir / 'tokenizer_config.json')
+    for name in _MODEL_SENTENCE_CONFIG_FILENAMES:
+        _remember(local_model_dir / name)
+
+    for module_dir in _load_model_module_dirs(local_model_dir, download_log=download_log):
+        for candidate in sorted(module_dir.rglob('*.json'), key=lambda path: path.as_posix().lower()):
+            _remember(candidate)
+
+    for candidate in sorted(local_model_dir.rglob('*.json'), key=lambda path: path.as_posix().lower()):
+        _remember(candidate)
+
+    return list(ordered.values())
+
+
+def _sanitize_local_model_snapshot(
+    local_model_dir: Path,
+    *,
+    download_log: Callable[[str], None] | None = None,
+) -> list[str]:
+    repaired: list[str] = []
+    for candidate in _collect_local_model_config_candidates(local_model_dir, download_log=download_log):
+        relative_name = candidate.relative_to(local_model_dir).as_posix()
+        try:
+            payload = _load_json_file(candidate)
+        except Exception as exc:
+            _emit_model_download_log(
+                download_log,
+                f'跳过模型配置兼容性检查：{relative_name} 读取失败（{exc.__class__.__name__}: {exc}）',
+            )
+            continue
+        sanitized_payload, changed = _sanitize_model_json_payload(payload)
+        metadata_payload, metadata_changed = _sanitize_local_tokenizer_metadata_payload(
+            sanitized_payload,
+            relative_name=relative_name,
+        )
+        if metadata_changed:
+            sanitized_payload = metadata_payload
+            changed = True
+        if not changed:
+            continue
+        _write_json_file(candidate, sanitized_payload)
+        repaired.append(relative_name)
+        LOGGER.info('Sanitized local model config file for tokenizer compatibility: %s', candidate)
+    return repaired
+
+
 def _model_download_source_label(download_source: str) -> str:
     return '镜像源（推荐）' if _model_download_endpoint(download_source) else '官方源'
 
@@ -3376,14 +3643,6 @@ def _wait_for_controls(pause_event: threading.Event | None, cancel_event: thread
         if pause_event is None or not pause_event.is_set():
             return
         time.sleep(0.12)
-
-
-
-
-
-
-
-
 
 
 

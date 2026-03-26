@@ -15,7 +15,7 @@ from unittest.mock import patch
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import RuntimeDependencyError
 from omniclip_rag.canary_backend import CANARY_VECTOR_MODEL_ID
-from omniclip_rag.vector_index import LanceDbVectorIndex, _MODEL_DOWNLOAD_IGNORE_PATTERNS, _discover_active_runtime_dir, _preferred_runtime_dir_path, _probe_runtime_semantic_core_inprocess, _runtime_component_dependency_ids, _runtime_import_environment, _runtime_search_roots, build_runtime_install_command, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, prepare_local_model_snapshot, probe_runtime_gpu_execution, refresh_runtime_capability_snapshot, runtime_dependency_issue, runtime_guidance_context, runtime_management_snapshot, probe_runtime_gpu_query_execution
+from omniclip_rag.vector_index import LanceDbVectorIndex, _MODEL_DOWNLOAD_IGNORE_PATTERNS, _discover_active_runtime_dir, _preferred_runtime_dir_path, _probe_runtime_semantic_core_inprocess, _runtime_component_dependency_ids, _runtime_import_environment, _runtime_search_roots, _sanitize_local_model_snapshot, build_runtime_install_command, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, prepare_local_model_snapshot, probe_runtime_gpu_execution, refresh_runtime_capability_snapshot, runtime_dependency_issue, runtime_guidance_context, runtime_management_snapshot, probe_runtime_gpu_query_execution
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -248,6 +248,235 @@ class VectorIndexTests(unittest.TestCase):
         index = LanceDbVectorIndex(config, data_paths)
         embedder = index._default_embedder_factory()
         self.assertEqual(getattr(embedder, 'device', ''), 'cpu')
+
+    def test_sanitize_local_model_snapshot_strips_nested_config_dicts(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "sanitize_model"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+        )
+        model_dir = Path(prepare_local_model_snapshot.__globals__['get_local_model_dir'](config, data_paths))
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / 'modules.json').write_text(
+            json.dumps(
+                [
+                    {'idx': 0, 'name': 'transformer', 'path': '0_Transformer'},
+                    {'idx': 1, 'name': 'pooling', 'path': '1_Pooling'},
+                ],
+                ensure_ascii=False,
+            ) + '\n',
+            encoding='utf-8',
+        )
+        (model_dir / 'config.json').write_text(
+            json.dumps({'model_type': 'xlm-roberta', 'transformers_version': '4.33.0'}) + '\n',
+            encoding='utf-8',
+        )
+        (model_dir / 'pytorch_model.bin').write_bytes(b'weights')
+        (model_dir / 'tokenizer_config.json').write_text(
+            json.dumps({'tokenizer_class': 'XLMRobertaTokenizer', 'config': {'model_type': 'xlm-roberta'}}, ensure_ascii=False) + '\n',
+            encoding='utf-8',
+        )
+        (model_dir / 'sentence_bert_config.json').write_text(
+            json.dumps(
+                {
+                    'max_seq_length': 8192,
+                    'tokenizer_args': {'config': {'model_type': 'xlm-roberta'}},
+                    'config_args': {'trust_remote_code': False},
+                },
+                ensure_ascii=False,
+            ) + '\n',
+            encoding='utf-8',
+        )
+        transformer_dir = model_dir / '0_Transformer'
+        transformer_dir.mkdir(parents=True, exist_ok=True)
+        (transformer_dir / 'tokenizer_config.json').write_text(
+            json.dumps(
+                {
+                    'tokenizer_class': 'XLMRobertaTokenizer',
+                    'tokenizer_args': {'padding_side': 'right'},
+                    'config': {'model_type': 'xlm-roberta'},
+                },
+                ensure_ascii=False,
+            ) + '\n',
+            encoding='utf-8',
+        )
+        pooling_dir = model_dir / '1_Pooling'
+        pooling_dir.mkdir(parents=True, exist_ok=True)
+        (pooling_dir / 'config.json').write_text(
+            json.dumps(
+                {
+                    'pooling_mode_mean_tokens': True,
+                    'config_args': {'config': {'model_type': 'xlm-roberta'}},
+                },
+                ensure_ascii=False,
+            ) + '\n',
+            encoding='utf-8',
+        )
+
+        repaired = _sanitize_local_model_snapshot(model_dir)
+
+        self.assertEqual(
+            set(repaired),
+            {
+                'config.json',
+                'tokenizer_config.json',
+                'sentence_bert_config.json',
+                '0_Transformer/tokenizer_config.json',
+                '1_Pooling/config.json',
+            },
+        )
+        root_config_payload = json.loads((model_dir / 'config.json').read_text(encoding='utf-8'))
+        tokenizer_payload = json.loads((model_dir / 'tokenizer_config.json').read_text(encoding='utf-8'))
+        sentence_payload = json.loads((model_dir / 'sentence_bert_config.json').read_text(encoding='utf-8'))
+        transformer_payload = json.loads((transformer_dir / 'tokenizer_config.json').read_text(encoding='utf-8'))
+        pooling_payload = json.loads((pooling_dir / 'config.json').read_text(encoding='utf-8'))
+        self.assertNotIn('transformers_version', root_config_payload)
+        self.assertNotIn('config', tokenizer_payload)
+        self.assertNotIn('config', sentence_payload['tokenizer_args'])
+        self.assertNotIn('config', transformer_payload)
+        self.assertNotIn('config', pooling_payload['config_args'])
+
+    def test_sanitize_local_model_snapshot_keeps_clean_configs_unchanged(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "sanitize_model_clean"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+        )
+        model_dir = Path(prepare_local_model_snapshot.__globals__['get_local_model_dir'](config, data_paths))
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / 'modules.json').write_text(
+            json.dumps([{'idx': 0, 'name': 'transformer', 'path': '0_Transformer'}], ensure_ascii=False) + '\n',
+            encoding='utf-8',
+        )
+        (model_dir / 'config.json').write_text(json.dumps({'model_type': 'xlm-roberta'}) + '\n', encoding='utf-8')
+        (model_dir / 'pytorch_model.bin').write_bytes(b'weights')
+        root_tokenizer_path = model_dir / 'tokenizer_config.json'
+        root_tokenizer_text = json.dumps({'tokenizer_class': 'XLMRobertaTokenizer'}, ensure_ascii=False) + '\n'
+        root_tokenizer_path.write_text(root_tokenizer_text, encoding='utf-8')
+        transformer_dir = model_dir / '0_Transformer'
+        transformer_dir.mkdir(parents=True, exist_ok=True)
+        nested_config_path = transformer_dir / 'config.json'
+        nested_config_text = json.dumps({'hidden_size': 1024, 'model_type': 'xlm-roberta'}, ensure_ascii=False) + '\n'
+        nested_config_path.write_text(nested_config_text, encoding='utf-8')
+
+        repaired = _sanitize_local_model_snapshot(model_dir)
+
+        self.assertEqual(repaired, [])
+        self.assertEqual(root_tokenizer_path.read_text(encoding='utf-8'), root_tokenizer_text)
+        self.assertEqual(nested_config_path.read_text(encoding='utf-8'), nested_config_text)
+
+    def test_default_embedder_factory_retries_after_sanitizing_nested_model_config(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "sanitize_model_retry"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+            vector_model='BAAI/bge-m3',
+            vector_runtime='torch',
+            vector_device='cpu',
+        )
+        model_dir = data_paths.cache_dir / 'models' / 'BAAI__bge-m3'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / 'modules.json').write_text(
+            json.dumps([{'idx': 0, 'name': 'transformer', 'path': '0_Transformer'}], ensure_ascii=False) + '\n',
+            encoding='utf-8',
+        )
+        (model_dir / 'config.json').write_text(json.dumps({'model_type': 'xlm-roberta'}) + '\n', encoding='utf-8')
+        (model_dir / 'pytorch_model.bin').write_bytes(b'weights')
+        transformer_dir = model_dir / '0_Transformer'
+        transformer_dir.mkdir(parents=True, exist_ok=True)
+        nested_tokenizer_path = transformer_dir / 'tokenizer_config.json'
+        nested_tokenizer_path.write_text(
+            json.dumps(
+                {
+                    'tokenizer_class': 'XLMRobertaTokenizer',
+                    'config': {'model_type': 'xlm-roberta'},
+                },
+                ensure_ascii=False,
+            ) + '\n',
+            encoding='utf-8',
+        )
+        calls = {'count': 0}
+
+        class FakeSentenceTransformer:
+            def __init__(self, model_name_or_path, **kwargs):
+                calls['count'] += 1
+                payload = json.loads((Path(model_name_or_path) / '0_Transformer' / 'tokenizer_config.json').read_text(encoding='utf-8'))
+                if isinstance(payload.get('config'), dict):
+                    raise AttributeError("'dict' object has no attribute 'model_type'")
+                self.model_name_or_path = model_name_or_path
+                self.kwargs = kwargs
+
+        fake_sentence_transformers = types.ModuleType("sentence_transformers")
+        fake_sentence_transformers.SentenceTransformer = FakeSentenceTransformer
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_sentence_transformers}), \
+             patch('omniclip_rag.vector_index.prepare_local_model_snapshot', return_value={'model_ready': True, 'local_model_dir': str(model_dir)}), \
+             patch('omniclip_rag.vector_index._runtime_import_environment', side_effect=lambda **_: nullcontext()):
+            index = LanceDbVectorIndex(config, data_paths)
+            embedder = index._default_embedder_factory()
+
+        self.assertIsInstance(embedder, FakeSentenceTransformer)
+        self.assertEqual(calls['count'], 2)
+        repaired_payload = json.loads(nested_tokenizer_path.read_text(encoding='utf-8'))
+        self.assertNotIn('config', repaired_payload)
+
+    def test_default_embedder_factory_retries_after_stripping_transformers_version_metadata(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "sanitize_model_transformers_version_retry"))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+            vector_model='BAAI/bge-m3',
+            vector_runtime='torch',
+            vector_device='cpu',
+        )
+        model_dir = data_paths.cache_dir / 'models' / 'BAAI__bge-m3'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / 'modules.json').write_text(
+            json.dumps([{'idx': 0, 'name': 'transformer', 'path': ''}], ensure_ascii=False) + '\n',
+            encoding='utf-8',
+        )
+        root_config_path = model_dir / 'config.json'
+        root_config_path.write_text(
+            json.dumps({'model_type': 'xlm-roberta', 'transformers_version': '4.33.0'}) + '\n',
+            encoding='utf-8',
+        )
+        (model_dir / 'sentence_bert_config.json').write_text(
+            json.dumps({'max_seq_length': 8192, 'do_lower_case': False}, ensure_ascii=False) + '\n',
+            encoding='utf-8',
+        )
+        (model_dir / 'tokenizer_config.json').write_text(
+            json.dumps({'tokenizer_class': 'XLMRobertaTokenizer', 'model_max_length': 8192}, ensure_ascii=False) + '\n',
+            encoding='utf-8',
+        )
+        (model_dir / 'pytorch_model.bin').write_bytes(b'weights')
+        calls = {'count': 0}
+
+        class FakeSentenceTransformer:
+            def __init__(self, model_name_or_path, **kwargs):
+                calls['count'] += 1
+                payload = json.loads((Path(model_name_or_path) / 'config.json').read_text(encoding='utf-8'))
+                if payload.get('transformers_version') == '4.33.0':
+                    raise AttributeError("'dict' object has no attribute 'model_type'")
+                self.model_name_or_path = model_name_or_path
+                self.kwargs = kwargs
+
+        fake_sentence_transformers = types.ModuleType("sentence_transformers")
+        fake_sentence_transformers.SentenceTransformer = FakeSentenceTransformer
+
+        with patch.dict(sys.modules, {"sentence_transformers": fake_sentence_transformers}), \
+             patch('omniclip_rag.vector_index.prepare_local_model_snapshot', return_value={'model_ready': True, 'local_model_dir': str(model_dir)}), \
+             patch('omniclip_rag.vector_index._runtime_import_environment', side_effect=lambda **_: nullcontext()):
+            index = LanceDbVectorIndex(config, data_paths)
+            embedder = index._default_embedder_factory()
+
+        self.assertIsInstance(embedder, FakeSentenceTransformer)
+        self.assertEqual(calls['count'], 2)
+        repaired_payload = json.loads(root_config_path.read_text(encoding='utf-8'))
+        self.assertNotIn('transformers_version', repaired_payload)
 
     def test_factory_returns_runtime_placeholder_when_lancedb_runtime_is_missing(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "missing_runtime"))

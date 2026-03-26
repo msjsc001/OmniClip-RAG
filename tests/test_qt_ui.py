@@ -670,11 +670,14 @@ class QtUiTests(unittest.TestCase):
             labels = [label.text().strip() for label in workspace.quick_steps_widget.findChildren(QtWidgets.QLabel)]
             self.assertEqual(len(labels), 4)
             self.assertTrue(all(labels))
+            self.assertIn('数据目录', labels[0])
+            self.assertIn('MD文件来源目录', labels[1])
             self.assertIn('主库', labels[1])
-            self.assertIn('纳入范围', labels[1])
+            self.assertIn('Markdown', labels[1])
             self.assertIn('Runtime', labels[2])
-            self.assertIn('下载当前模型', labels[2])
-            self.assertIn('预检查空间时间', labels[3])
+            self.assertIn('BGE', labels[2])
+            self.assertIn('语义查询', labels[2])
+            self.assertIn('活动日志', labels[3])
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -1248,7 +1251,7 @@ class QtUiTests(unittest.TestCase):
             self.assertEqual(workspace.runtime_chip.text(), text('zh-CN', 'runtime_chip_cpu_ready'))
             self.assertIn('GPU 加速这一项不需要安装', workspace.runtime_status_summary_label.text())
             self.assertEqual(workspace.runtime_components_table.rowCount(), 3)
-            self.assertEqual(workspace.runtime_components_table.item(2, 2).text(), text('zh-CN', 'runtime_status_not_needed'))
+            self.assertEqual(workspace.runtime_components_table.item(2, 2).text(), text('zh-CN', 'runtime_status_installed_unverified'))
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -1565,6 +1568,93 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_config_workspace_gpu_runtime_actions_allow_manual_repair_without_gpu(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            state = {
+                'component_id': 'gpu-acceleration',
+                'status': 'not-needed',
+                'ready': False,
+                'missing_items': [text('zh-CN', 'runtime_missing_not_needed_gpu')],
+                'installed_count': 0,
+            }
+            widget = workspace._build_runtime_component_actions_widget(
+                {
+                    'component_id': 'gpu-acceleration',
+                    'name': text('zh-CN', 'runtime_component_gpu_acceleration'),
+                    'description': text('zh-CN', 'runtime_component_gpu_acceleration_desc'),
+                },
+                state,
+                workspace,
+            )
+            buttons = {button.text(): button for button in widget.findChildren(QtWidgets.QPushButton)}
+            self.assertIn(text('zh-CN', 'runtime_row_repair'), buttons)
+            self.assertTrue(buttons[text('zh-CN', 'runtime_row_repair')].isEnabled())
+            self.assertIn(text('zh-CN', 'runtime_row_verify'), buttons)
+            self.assertTrue(buttons[text('zh-CN', 'runtime_row_verify')].isEnabled())
+            self.assertIn(text('zh-CN', 'runtime_row_clear'), buttons)
+            self.assertFalse(buttons[text('zh-CN', 'runtime_row_clear')].isEnabled())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_no_gpu_cuda_payload_reports_installed_unverified(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_current_runtime_repair_context', return_value={
+                'gpu_present': False,
+                'runtime_dir': str(paths.shared_root / 'runtime'),
+                'runtime_exists': True,
+            }), patch(
+                'omniclip_rag.ui_next_qt.config_workspace.runtime_component_status',
+                return_value={
+                    'component_id': 'semantic-core',
+                    'status': 'ready',
+                    'ready': True,
+                    'missing_items': [],
+                    'installed_count': 1,
+                    'total_count': 1,
+                    'cleanup_patterns': ('torch',),
+                    'profile': 'cuda',
+                },
+            ), patch(
+                'omniclip_rag.ui_next_qt.config_workspace.runtime_component_usage',
+                return_value={'disk_usage': '1.2 GB', 'download_usage': '900 MB'},
+            ):
+                state = workspace._runtime_component_state('gpu-acceleration')
+            self.assertEqual(state['status'], 'installed-unverified')
+            self.assertFalse(state['ready'])
+            self.assertEqual(state['installed_count'], 1)
+            self.assertIn(text('zh-CN', 'runtime_missing_gpu_no_hardware_installed'), state['missing_items'])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_runtime_gpu_verify_without_gpu_shows_info_message(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_current_runtime_repair_context', return_value={'gpu_present': False}), patch(
+                'omniclip_rag.ui_next_qt.config_workspace.QtWidgets.QMessageBox.information'
+            ) as info_mock:
+                workspace._request_runtime_gpu_verification()
+            info_mock.assert_called_once()
+            self.assertIsNone(workspace._runtime_verify_worker)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_config_workspace_runtime_auto_repair_launches_expected_powershell_command(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -1596,8 +1686,41 @@ class QtUiTests(unittest.TestCase):
             self.assertIn('OmniClipRAG', command)
             self.assertIn('-Component', command)
             self.assertIn('semantic-core', command)
+            self.assertIn('-DiagnosticsPath', command)
+            self.assertIn('-ResultPath', command)
             self.assertEqual(popen_mock.call_args.kwargs['cwd'], str(install_script.parent))
             self.assertEqual(popen_mock.call_args.kwargs['env']['OMNICLIP_RUNTIME_ROOT'], str(runtime_root))
+            self.assertFalse(workspace.runtime_install_progress_label.isHidden())
+            self.assertIn(text('zh-CN', 'runtime_component_semantic_core'), workspace.runtime_install_progress_label.text())
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_runtime_install_progress_monitor_updates_labels(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            diagnostics_path = TEST_ROOT / 'runtime_progress' / 'diag.json'
+            result_path = TEST_ROOT / 'runtime_progress' / 'result.json'
+            diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+            diagnostics_path.write_text(json.dumps({
+                'current_stage': 'download',
+                'current_artifact': 'torch-2.10.0+cpu-cp313-cp313-win_amd64.whl',
+                'artifacts_total': 4,
+                'artifacts_downloaded': 2,
+                'artifacts_verified': 1,
+            }, ensure_ascii=False), encoding='utf-8')
+            workspace._runtime_install_component_label = text('zh-CN', 'runtime_component_semantic_core')
+            workspace._runtime_install_started_at = time.time() - 3
+            workspace._runtime_install_diagnostics_path = diagnostics_path
+            workspace._runtime_install_result_path = result_path
+            workspace._poll_runtime_install_progress()
+            self.assertFalse(workspace.runtime_install_progress_label.isHidden())
+            self.assertIn('已下载 2/4', workspace.runtime_install_progress_label.text())
+            self.assertIn('torch-2.10.0+cpu', workspace.runtime_install_progress_detail_label.text())
         finally:
             workspace.deleteLater()
             app.processEvents()

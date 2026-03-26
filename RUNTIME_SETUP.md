@@ -41,7 +41,9 @@ So version updates should no longer imply "download everything again."
 
 To enable model warmup, full rebuild, semantic query, and GPU acceleration on the packaged app, install the required Runtime components through the Runtime page or the bundled PowerShell installer.
 
-The packaged app still ships `InstallRuntime.ps1` next to `OmniClipRAG.exe`, but that script now writes to the shared Runtime target by default instead of only writing into the current EXE folder.
+The packaged app still ships `InstallRuntime.ps1` next to `OmniClipRAG.exe`, and the GUI Runtime page uses the same installation chain.
+That installer now prefers the **bundled Python runtime inside the app package** and writes to the shared Runtime target by default instead of only writing into the current EXE folder.
+Runtime manifests now lock an **exact wheel set** per component, so installation is no longer left to live pip dependency resolution from loose version ranges.
 
 ## CPU Runtime
 
@@ -77,9 +79,11 @@ Notes:
 
 - `cuda` requires an NVIDIA GPU, working drivers, and a compatible PyTorch CUDA stack.
 - a working system CUDA installation alone is **not** enough; OmniClip still needs its own Runtime payloads.
-- the installer uses your system Python to download Runtime packages into the shared Runtime target unless `OMNICLIP_RUNTIME_ROOT` explicitly overrides it.
+- the installer now uses the **bundled Python runtime** that ships with the packaged GUI build, so users do **not** need to install Python separately.
+- Runtime installation is staged as: download wheels -> verify files -> offline install -> validate modules.
 - the packaged EXE remains unchanged; only the external Runtime sidecar grows.
 - Runtime installation also brings in the local vector stack used by semantic indexing and query.
+- on machines without an NVIDIA GPU, CUDA is still **not required**, but the Runtime page now allows you to manually download / repair the CUDA component anyway so you can test the installation pipeline. A successful download there only means **installed on disk**; it does **not** mean the current machine is GPU-ready.
 
 ## Pending Updates And Restart Behavior
 
@@ -93,7 +97,27 @@ In that case:
 
 ## If Python Is Not Installed
 
-Install Python `3.13` or newer first, then rerun `InstallRuntime.ps1`.
+That is now fine for packaged GUI users.
+
+- You do **not** need to install Python separately.
+- `InstallRuntime.ps1` and the Runtime page will use the Python runtime bundled with the app.
+- Only source-tree developers should care about a system Python fallback.
+
+## If Runtime Installation Fails
+
+The installer now writes structured diagnostics under the active data root:
+
+```text
+<active data root>\shared\logs\runtime
+```
+
+When a failure happens, check the latest JSON report there. It records:
+
+- which profile/component was being installed
+- which wheel download failed
+- whether the failure happened during download, verification, install, or validation
+- the exact Python/runtime root that was used
+- the current stage and artifact counters that the GUI/terminal progress view was reading
 
 ## Model Files Are Still Separate
 

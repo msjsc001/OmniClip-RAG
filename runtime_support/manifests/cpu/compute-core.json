@@ -1,0 +1,335 @@
+{
+  "schema_version": 2,
+  "profile": "cpu",
+  "component": "compute-core",
+  "python_tag": "cp313",
+  "platform_tag": "win_amd64",
+  "requirements": [
+    {
+      "name": "torch",
+      "version": "2.10.0+cpu",
+      "requirement": "torch==2.10.0+cpu",
+      "source_key": "pytorch"
+    },
+    {
+      "name": "numpy",
+      "version": "2.1.3",
+      "requirement": "numpy==2.1.3",
+      "source_key": "pypi"
+    },
+    {
+      "name": "scipy",
+      "version": "1.15.2",
+      "requirement": "scipy==1.15.2",
+      "source_key": "pypi"
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "torch",
+      "version": "2.10.0+cpu",
+      "requirement": "torch==2.10.0+cpu",
+      "filename": "torch-2.10.0+cpu-cp313-cp313-win_amd64.whl",
+      "sha256": "b719da5af01b59126ac13eefd6ba3dd12d002dc0e8e79b8b365e55267a8189d3",
+      "source_key": "pytorch"
+    },
+    {
+      "name": "certifi",
+      "version": "2026.2.25",
+      "requirement": "certifi==2026.2.25",
+      "filename": "certifi-2026.2.25-py3-none-any.whl",
+      "sha256": "027692e4402ad994f1c42e52a4997a9763c646b73e4096e4d5d6db8af1d6f0fa",
+      "source_key": "pypi"
+    },
+    {
+      "name": "charset-normalizer",
+      "version": "3.4.6",
+      "requirement": "charset-normalizer==3.4.6",
+      "filename": "charset_normalizer-3.4.6-cp313-cp313-win_amd64.whl",
+      "sha256": "572d7c822caf521f0525ba1bce1a622a0b85cf47ffbdae6c9c19e3b5ac3c4389",
+      "source_key": "pypi"
+    },
+    {
+      "name": "colorama",
+      "version": "0.4.6",
+      "requirement": "colorama==0.4.6",
+      "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+      "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6",
+      "source_key": "pypi"
+    },
+    {
+      "name": "filelock",
+      "version": "3.25.2",
+      "requirement": "filelock==3.25.2",
+      "filename": "filelock-3.25.2-py3-none-any.whl",
+      "sha256": "ca8afb0da15f229774c9ad1b455ed96e85a81373065fb10446672f64444ddf70",
+      "source_key": "pypi"
+    },
+    {
+      "name": "fsspec",
+      "version": "2026.2.0",
+      "requirement": "fsspec==2026.2.0",
+      "filename": "fsspec-2026.2.0-py3-none-any.whl",
+      "sha256": "98de475b5cb3bd66bedd5c4679e87b4fdfe1a3bf4d707b151b3c07e58c9a2437",
+      "source_key": "pypi"
+    },
+    {
+      "name": "huggingface-hub",
+      "version": "0.36.0",
+      "requirement": "huggingface-hub==0.36.0",
+      "filename": "huggingface_hub-0.36.0-py3-none-any.whl",
+      "sha256": "7bcc9ad17d5b3f07b57c78e79d527102d08313caa278a641993acddcb894548d",
+      "source_key": "pypi"
+    },
+    {
+      "name": "idna",
+      "version": "3.11",
+      "requirement": "idna==3.11",
+      "filename": "idna-3.11-py3-none-any.whl",
+      "sha256": "771a87f49d9defaf64091e6e6fe9c18d4833f140bd19464795bc32d966ca37ea",
+      "source_key": "pypi"
+    },
+    {
+      "name": "Jinja2",
+      "version": "3.1.6",
+      "requirement": "Jinja2==3.1.6",
+      "filename": "jinja2-3.1.6-py3-none-any.whl",
+      "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+      "source_key": "pypi"
+    },
+    {
+      "name": "joblib",
+      "version": "1.5.3",
+      "requirement": "joblib==1.5.3",
+      "filename": "joblib-1.5.3-py3-none-any.whl",
+      "sha256": "5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713",
+      "source_key": "pypi"
+    },
+    {
+      "name": "MarkupSafe",
+      "version": "3.0.3",
+      "requirement": "MarkupSafe==3.0.3",
+      "filename": "markupsafe-3.0.3-cp313-cp313-win_amd64.whl",
+      "sha256": "9a1abfdc021a164803f4d485104931fb8f8c1efd55bc6b748d2f5774e78b62c5",
+      "source_key": "pypi"
+    },
+    {
+      "name": "mpmath",
+      "version": "1.3.0",
+      "requirement": "mpmath==1.3.0",
+      "filename": "mpmath-1.3.0-py3-none-any.whl",
+      "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c",
+      "source_key": "pypi"
+    },
+    {
+      "name": "networkx",
+      "version": "3.6.1",
+      "requirement": "networkx==3.6.1",
+      "filename": "networkx-3.6.1-py3-none-any.whl",
+      "sha256": "d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762",
+      "source_key": "pypi"
+    },
+    {
+      "name": "numpy",
+      "version": "2.1.3",
+      "requirement": "numpy==2.1.3",
+      "filename": "numpy-2.1.3-cp313-cp313-win_amd64.whl",
+      "sha256": "747641635d3d44bcb380d950679462fae44f54b131be347d5ec2bce47d3df9ed",
+      "source_key": "pypi"
+    },
+    {
+      "name": "packaging",
+      "version": "26.0",
+      "requirement": "packaging==26.0",
+      "filename": "packaging-26.0-py3-none-any.whl",
+      "sha256": "b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37529",
+      "source_key": "pypi"
+    },
+    {
+      "name": "pillow",
+      "version": "12.1.1",
+      "requirement": "pillow==12.1.1",
+      "filename": "pillow-12.1.1-cp313-cp313-win_amd64.whl",
+      "sha256": "344cf1e3dab3be4b1fa08e449323d98a2a3f819ad20f4b22e77a0ede31f0faa1",
+      "source_key": "pypi"
+    },
+    {
+      "name": "PyYAML",
+      "version": "6.0.3",
+      "requirement": "PyYAML==6.0.3",
+      "filename": "pyyaml-6.0.3-cp313-cp313-win_amd64.whl",
+      "sha256": "79005a0d97d5ddabfeeea4cf676af11e647e41d81c9a7722a193022accdb6b7c",
+      "source_key": "pypi"
+    },
+    {
+      "name": "regex",
+      "version": "2026.2.28",
+      "requirement": "regex==2026.2.28",
+      "filename": "regex-2026.2.28-cp313-cp313-win_amd64.whl",
+      "sha256": "71a911098be38c859ceb3f9a9ce43f4ed9f4c6720ad8684a066ea246b76ad9ff",
+      "source_key": "pypi"
+    },
+    {
+      "name": "requests",
+      "version": "2.33.0",
+      "requirement": "requests==2.33.0",
+      "filename": "requests-2.33.0-py3-none-any.whl",
+      "sha256": "3324635456fa185245e24865e810cecec7b4caf933d7eb133dcde67d48cee69b",
+      "source_key": "pypi"
+    },
+    {
+      "name": "safetensors",
+      "version": "0.6.2",
+      "requirement": "safetensors==0.6.2",
+      "filename": "safetensors-0.6.2-cp38-abi3-win_amd64.whl",
+      "sha256": "c7b214870df923cbc1593c3faee16bec59ea462758699bd3fee399d00aac072c",
+      "source_key": "pypi"
+    },
+    {
+      "name": "scikit-learn",
+      "version": "1.8.0",
+      "requirement": "scikit-learn==1.8.0",
+      "filename": "scikit_learn-1.8.0-cp313-cp313-win_amd64.whl",
+      "sha256": "2de443b9373b3b615aec1bb57f9baa6bb3a9bd093f1269ba95c17d870422b271",
+      "source_key": "pypi"
+    },
+    {
+      "name": "scipy",
+      "version": "1.15.2",
+      "requirement": "scipy==1.15.2",
+      "filename": "scipy-1.15.2-cp313-cp313-win_amd64.whl",
+      "sha256": "a5080a79dfb9b78b768cebf3c9dcbc7b665c5875793569f48bf0e2b1d7f68f6f",
+      "source_key": "pypi"
+    },
+    {
+      "name": "sentence-transformers",
+      "version": "5.1.2",
+      "requirement": "sentence-transformers==5.1.2",
+      "filename": "sentence_transformers-5.1.2-py3-none-any.whl",
+      "sha256": "724ce0ea62200f413f1a5059712aff66495bc4e815a1493f7f9bca242414c333",
+      "source_key": "pypi"
+    },
+    {
+      "name": "setuptools",
+      "version": "82.0.1",
+      "requirement": "setuptools==82.0.1",
+      "filename": "setuptools-82.0.1-py3-none-any.whl",
+      "sha256": "a59e362652f08dcd477c78bb6e7bd9d80a7995bc73ce773050228a348ce2e5bb",
+      "source_key": "pypi"
+    },
+    {
+      "name": "sympy",
+      "version": "1.14.0",
+      "requirement": "sympy==1.14.0",
+      "filename": "sympy-1.14.0-py3-none-any.whl",
+      "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5",
+      "source_key": "pypi"
+    },
+    {
+      "name": "threadpoolctl",
+      "version": "3.6.0",
+      "requirement": "threadpoolctl==3.6.0",
+      "filename": "threadpoolctl-3.6.0-py3-none-any.whl",
+      "sha256": "43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb",
+      "source_key": "pypi"
+    },
+    {
+      "name": "tokenizers",
+      "version": "0.22.2",
+      "requirement": "tokenizers==0.22.2",
+      "filename": "tokenizers-0.22.2-cp39-abi3-win_amd64.whl",
+      "sha256": "c9ea31edff2968b44a88f97d784c2f16dc0729b8b143ed004699ebca91f05c48",
+      "source_key": "pypi"
+    },
+    {
+      "name": "tqdm",
+      "version": "4.67.3",
+      "requirement": "tqdm==4.67.3",
+      "filename": "tqdm-4.67.3-py3-none-any.whl",
+      "sha256": "ee1e4c0e59148062281c49d80b25b67771a127c85fc9676d3be5f243206826bf",
+      "source_key": "pypi"
+    },
+    {
+      "name": "transformers",
+      "version": "4.57.2",
+      "requirement": "transformers==4.57.2",
+      "filename": "transformers-4.57.2-py3-none-any.whl",
+      "sha256": "0918df354853c9931a637792cec519e137aceb150effd4c7924d6b8d36918fab",
+      "source_key": "pypi"
+    },
+    {
+      "name": "typing-extensions",
+      "version": "4.15.0",
+      "requirement": "typing-extensions==4.15.0",
+      "filename": "typing_extensions-4.15.0-py3-none-any.whl",
+      "sha256": "f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548",
+      "source_key": "pypi"
+    },
+    {
+      "name": "urllib3",
+      "version": "2.6.3",
+      "requirement": "urllib3==2.6.3",
+      "filename": "urllib3-2.6.3-py3-none-any.whl",
+      "sha256": "bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4",
+      "source_key": "pypi"
+    }
+  ],
+  "source_profiles": {
+    "official": {
+      "pytorch": {
+        "index_url": "https://download.pytorch.org/whl/cpu",
+        "extra_index_urls": [
+          "https://pypi.org/simple"
+        ]
+      },
+      "pypi": {
+        "index_url": "https://pypi.org/simple",
+        "extra_index_urls": []
+      }
+    },
+    "mirror": {
+      "pytorch": {
+        "index_url": "https://download.pytorch.org/whl/cpu",
+        "extra_index_urls": [
+          "https://pypi.tuna.tsinghua.edu.cn/simple"
+        ]
+      },
+      "pypi": {
+        "index_url": "https://pypi.tuna.tsinghua.edu.cn/simple",
+        "extra_index_urls": []
+      }
+    }
+  },
+  "cleanup_patterns": [
+    "torch",
+    "torch-*dist-info",
+    "functorch",
+    "functorch-*dist-info",
+    "torchgen",
+    "torchgen-*dist-info",
+    "numpy",
+    "numpy-*dist-info",
+    "numpy.libs",
+    "scipy",
+    "scipy-*dist-info",
+    "scipy.libs",
+    "sentence_transformers",
+    "sentence_transformers-*dist-info",
+    "transformers",
+    "transformers-*dist-info",
+    "huggingface_hub",
+    "huggingface_hub-*dist-info",
+    "safetensors",
+    "safetensors-*dist-info"
+  ],
+  "required_modules": [
+    "torch",
+    "numpy",
+    "scipy"
+  ],
+  "validation_probes": [
+    "torch",
+    "numpy",
+    "scipy"
+  ]
+}

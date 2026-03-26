@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -9,6 +10,7 @@ import sys
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.request import urlretrieve
 
 
 ROOT = Path(__file__).resolve().parent
@@ -78,6 +80,7 @@ GUI_TARGET = BuildTarget(
     support_files={
         ROOT / 'scripts' / 'install_runtime.ps1': DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'InstallRuntime.ps1',
         ROOT / 'RUNTIME_SETUP.md': DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'RUNTIME_SETUP.md',
+        ROOT / 'runtime_support': DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'runtime_support',
     },
     protected_runtime_dir=DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'runtime',
 )
@@ -198,7 +201,49 @@ def _copy_support_files(target: BuildTarget) -> None:
         if not source.exists():
             raise RuntimeError(f'Missing release support file: {source}')
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        if destination.exists():
+            _remove_path(destination)
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            shutil.copy2(source, destination)
+
+
+def _download_file(url: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    urlretrieve(url, destination)
+
+
+def _extract_zip(source: Path, destination: Path) -> None:
+    if destination.exists():
+        _remove_path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(source, 'r') as archive:
+        archive.extractall(destination)
+
+
+def _prepare_bundled_python(target: BuildTarget) -> None:
+    if target.exe_basename != 'OmniClipRAG':
+        return
+    metadata_path = target.output_dir / 'runtime_support' / 'bundled_python.json'
+    if not metadata_path.exists():
+        raise RuntimeError(f'Missing bundled Python metadata: {metadata_path}')
+    payload = json.loads(metadata_path.read_text(encoding='utf-8'))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f'Invalid bundled Python metadata: {metadata_path}')
+    package_url = str(payload.get('package_url') or '').strip()
+    python_relative = str(payload.get('python_executable_relative') or '').strip()
+    if not package_url or not python_relative:
+        raise RuntimeError(f'Bundled Python metadata is incomplete: {metadata_path}')
+    cache_dir = ROOT / 'build' / 'support-cache'
+    package_filename = str(payload.get('package_filename') or '').strip() or Path(package_url).name
+    archive_path = cache_dir / package_filename
+    _download_file(package_url, archive_path)
+    bundled_root = target.output_dir / 'runtime_support' / 'python'
+    _extract_zip(archive_path, bundled_root)
+    python_exe = bundled_root / python_relative
+    if not python_exe.exists():
+        raise RuntimeError(f'Bundled Python executable is missing after extraction: {python_exe}')
 
 
 def _is_forbidden_bundle_package(part: str) -> bool:
@@ -302,6 +347,7 @@ def main(argv: list[str] | None = None) -> int:
         _run_pyinstaller(target)
         _install_staged_bundle(target)
         _copy_support_files(target)
+        _prepare_bundled_python(target)
         if not args.skip_audit:
             _audit_bundle(target)
         _build_release_zip(target)

@@ -214,6 +214,13 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._device_probe_worker: FunctionWorker | None = None
         self._runtime_refresh_worker: FunctionWorker | None = None
         self._runtime_verify_worker: FunctionWorker | None = None
+        self._runtime_install_monitor_timer = QtCore.QTimer(self)
+        self._runtime_install_monitor_timer.setInterval(1000)
+        self._runtime_install_monitor_timer.timeout.connect(self._poll_runtime_install_progress)
+        self._runtime_install_diagnostics_path: Path | None = None
+        self._runtime_install_result_path: Path | None = None
+        self._runtime_install_started_at = 0.0
+        self._runtime_install_component_label = ''
         self._device_probe_scheduled = False
         self._device_runtime_prompt_suppressed = False
         self._live_runtime_sync_suppressed = False
@@ -2176,6 +2183,16 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.runtime_status_summary_label.setProperty('role', 'guide')
         self.runtime_status_summary_label.setWordWrap(True)
         layout.addWidget(self.runtime_status_summary_label)
+        self.runtime_install_progress_label = QtWidgets.QLabel(card)
+        self.runtime_install_progress_label.setProperty('role', 'guide')
+        self.runtime_install_progress_label.setWordWrap(True)
+        self.runtime_install_progress_label.hide()
+        layout.addWidget(self.runtime_install_progress_label)
+        self.runtime_install_progress_detail_label = QtWidgets.QLabel(card)
+        self.runtime_install_progress_detail_label.setProperty('role', 'muted')
+        self.runtime_install_progress_detail_label.setWordWrap(True)
+        self.runtime_install_progress_detail_label.hide()
+        layout.addWidget(self.runtime_install_progress_detail_label)
 
         self.runtime_root_label = QtWidgets.QLabel(card)
         self.runtime_root_label.setProperty('role', 'muted')
@@ -2239,6 +2256,101 @@ class ConfigWorkspace(QtWidgets.QWidget):
         runtime_header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
         runtime_header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         table_layout.addWidget(self.runtime_components_table)
+
+    def _runtime_install_log_dir(self) -> Path:
+        return Path(self._paths.shared_root) / 'logs' / 'runtime'
+
+    def _set_runtime_install_progress(self, summary: str = '', detail: str = '') -> None:
+        if not hasattr(self, 'runtime_install_progress_label'):
+            return
+        summary_text = str(summary or '').strip()
+        detail_text = str(detail or '').strip()
+        self.runtime_install_progress_label.setVisible(bool(summary_text))
+        self.runtime_install_progress_detail_label.setVisible(bool(detail_text))
+        self.runtime_install_progress_label.setText(summary_text)
+        self.runtime_install_progress_detail_label.setText(detail_text)
+
+    def _stop_runtime_install_progress_monitor(self, *, clear_ui: bool = False) -> None:
+        self._runtime_install_monitor_timer.stop()
+        self._runtime_install_diagnostics_path = None
+        self._runtime_install_result_path = None
+        self._runtime_install_started_at = 0.0
+        self._runtime_install_component_label = ''
+        if clear_ui:
+            self._set_runtime_install_progress('', '')
+
+    def _runtime_install_stage_text(self, stage: str) -> str:
+        normalized = (stage or '').strip().lower().replace('-', '_') or 'download'
+        key = f'runtime_install_stage_{normalized}'
+        try:
+            return self._tr(key)
+        except Exception:
+            return normalized
+
+    def _render_runtime_install_progress(self, payload: dict[str, object]) -> tuple[str, str]:
+        stage = self._runtime_install_stage_text(str(payload.get('current_stage') or payload.get('stage') or 'download'))
+        artifact = str(payload.get('current_artifact') or '').strip()
+        total = int(payload.get('artifacts_total') or 0)
+        downloaded = int(payload.get('artifacts_downloaded') or 0)
+        verified = int(payload.get('artifacts_verified') or 0)
+        component = self._runtime_install_component_label or self._tr('runtime_component_all')
+        summary = self._tr(
+            'runtime_install_progress_summary',
+            component=component,
+            stage=stage,
+            downloaded=downloaded,
+            total=total,
+            verified=verified,
+        )
+        detail_parts: list[str] = []
+        if artifact:
+            detail_parts.append(self._tr('runtime_install_progress_current_artifact', name=artifact))
+        if self._runtime_install_started_at > 0:
+            elapsed = max(time.time() - self._runtime_install_started_at, 0.0)
+            detail_parts.append(self._tr('runtime_install_progress_elapsed', elapsed=format_duration(elapsed)))
+        return summary, '\n'.join(detail_parts)
+
+    def _poll_runtime_install_progress(self) -> None:
+        diagnostics_path = self._runtime_install_diagnostics_path
+        result_path = self._runtime_install_result_path
+        diagnostics: dict[str, object] | None = None
+        if diagnostics_path is not None and diagnostics_path.exists():
+            try:
+                diagnostics = json.loads(diagnostics_path.read_text(encoding='utf-8'))
+            except Exception:
+                diagnostics = None
+        if isinstance(diagnostics, dict):
+            summary, detail = self._render_runtime_install_progress(diagnostics)
+            self._set_runtime_install_progress(summary, detail)
+        if result_path is None or not result_path.exists():
+            return
+        try:
+            result_payload = json.loads(result_path.read_text(encoding='utf-8'))
+        except Exception:
+            result_payload = {}
+        status = str(result_payload.get('status') or '').strip().lower()
+        if status == 'ok':
+            self._set_runtime_install_progress(
+                self._tr('runtime_install_progress_done', component=self._runtime_install_component_label or self._tr('runtime_component_all')),
+                self._tr('runtime_install_progress_result_path', path=str(result_path)),
+            )
+            self.statusMessageChanged.emit(self._tr('runtime_refresh_done'))
+            self._stop_runtime_install_progress_monitor(clear_ui=False)
+            self._request_runtime_management_refresh()
+            return
+        if status == 'error':
+            error_message = str(result_payload.get('error_message') or '').strip() or self._tr('runtime_missing_unknown')
+            diagnostics_hint = str(result_payload.get('diagnostics_path') or diagnostics_path or '').strip()
+            detail = self._tr('runtime_install_progress_failed', error=error_message)
+            if diagnostics_hint:
+                detail = f"{detail}\n{self._tr('runtime_install_progress_result_path', path=diagnostics_hint)}"
+            self._set_runtime_install_progress(
+                self._tr('runtime_install_progress_failed_title', component=self._runtime_install_component_label or self._tr('runtime_component_all')),
+                detail,
+            )
+            self.statusMessageChanged.emit(self._tr('runtime_repair_auto_failed', error=error_message))
+            self._append_log(self._tr('runtime_repair_auto_failed', error=error_message))
+            self._stop_runtime_install_progress_monitor(clear_ui=False)
         layout.addStretch(1)
         self._refresh_runtime_management_ui()
 
@@ -2267,21 +2379,28 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if normalized_component == 'gpu-acceleration':
             gpu_present = bool(context.get('gpu_present'))
             if not gpu_present:
+                base_state = dict(runtime_component_status('semantic-core'))
+                semantic_profile = str(base_state.get('profile') or '').strip().lower()
+                usage = runtime_component_usage('semantic-core', 'cuda')
+                has_cuda_payload = bool(base_state.get('installed_count')) and semantic_profile == 'cuda'
+                missing_items = [
+                    self._tr('runtime_missing_gpu_no_hardware_installed' if has_cuda_payload else 'runtime_missing_not_needed_gpu')
+                ]
                 return {
                     'component_id': component_id,
-                    'status': 'not-needed',
-                    'ready': True,
-                    'missing_items': [],
-                    'installed_count': 0,
-                    'total_count': 0,
-                    'cleanup_patterns': tuple(),
-                    'disk_usage': self._tr('runtime_usage_not_needed'),
-                    'download_usage': self._tr('runtime_usage_not_needed'),
-                    'install_state': 'not-needed',
+                    'status': 'installed-unverified' if has_cuda_payload else 'not-needed',
+                    'ready': False,
+                    'missing_items': missing_items,
+                    'installed_count': int(base_state.get('installed_count', 0) or 0) if has_cuda_payload else 0,
+                    'total_count': int(base_state.get('total_count', 0) or 0) if has_cuda_payload else 0,
+                    'cleanup_patterns': tuple(base_state.get('cleanup_patterns') or ()),
+                    'disk_usage': usage.get('disk_usage') or '',
+                    'download_usage': usage.get('download_usage') or '',
+                    'install_state': 'installed' if has_cuda_payload else 'not-needed',
                     'probe_state': 'not-needed',
                     'execution_state': 'not-needed',
                     'execution_verified': False,
-                    'profile': '',
+                    'profile': semantic_profile,
                 }
             base_state = dict(runtime_component_status('semantic-core'))
             semantic_profile = str(base_state.get('profile') or '').strip().lower()
@@ -2423,12 +2542,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         clear_button.clicked.connect(lambda _checked=False, c=component_id: self._clear_runtime_component(c))
         clear_button.setEnabled(not busy)
         action_layout.addWidget(clear_button, 0, 1)
-
-        if component_id == 'gpu-acceleration' and str(state.get('status') or '').strip().lower() == 'not-needed':
-            clear_button.setEnabled(False)
-            repair_button.setEnabled(False)
-
-        if component_id == 'gpu-acceleration' and str(state.get('status') or '').strip().lower() != 'not-needed':
+        if component_id == 'gpu-acceleration':
+            clear_button.setEnabled((not busy) and int(state.get('installed_count', 0) or 0) > 0)
             verify_button = QtWidgets.QPushButton(self._tr('runtime_row_verify'), container)
             self._set_button_variant(verify_button, 'secondary')
             verify_button.setMinimumHeight(scaled(self._theme, 30, minimum=28))
@@ -2496,6 +2611,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
 
     def _request_runtime_gpu_verification(self, _checked: bool = False) -> None:
         if self._runtime_refresh_worker is not None or self._runtime_verify_worker is not None:
+            return
+        context = self._current_runtime_repair_context(force_refresh=True)
+        if not bool(context.get('gpu_present')):
+            message = self._tr('runtime_verify_not_available_no_gpu')
+            QtWidgets.QMessageBox.information(self, self._tr('runtime_component_gpu_acceleration'), message)
+            self.statusMessageChanged.emit(message)
             return
         runtime_state = inspect_runtime_environment()
         pending_components = list(runtime_state.get('runtime_pending_components') or [])
@@ -2756,7 +2877,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         component_name, _component_description = self._runtime_component_display(component_id)
         context = self._current_runtime_repair_context(force_refresh=True)
         runtime_dir = Path(str(context.get('runtime_dir') or '')).expanduser()
-        if component_id == 'gpu-acceleration' and not bool(context.get('gpu_present')):
+        lookup_state = self._runtime_component_state(component_id, force_refresh=False, context=context)
+        if component_id == 'gpu-acceleration' and not bool(context.get('gpu_present')) and int(lookup_state.get('installed_count', 0) or 0) <= 0:
             QtWidgets.QMessageBox.information(self, self._tr('runtime_clear_title'), self._tr('runtime_clear_gpu_hint'))
             return
         if not runtime_dir.exists():
@@ -5143,6 +5265,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._download_monitor_timer.start()
 
     def _run_runtime_auto_repair(self, _checked: bool = False, *, source: str = 'official', component: str = 'all') -> None:
+        self._stop_runtime_install_progress_monitor(clear_ui=True)
         context = self._current_runtime_repair_context(force_refresh=True)
         install_script = Path(str(context.get('install_script') or '')).resolve()
         if not install_script.exists():
@@ -5159,6 +5282,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
         install_component, profile = self._runtime_component_install_target(normalized_component, context=context)
         app_dir = Path(str(context.get('app_dir') or install_script.parent)).resolve()
         runtime_root = Path(str(context.get('preferred_runtime_dir') or context.get('install_target_dir') or self._active_runtime_target_dir())).expanduser()
+        runtime_log_dir = self._runtime_install_log_dir()
+        runtime_log_dir.mkdir(parents=True, exist_ok=True)
+        request_stamp = time.strftime('%Y%m%d-%H%M%S') + f"{int((time.time() % 1) * 1000):03d}"
+        diagnostics_path = runtime_log_dir / f'runtime-install-{request_stamp}.json'
+        result_path = runtime_log_dir / f'runtime-install-{request_stamp}.result.json'
         command = [
             powershell,
             '-ExecutionPolicy', 'Bypass',
@@ -5167,6 +5295,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             '-Profile', profile,
             '-Source', normalized_source,
             '-WaitForProcessName', 'OmniClipRAG',
+            '-DiagnosticsPath', str(diagnostics_path),
+            '-ResultPath', str(result_path),
         ]
         if normalized_component != 'all':
             command.extend(['-Component', install_component])
@@ -5183,6 +5313,15 @@ class ConfigWorkspace(QtWidgets.QWidget):
         message = self._tr('runtime_repair_auto_started', component=component_name, source=self._tr(f'runtime_source_{normalized_source}'))
         self.statusMessageChanged.emit(message)
         self._append_log(message)
+        self._runtime_install_diagnostics_path = diagnostics_path
+        self._runtime_install_result_path = result_path
+        self._runtime_install_started_at = time.time()
+        self._runtime_install_component_label = component_name
+        self._set_runtime_install_progress(
+            self._tr('runtime_install_progress_waiting', component=component_name),
+            self._tr('runtime_install_progress_result_path', path=str(diagnostics_path)),
+        )
+        self._runtime_install_monitor_timer.start()
 
     def _show_runtime_repair_manual(self, _checked: bool = False, *, component: str = 'all') -> None:
         component_name, _component_description = self._runtime_component_display(component)

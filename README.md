@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-v0.4.6-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-quick-start--workflow) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-core-philosophy--priceless-boundaries) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500?style=flat-square)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.7-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-quick-start--workflow) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-core-philosophy--priceless-boundaries) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500?style=flat-square)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md) | [MCP Setup](MCP_SETUP.md) | [Website](https://msjsc001.github.io/OmniClip-RAG/)
 
@@ -40,7 +40,7 @@
 > **TL;DR: MCP Quickstart**
 >
 > OmniClip RAG now ships a **read-only local-first MCP server** for searching private Markdown, PDF, and Tika-backed knowledge bases on Windows.
-> Download `OmniClipRAG-MCP-v0.4.6-win64.zip` for manual `stdio` setup or `omniclip-rag-mcp-win-x64-v0.4.6.mcpb` for the official MCP Registry / MCPB path.
+> Download `OmniClipRAG-MCP-v0.4.7-win64.zip` for manual `stdio` setup or `omniclip-rag-mcp-win-x64-v0.4.7.mcpb` for the official MCP Registry / MCPB path.
 > Point your MCP client at `OmniClipRAG-MCP.exe`, then ask the AI to call `omniclip.status` first and `omniclip.search` for the actual retrieval flow. Full details: [MCP_SETUP.md](MCP_SETUP.md).
 
 ---
@@ -175,9 +175,9 @@ The foundation is built as a single portable green EXE. No complicated scripting
 
 `OmniClip RAG MCP Server` lets MCP-capable AI clients search your local knowledge base through the same read-only retrieval core that powers the desktop app.
 
-From `v0.4.6`, the MCP line is packaged in two parallel distribution forms:
-- `OmniClipRAG-MCP-v0.4.6-win64.zip` for manual file-based setup
-- `omniclip-rag-mcp-win-x64-v0.4.6.mcpb` for the official MCP Registry and MCPB-aware clients
+From `v0.4.7`, the MCP line is packaged in two parallel distribution forms:
+- `OmniClipRAG-MCP-v0.4.7-win64.zip` for manual file-based setup
+- `omniclip-rag-mcp-win-x64-v0.4.7.mcpb` for the official MCP Registry and MCPB-aware clients
 
 > [!CAUTION]
 > **What You Need First**
@@ -193,7 +193,7 @@ From `v0.4.6`, the MCP line is packaged in two parallel distribution forms:
 
 Since `v0.4.1`, OmniClip RAG keeps a first-class MCP Registry / MCPB line, so clients that support Registry discovery or MCPB installation can use that path first.
 - If your client supports Registry discovery, look for: `io.github.msjsc001/omniclip-rag-mcp`
-- If your client supports MCPB installation, prefer the Release asset: `omniclip-rag-mcp-win-x64-v0.4.6.mcpb`
+- If your client supports MCPB installation, prefer the Release asset: `omniclip-rag-mcp-win-x64-v0.4.7.mcpb`
 
 For the full Registry/MCPB explanation and client-specific setup notes, see [MCP_SETUP.md](MCP_SETUP.md).
 
@@ -205,7 +205,7 @@ If you downloaded the ZIP package manually, or your client does not support the 
 In Jan.ai, create a new MCP server with the following values:
 - `Server Name`: `OmniClip RAG`
 - `Transport Type`: `STDIO`
-- `Command`: the full path to `OmniClipRAG-MCP.exe` (e.g. `D:\Apps\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.6\OmniClipRAG-MCP.exe`)
+- `Command`: the full path to `OmniClipRAG-MCP.exe` (e.g. `D:\Apps\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.7\OmniClipRAG-MCP.exe`)
 - `Arguments`: leave empty
 - `Environment Variables`: leave empty by default
 
@@ -216,7 +216,7 @@ Register the MCP server in OpenClaw's config file (`%USERPROFILE%\.openclaw\open
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.6\\OmniClipRAG-MCP.exe",
+      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.7\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -346,7 +346,7 @@ flowchart LR
 By default, data generation sits securely in `%APPDATA%\OmniClip RAG`. Under prohibitive permissions or system limits, it downgrades gracefully to `%LOCALAPPDATA%\OmniClip RAG`.
 —— **It heavily repudiates creating messy temp logs or intrusive directories inside system installs or directly littering your precious note vaults.**
 
-External heavy runtime payloads (e.g., native Torch environments) stay outside the packaged EXE and are now designed to converge into a shared AppData sidecar root after user-authorized installation (see [RUNTIME_SETUP.md](RUNTIME_SETUP.md)). Lean releases remain clean, while healthy legacy runtimes can still be reused across packaged version folders.
+External heavy runtime payloads (e.g., native Torch environments) stay outside the packaged EXE and are now designed to converge into a shared AppData sidecar root after user-authorized installation (see [RUNTIME_SETUP.md](RUNTIME_SETUP.md)). Packaged GUI builds now carry their own bundled Python runtime for Runtime installation, so end users no longer need to preinstall Python just to download or repair OmniClip's local Runtime sidecar. Runtime manifests now lock exact wheel files instead of loose dependency ranges, and even CUDA entries on non-NVIDIA machines remain manually repairable for installation-chain testing without being misreported as GPU-ready. Lean releases remain clean, while healthy legacy runtimes can still be reused across packaged version folders.
 
 <br/>
 
@@ -396,6 +396,14 @@ python launcher_mcp.py --mcp-selfcheck
 <summary><b>📦 Click to expand: V0.4+ Architecture & Release Evolution</b></summary>
 
 <br/>
+
+### V0.4.7 Key Updates
+`v0.4.7` is the Runtime hardening and local model compatibility release: the desktop line now ships a bundled Python path for Runtime installation, Runtime component installs are driven by full wheel manifests instead of loose live dependency resolution, long installs expose truthful stage progress, and local `BAAI/bge-m3` snapshots are sanitized against the `transformers 4.57.2` tokenizer metadata bug that could block vector builds on some machines.
+- 🐍 **System Python is no longer a normal-user prerequisite for local semantic Runtime**: the packaged app now carries a bundled Python installation path for Runtime downloads, so clean Windows machines can bring up semantic components without separately managing Python.
+- 📦 **Runtime components are now installed from full wheel sets instead of drift-prone live dependency resolution**: manifests lock concrete wheel files and hashes, which removes duplicate `torch`/`setuptools` style drift and makes installs more repeatable over time.
+- 📈 **Runtime installs now explain what they are doing**: download, verification, offline install, and validation all surface stage transitions, artifact counts, and heartbeat output in both the shell flow and the structured diagnostics.
+- 🧠 **`BAAI/bge-m3` local loads are hardened against a real upstream tokenizer bug**: when `transformers==4.57.2` mis-handles local `config.json` metadata during local tokenizer setup, OmniClip now repairs that metadata before retrying instead of leaving the build dead in vector initialization.
+- 🧪 **CUDA components stay testable on non-NVIDIA machines without being lied about**: they remain non-required by default, but can now still be downloaded/repaired for installation-chain testing while preserving truthful non-ready status on CPU-only hardware.
 
 ### V0.4.6 Key Updates
 `v0.4.6` is the UI cognition and navigation polish release: the Start page now speaks in the clearer `Primary / Included scope` mental model for Markdown source directories, the configuration tabs follow the real product workflow order, and the desktop shell gains a unified theme-aware hover-help layer that can be globally turned on or off.

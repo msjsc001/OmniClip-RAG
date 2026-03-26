@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## V0.4.7 - 2026-03-26
+
+### Added
+
+- Added [RELEASE_NOTES_v0.4.7](releases/RELEASE_NOTES_v0.4.7.md) for the bundled-Python Runtime hardening and local model compatibility release.
+- Added a bundled-Python Runtime installation path that no longer requires users to preinstall system Python before bringing up local semantic Runtime components.
+- Added a fully locked wheel-manifest flow for Runtime components, plus stage-level progress/heartbeat output and structured diagnostics during download, verification, installation, and validation.
+
+### Changed
+
+- Changed visible app/package/release metadata to `v0.4.7` across the desktop app, MCP line, README badges, setup examples, release notes, and example client configs.
+- Changed Runtime installation semantics from “let pip resolve on site against whatever Python is present” to “use the bundled Python and install from an application-owned manifest-defined wheel set”.
+- Changed Runtime UI semantics on non-NVIDIA machines so CUDA components remain non-required but can still be downloaded or repaired manually for installation-chain testing without being misreported as `CUDA ready`.
+
+### Fixed
+
+- Fixed the `vector-store` CPU Runtime install break caused by pinning `onnxruntime==1.24.0`, which is no longer available on the current index line.
+- Fixed the black-box Runtime install experience where long downloads could look frozen even while work was progressing, by exposing stage transitions, per-artifact counts, and heartbeat output.
+- Fixed the local `BAAI/bge-m3` build failure on some machines where `transformers==4.57.2` could treat local `config.json` metadata as an object and crash with `'dict' object has no attribute 'model_type'`.
+
 ## V0.4.6 - 2026-03-26
 
 ### Added

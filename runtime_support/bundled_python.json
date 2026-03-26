@@ -1,0 +1,9 @@
+{
+  "version": "3.13.7",
+  "platform": "win_amd64",
+  "distribution": "nuget",
+  "package_url": "https://www.nuget.org/api/v2/package/python/3.13.7",
+  "package_filename": "python.3.13.7.nupkg",
+  "python_executable_relative": "tools/python.exe",
+  "notes": "Bundled runtime-only Python used by InstallRuntime.ps1 and runtime validation. Not the GUI interpreter."
+}

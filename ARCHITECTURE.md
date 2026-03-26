@@ -259,6 +259,28 @@ Current late-stage polishing policy:
 
 Why: once the site is already coherent, the remaining gains no longer come from prettier local components. They come from widening authority gaps between peaks and retreating anything that softens those power relationships.
 
+### 17. Runtime installation must be product-grade, not developer-environment-grade
+
+Current Runtime-install policy:
+
+- the packaged GUI build now ships a bundled Python `3.13.x` runtime under `runtime_support/python`,
+- Runtime installation for normal users must prefer that bundled Python instead of the machine's system Python,
+- the installer must no longer rely on live `pip` dependency resolution from abstract version ranges,
+- Runtime components are installed from application-owned manifests under `runtime_support/manifests`,
+- those manifests now lock exact wheel filenames + SHA256 instead of only top-level version ranges, so CPU/CUDA installs are reproducible and do not drift into duplicate `torch` / `setuptools` downloads,
+- installation is staged as:
+  - read manifest,
+  - download wheels into a local wheelhouse,
+  - verify files,
+  - offline-install from that wheelhouse,
+  - validate the imported modules,
+- source fallback is allowed only for downloading the same manifest-defined dependency set; changing mirror must not change the dependency graph,
+- Runtime diagnostics are written into the active data root so users can report the exact failed wheel / stage instead of only seeing a generic `Runtime installation failed.`,
+- system Python is now a developer-only emergency fallback for source-tree work, not part of the packaged-user contract.
+- on machines without an NVIDIA GPU, CUDA Runtime remains non-required but is still manually repairable/testable from the Runtime page; successful download there must be reported as "installed but not verified on this machine", never as `CUDA ready`.
+
+Why: the real product promise is "download the app, repair/download Runtime inside the app, and use it," not "become a Windows Python environment operator first." Bundled Python fixes the user-environment problem, while manifest-driven staged installs greatly reduce future drift without forcing the project into heavyweight prebuilt Runtime packages.
+
 ### 17. `data_root` is now the single environment truth
 
 Current data-root policy:
@@ -1615,3 +1637,10 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - 全局 tooltip 现在作为统一 UI 能力接管，而不是零散 `setToolTip()` 文案堆砌：`AppConfig.ui_tooltips_enabled` 保存用户偏好，UI 页提供全局开关，应用主题统一控制 `QToolTip` 的样式与显示延迟，关闭后全局不显示。Why：软件功能复杂度已经超过“默认系统黄框即可”的阶段，悬浮说明必须成为一致的认知层基建。
 - Tooltip 的覆盖范围故意保持克制：只优先解释高价值概念与关键动作，如 `主库 / 纳入范围 / 数据目录 / 预检查空间时间 / 全量建库 / 启动热监听 / 清理中断状态 / 扩展来源目录的取消勾选语义`。Why：悬浮说明的职责是降低认知门槛，不是把所有控件都做成噪音源。
 - `开始` 页 quick-start 已经从旧的单库三步说明改成四步模型：`数据目录 -> MD文件来源目录 -> Runtime/模型 -> 预检查与建库`，并明确区分 Markdown 主线与 PDF/Tika 扩展来源目录。Why：开始页必须反映当前软件真实结构，否则用户会被旧时代的单库文案误导。
+
+## 2026-03-26 本地语义模型快照兼容修复
+- 真实新机测试确认过一条新的模型侧兼容边界：`semantic-core` 与 Runtime 组件都可以已经安装完成，但本地 `SentenceTransformer` 模型快照里的 `tokenizer_config.json` 或 `sentence_*_config.json` 仍可能带着镜像/第三方快照写入的嵌套 `config` dict，最终在 `AutoTokenizer.from_pretrained(...)` 里炸成 `AttributeError: 'dict' object has no attribute 'model_type'`。Why：这类报错看起来像 Runtime 还坏着，实际根因是**本地模型目录结构脏了**，不是 wheel 安装失败。
+- `vector_index.prepare_local_model_snapshot()` 现在在把本地模型目录视为“可用快照”之前，会主动扫描并净化 `tokenizer_config.json` 与 `sentence_*_config.json`，删除这些不该存在的嵌套 `config` dict；`_default_embedder_factory()` 也会在捕获到同类 `model_type/tokenizer` AttributeError 时自动做一次修复后重试。Why：这个修复必须是防御性的，不能要求用户手工删 JSON 或重新下载整个模型。
+- 这条记忆也固定了一个排障结论：如果用户新机上已经看到 `Runtime validation succeeded.`，但 Markdown 建库时仍在本地模型加载阶段炸出 `model_type`/`tokenizer` 一类错误，优先怀疑**模型快照兼容性**，而不是重新把问题归咎到 Runtime 安装链本体。Why：这样后续排障不会再错误地回滚到“重新修 Runtime 下载器”这条已经打通的主线。
+- 2026-03-26 补充：旧机器复用旧 `bge-m3` 模型缓存时，脏配置不一定只在模型根目录，`0_Transformer` 等模块子目录里的 `*config*.json` 也可能残留嵌套 `config` dict。兼容修复现在必须递归扫描整个模型目录里的配置 JSON，并优先覆盖 `modules.json` 描述到的模块目录；若自动修复后仍然报同类 `model_type/tokenizer` 错误，用户侧最终 fallback 固定为“删除该模型缓存目录后重新下载”，而不是重新折腾 Runtime 安装器。Why：另一台机器复用旧缓存仍然报同样错误，说明问题是**旧模型快照覆盖范围不足**，不是新 EXE 没打进去。
+- 2026-03-26 再补充：后续真机复测证明，即使彻底删除 `BAAI/bge-m3` 再 fresh 下载，`transformers==4.57.2` 仍会在本地大词表 tokenizer 的 mistral 兼容分支里把 `json.load(config.json)` 返回的 dict 错当成对象访问 `_config.model_type`，从而再次抛出同样的 `AttributeError`。针对这条真实根因，`vector_index` 现在会在本地模型快照净化时主动移除非 mistral 模型 `config.json` 里的旧 `transformers_version` 元数据，以绕开这段错误分支。Why：这条问题表面像“模型缓存损坏”，实质是**`bge-m3` 本地快照与 runtime 里的 `transformers 4.57.2` 存在已知兼容断层**，继续只围绕“脏嵌套 config”做修复是不够的。

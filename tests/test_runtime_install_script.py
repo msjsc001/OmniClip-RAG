@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 import unittest
 
+from omniclip_rag.runtime_support import bundled_python_executable, load_runtime_manifest
 from omniclip_rag.vector_index import detect_acceleration, inspect_runtime_environment, runtime_component_status
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,23 +33,33 @@ class RuntimeInstallScriptTests(unittest.TestCase):
 
     def test_runtime_install_script_uses_file_based_required_module_validation(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("required-modules.txt", text)
-        self.assertIn("required_modules_path = Path(sys.argv[2]).resolve()", text)
-        self.assertIn("splitlines()", text)
-        self.assertNotIn("json.loads(required_modules_path.read_text", text)
-        self.assertNotIn("json.loads(sys.argv[2])", text)
+        self.assertIn("install_runtime_driver.py", text)
+        self.assertIn("Bundled runtime Python is missing or incomplete.", text)
+        self.assertIn("Using bundled Python runtime installer", text)
+        self.assertIn("--diagnostics-path", text)
+        self.assertIn("--wheelhouse", text)
+        self.assertIn("[string]$DiagnosticsPath", text)
+        self.assertIn("[string]$ResultPath", text)
 
-    def test_runtime_install_script_writes_manifest_without_bom_serializer_dependency(self) -> None:
+    def test_runtime_install_script_reports_diagnostics_path_on_failure(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("$utf8NoBom = New-Object System.Text.UTF8Encoding($false)", text)
-        self.assertIn("[System.IO.File]::WriteAllText($requiredModulesPath, (($requiredModules | Where-Object { $_ }) -join [Environment]::NewLine), $utf8NoBom)", text)
-        self.assertNotIn("System.Text.Json.JsonSerializer", text)
+        self.assertIn('Runtime installation failed. Diagnostic log:', text)
+        self.assertIn('$diagnosticsPath', text)
+        self.assertNotIn('Python 3.13+ was not found.', text)
 
 
     def test_runtime_install_script_keeps_semantic_core_profile_requested_by_caller(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("$effectiveProfile = $Profile", text)
         self.assertNotIn("$effectiveProfile = if ($normalizedRequestedComponent -eq 'semantic-core') { 'cpu' } else { $Profile }", text)
+
+    def test_runtime_support_manifest_loader_exposes_manifest_path_and_bundled_python_relative_path(self) -> None:
+        manifest = load_runtime_manifest('cpu', 'semantic-core', app_dir=ROOT)
+        self.assertEqual(manifest['profile'], 'cpu')
+        self.assertEqual(manifest['component'], 'semantic-core')
+        self.assertTrue(str(manifest['manifest_path']).endswith('runtime_support\\manifests\\cpu\\semantic-core.json'))
+        bundled = bundled_python_executable(ROOT)
+        self.assertTrue(str(bundled).endswith(str(Path('runtime_support') / 'python' / 'tools' / 'python.exe')))
 
     def test_runtime_probe_ignores_installer_stdlib_entries_from_bootstrap_metadata(self) -> None:
         app_root = TEST_ROOT / 'bootstrap_ignore_stdlib' / 'app'
@@ -264,4 +275,3 @@ class RuntimeInstallScriptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
