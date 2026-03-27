@@ -11,7 +11,7 @@
 
 [![Version](https://img.shields.io/badge/version-v0.4.7-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-quick-start--workflow) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-core-philosophy--priceless-boundaries) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500?style=flat-square)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
-[中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md) | [MCP Setup](MCP_SETUP.md) | [Website](https://msjsc001.github.io/OmniClip-RAG/)
+[中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md) | [MCP Setup](MCP_SETUP.md) | [Third-Party Notices](THIRD_PARTY_NOTICES.md) | [Website](https://msjsc001.github.io/OmniClip-RAG/)
 
 <br/>
 
@@ -453,6 +453,7 @@ python launcher_mcp.py --mcp-selfcheck
 - [Architecture Notes](ARCHITECTURE.md)
 - [Changelog](CHANGELOG.md)
 - [MCP Setup](MCP_SETUP.md)
+- [Third-Party Notices](THIRD_PARTY_NOTICES.md)
 - [OmniClip RAG MCP Registry Launch Plan](plans/OmniClip%20RAG%20官方MCP%20Registry登月计划.md)
 - [Storage Precheck Notes](STORAGE_PRECHECK.md)
 - [Runtime Setup](RUNTIME_SETUP.md)
@@ -477,6 +478,8 @@ OmniClip stands on a serious amount of open-source work. The core projects that 
 > `Python`, `Qt / PySide6 / Shiboken6`, `SQLite`, `LanceDB`, `Apache Arrow / PyArrow`, `PyTorch`, `sentence-transformers`, `Transformers / Hugging Face Hub`, `BAAI/bge-m3`, `BAAI/bge-reranker-v2-m3`, `PyPDF`, `Apache Tika`, `Eclipse Temurin / Adoptium`, `watchdog`, `PyInstaller`, `pytest`, `ONNX Runtime`, `MCP Python SDK / Model Context Protocol`.
 > 
 > Thanks to these projects and their maintainers for the long-term engineering work that makes a tool like this possible.
+
+Formal repository-level third-party license and distribution notes now live in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The README section above is a human-readable summary, not the legal source of truth.
 
 ## 📜 License
 

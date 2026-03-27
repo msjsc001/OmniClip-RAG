@@ -1644,3 +1644,8 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - 这条记忆也固定了一个排障结论：如果用户新机上已经看到 `Runtime validation succeeded.`，但 Markdown 建库时仍在本地模型加载阶段炸出 `model_type`/`tokenizer` 一类错误，优先怀疑**模型快照兼容性**，而不是重新把问题归咎到 Runtime 安装链本体。Why：这样后续排障不会再错误地回滚到“重新修 Runtime 下载器”这条已经打通的主线。
 - 2026-03-26 补充：旧机器复用旧 `bge-m3` 模型缓存时，脏配置不一定只在模型根目录，`0_Transformer` 等模块子目录里的 `*config*.json` 也可能残留嵌套 `config` dict。兼容修复现在必须递归扫描整个模型目录里的配置 JSON，并优先覆盖 `modules.json` 描述到的模块目录；若自动修复后仍然报同类 `model_type/tokenizer` 错误，用户侧最终 fallback 固定为“删除该模型缓存目录后重新下载”，而不是重新折腾 Runtime 安装器。Why：另一台机器复用旧缓存仍然报同样错误，说明问题是**旧模型快照覆盖范围不足**，不是新 EXE 没打进去。
 - 2026-03-26 再补充：后续真机复测证明，即使彻底删除 `BAAI/bge-m3` 再 fresh 下载，`transformers==4.57.2` 仍会在本地大词表 tokenizer 的 mistral 兼容分支里把 `json.load(config.json)` 返回的 dict 错当成对象访问 `_config.model_type`，从而再次抛出同样的 `AttributeError`。针对这条真实根因，`vector_index` 现在会在本地模型快照净化时主动移除非 mistral 模型 `config.json` 里的旧 `transformers_version` 元数据，以绕开这段错误分支。Why：这条问题表面像“模型缓存损坏”，实质是**`bge-m3` 本地快照与 runtime 里的 `transformers 4.57.2` 存在已知兼容断层**，继续只围绕“脏嵌套 config”做修复是不够的。
+
+## 2026-03-27 第三方声明与 README 致谢分层
+- 仓库现在固定区分两层文档语义：README 里的“开源致谢”继续作为人类可读的高层感谢摘要，而新增的 `THIRD_PARTY_NOTICES.md` 作为仓库级正式第三方许可/分发说明入口。Why：感谢清单适合让用户快速理解项目依赖生态，但它不应该被误当成法律/分发意义上的真相源。
+- `THIRD_PARTY_NOTICES.md` 当前定位是“仓库级 practical notice”，不是完整传递依赖 BOM，也不是律师意见；若发生冲突，以上游许可证文本、NOTICE、模型卡和平台条款为准。Why：项目已经开始稳定分发 GUI ZIP、MCP ZIP 与 MCPB，但当前阶段先把合规口径在仓库里收口，比立即扩成完整打包内许可证镜像更稳。
+- 当前阶段只做文档层补强，不单独为此升版本、不重构建、不重发 release。Why：这轮调整不改变功能与用户行为，属于仓库透明度与分发合规基线的补齐；后续若要让发布包也直接带上该文件，再跟随下一个功能版本一起进入构建链即可。

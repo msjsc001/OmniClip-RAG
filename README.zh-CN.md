@@ -11,7 +11,7 @@
 
 [![Version](https://img.shields.io/badge/version-v0.4.7-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
-[English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md) | [官网](https://msjsc001.github.io/OmniClip-RAG/)
+[English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md) | [第三方许可与声明](THIRD_PARTY_NOTICES.md) | [官网](https://msjsc001.github.io/OmniClip-RAG/)
 
 <br/>
 
@@ -456,6 +456,7 @@ python launcher_mcp.py --mcp-selfcheck
 - [架构说明](ARCHITECTURE.md)
 - [更新日志](CHANGELOG.md)
 - [MCP 接入说明](MCP_SETUP.md)
+- [第三方许可与声明](THIRD_PARTY_NOTICES.md)
 - [OmniClip RAG 官方 MCP Registry 登月计划](plans/OmniClip%20RAG%20官方MCP%20Registry登月计划.md)
 - [空间预检说明](STORAGE_PRECHECK.md)
 - [运行时安装说明](RUNTIME_SETUP.md)
@@ -482,6 +483,8 @@ python launcher_mcp.py --mcp-selfcheck
 > `Python`, `Qt / PySide6 / Shiboken6`, `SQLite`, `LanceDB`, `Apache Arrow / PyArrow`, `PyTorch`, `sentence-transformers`, `Transformers / Hugging Face Hub`, `BAAI/bge-m3`, `BAAI/bge-reranker-v2-m3`, `PyPDF`, `Apache Tika`, `Eclipse Temurin / Adoptium`, `watchdog`, `PyInstaller`, `pytest`, `ONNX Runtime`, `MCP Python SDK / Model Context Protocol`.
 > 
 > 感谢这些项目及其维护者长期的开放协作与工程投入。
+
+正式的仓库级第三方许可与分发说明现已单独整理在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。上面的“开源致谢”更偏向人类可读摘要，不是法律意义上的真相源。
 
 ## 📜 许可证
 
