@@ -112,6 +112,6 @@ For this repository today, the practical baseline is:
 
 ## Last Updated / 最近更新
 
-This notice was added during the `v0.4.7` documentation/compliance pass and is expected to evolve as the distribution line evolves.
+This notice was added during the project's documentation/compliance hardening pass and is expected to evolve as the distribution line evolves.
 
-本声明在 `v0.4.7` 之后的文档/合规补强阶段加入，后续会随着分发线变化持续更新。
+本声明是在项目文档/合规补强阶段加入的，后续会随着分发线变化持续更新。

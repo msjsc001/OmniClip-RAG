@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## V0.4.8 - 2026-04-20
+
+### Added
+
+- Added [RELEASE_NOTES_v0.4.8](releases/RELEASE_NOTES_v0.4.8.md) for the startup responsiveness and extension-source removal release.
+
+### Changed
+
+- Changed visible app/package/release metadata to `v0.4.8` across the desktop app, MCP line, setup examples, release notes, and local packaging metadata.
+- Changed the row-level delete action in `拓展格式 > PDF / Tika` source directories from a pure “clear index” action into a true “remove source” action that removes the directory from extension settings after cleaning its matching extension index/state data.
+- Changed desktop startup initialization so heavyweight Runtime-management refreshes and extension-source summary rebuilds no longer block the first paint of the packaged GUI shell.
+
+### Fixed
+
+- Fixed the packaged desktop startup freeze where the first window could enter a Windows “not responding” state while synchronous Runtime/extension refresh work was still running on the main thread.
+- Fixed the PDF/Tika source-directory management gap where a source could clear its extension index but still remain stuck in the UI registry with no direct way to remove it cleanly.
+
 ## V0.4.7 - 2026-03-26
 
 ### Added

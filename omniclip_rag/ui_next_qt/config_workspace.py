@@ -76,6 +76,39 @@ REPO_URL = 'https://github.com/msjsc001/OmniClip-RAG'
 LOGGER = logging.getLogger(__name__)
 
 
+def _build_extension_source_summaries_payload(
+    config: AppConfig,
+    paths,
+    *,
+    pdf_paths: list[str],
+    tika_paths: list[str],
+) -> dict[tuple[str, str], dict[str, object]]:
+    summaries: dict[tuple[str, str], dict[str, object]] = {}
+    try:
+        service = ExtensionService(config, paths)
+        for path, summary in service.run_pdf_source_summaries(source_paths=pdf_paths).items():
+            summaries[('pdf', normalize_vault_path(path))] = {
+                'source_path': str(getattr(summary, 'source_path', '') or path),
+                'indexed_files': int(getattr(summary, 'indexed_files', 0) or 0),
+                'indexed_chunks': int(getattr(summary, 'indexed_chunks', 0) or 0),
+                'vector_documents': int(getattr(summary, 'vector_documents', 0) or 0),
+                'last_indexed_mtime': float(getattr(summary, 'last_indexed_mtime', 0.0) or 0.0),
+                'has_indexed_data': bool(getattr(summary, 'has_indexed_data', False)),
+            }
+        for path, summary in service.run_tika_source_summaries(source_paths=tika_paths).items():
+            summaries[('tika', normalize_vault_path(path))] = {
+                'source_path': str(getattr(summary, 'source_path', '') or path),
+                'indexed_files': int(getattr(summary, 'indexed_files', 0) or 0),
+                'indexed_chunks': int(getattr(summary, 'indexed_chunks', 0) or 0),
+                'vector_documents': int(getattr(summary, 'vector_documents', 0) or 0),
+                'last_indexed_mtime': float(getattr(summary, 'last_indexed_mtime', 0.0) or 0.0),
+                'has_indexed_data': bool(getattr(summary, 'has_indexed_data', False)),
+            }
+    except Exception as exc:
+        LOGGER.warning('Failed to refresh extension source summaries: %s', exc)
+    return summaries
+
+
 @dataclass(slots=True)
 class _DownloadTaskState:
     label_key: str
@@ -180,6 +213,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._extension_task_key: str | None = None
         self._extension_active_source_key: tuple[str, str] | None = None
         self._extension_cancel_event: threading.Event | None = None
+        self._extension_summary_worker: FunctionWorker | None = None
         self._extension_resume_prompted: set[str] = set()
         self._extension_global_progress: dict[str, object] | None = None
         self._extension_source_progress: dict[tuple[str, str], str] = {}
@@ -228,6 +262,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._initial_status_scheduled = False
         self._startup_status_after_probe = False
         self._startup_status_delay_ms = 0
+        self._startup_runtime_refresh_pending = False
         self._resume_prompt_workspace_id: str | None = None
         self._rebuild_pause_event = __import__('threading').Event()
         self._rebuild_cancel_event = __import__('threading').Event()
@@ -1893,7 +1928,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._set_chip_style(self.index_chip, ok=index_state == 'ready', warn=index_state == 'pending')
         if index_state == 'checking':
             self._set_chip_style(self.index_chip)
-        self._refresh_runtime_management_ui()
     def _refresh_device_options(self, payload: dict[str, object] | None = None) -> None:
         if isinstance(payload, dict):
             self._acceleration_payload = dict(payload)
@@ -1912,7 +1946,6 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.device_combo.blockSignals(False)
         self.device_summary_label.setText(self._device_summary())
         self.device_runtime_status_label.setText(self._device_runtime_status_text())
-        self._refresh_runtime_management_ui()
     @staticmethod
     def _backend_enabled_value(backend: str | None) -> bool:
         return (str(backend or 'disabled').strip().lower() or 'disabled') not in {'', 'disabled', 'none', 'off'}
@@ -2256,6 +2289,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         runtime_header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
         runtime_header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         table_layout.addWidget(self.runtime_components_table)
+        self._populate_runtime_management_placeholders()
 
     def _runtime_install_log_dir(self) -> Path:
         return Path(self._paths.shared_root) / 'logs' / 'runtime'
@@ -2687,6 +2721,48 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._fit_table_to_contents(table, minimum_height=minimum_height, extra_padding=extra_padding)
         QtCore.QTimer.singleShot(0, lambda table=table, minimum_height=minimum_height, extra_padding=extra_padding: self._fit_table_to_contents(table, minimum_height=minimum_height, extra_padding=extra_padding))
 
+    def _populate_runtime_management_placeholders(self) -> None:
+        if hasattr(self, 'runtime_chip'):
+            self.runtime_chip.setText(self._tr('runtime_chip_missing'))
+            self._set_chip_style(self.runtime_chip, warn=True)
+        if hasattr(self, 'runtime_status_summary_label'):
+            self.runtime_status_summary_label.setText(self._tr('runtime_page_summary_missing'))
+        if hasattr(self, 'runtime_install_target_label'):
+            self.runtime_install_target_label.setText(
+                self._tr('runtime_install_target_label', path=str(self._active_runtime_target_dir()))
+            )
+        if not hasattr(self, 'runtime_components_table'):
+            return
+        table = self.runtime_components_table
+        table.setRowCount(0)
+        for row, descriptor in enumerate(self._runtime_component_descriptors()):
+            placeholder_state = {
+                'component_id': descriptor['component_id'],
+                'status': 'missing',
+                'ready': False,
+                'missing_items': [self._tr('runtime_missing_unknown')],
+                'installed_count': 0,
+                'total_count': 0,
+            }
+            table.insertRow(row)
+            name_item = QtWidgets.QTableWidgetItem(descriptor['name'])
+            name_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+            table.setItem(row, 0, name_item)
+            role_item = QtWidgets.QTableWidgetItem(descriptor['description'])
+            role_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+            table.setItem(row, 1, role_item)
+            status_item = QtWidgets.QTableWidgetItem(self._runtime_status_text('missing'))
+            status_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+            table.setItem(row, 2, status_item)
+            missing_item = QtWidgets.QTableWidgetItem(self._tr('runtime_missing_unknown'))
+            missing_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable)
+            table.setItem(row, 3, missing_item)
+            table.setCellWidget(row, 4, self._build_runtime_component_actions_widget(descriptor, placeholder_state, table))
+        table.resizeRowsToContents()
+        minimum_height = scaled(self._theme, 220, minimum=200)
+        extra_padding = scaled(self._theme, 12, minimum=10)
+        self._fit_table_to_contents(table, minimum_height=minimum_height, extra_padding=extra_padding)
+
     def _refresh_runtime_management_ui(self, *, force_refresh: bool = False, context: dict[str, object] | None = None) -> None:
         context = dict(context or self._current_runtime_repair_context(force_refresh=force_refresh))
         semantic_state = self._runtime_component_state('semantic-core', force_refresh=force_refresh, context=context)
@@ -3099,40 +3175,62 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _refresh_extension_source_summaries(self, config: AppConfig | None = None, paths=None) -> None:
         config_value = config or self._config
         paths_value = paths or self._paths
-        summaries: dict[tuple[str, str], dict[str, object]] = {}
-        try:
-            service = ExtensionService(config_value, paths_value, runtime_manager=self._tika_runtime_manager)
-            pdf_paths = [
-                normalize_vault_path(source.path)
-                for source in self._extension_state.pdf_config.source_directories
-                if normalize_vault_path(source.path)
-            ]
-            tika_paths = [
-                normalize_vault_path(source.path)
-                for source in self._extension_state.tika_config.source_directories
-                if normalize_vault_path(source.path)
-            ]
-            for path, summary in service.run_pdf_source_summaries(source_paths=pdf_paths).items():
-                summaries[('pdf', normalize_vault_path(path))] = {
-                    'source_path': str(getattr(summary, 'source_path', '') or path),
-                    'indexed_files': int(getattr(summary, 'indexed_files', 0) or 0),
-                    'indexed_chunks': int(getattr(summary, 'indexed_chunks', 0) or 0),
-                    'vector_documents': int(getattr(summary, 'vector_documents', 0) or 0),
-                    'last_indexed_mtime': float(getattr(summary, 'last_indexed_mtime', 0.0) or 0.0),
-                    'has_indexed_data': bool(getattr(summary, 'has_indexed_data', False)),
-                }
-            for path, summary in service.run_tika_source_summaries(source_paths=tika_paths).items():
-                summaries[('tika', normalize_vault_path(path))] = {
-                    'source_path': str(getattr(summary, 'source_path', '') or path),
-                    'indexed_files': int(getattr(summary, 'indexed_files', 0) or 0),
-                    'indexed_chunks': int(getattr(summary, 'indexed_chunks', 0) or 0),
-                    'vector_documents': int(getattr(summary, 'vector_documents', 0) or 0),
-                    'last_indexed_mtime': float(getattr(summary, 'last_indexed_mtime', 0.0) or 0.0),
-                    'has_indexed_data': bool(getattr(summary, 'has_indexed_data', False)),
-                }
-        except Exception as exc:
-            LOGGER.warning('Failed to refresh extension source summaries: %s', exc)
-        self._extension_source_summaries = summaries
+        pdf_paths = [
+            normalize_vault_path(source.path)
+            for source in self._extension_state.pdf_config.source_directories
+            if normalize_vault_path(source.path)
+        ]
+        tika_paths = [
+            normalize_vault_path(source.path)
+            for source in self._extension_state.tika_config.source_directories
+            if normalize_vault_path(source.path)
+        ]
+        self._extension_source_summaries = _build_extension_source_summaries_payload(
+            config_value,
+            paths_value,
+            pdf_paths=pdf_paths,
+            tika_paths=tika_paths,
+        )
+
+    def _request_extension_source_summaries_refresh(self, config: AppConfig | None = None, paths=None) -> None:
+        if self._extension_summary_worker is not None:
+            return
+        config_value = config or self._config
+        paths_value = paths or self._paths
+        pdf_paths = [
+            normalize_vault_path(source.path)
+            for source in self._extension_state.pdf_config.source_directories
+            if normalize_vault_path(source.path)
+        ]
+        tika_paths = [
+            normalize_vault_path(source.path)
+            for source in self._extension_state.tika_config.source_directories
+            if normalize_vault_path(source.path)
+        ]
+        worker = FunctionWorker(
+            fn=lambda: _build_extension_source_summaries_payload(
+                config_value,
+                paths_value,
+                pdf_paths=pdf_paths,
+                tika_paths=tika_paths,
+            )
+        )
+        self._extension_summary_worker = worker
+        worker.succeeded.connect(self._handle_extension_source_summaries_success)
+        worker.failed.connect(self._handle_extension_source_summaries_failure)
+        worker.finished.connect(self._on_extension_source_summaries_finished)
+        worker.start()
+
+    def _handle_extension_source_summaries_success(self, payload: object) -> None:
+        self._extension_source_summaries = dict(payload or {}) if isinstance(payload, dict) else {}
+        if self._extension_controls_alive() and self._extension_state_loaded:
+            self._apply_extension_state_to_controls()
+
+    def _handle_extension_source_summaries_failure(self, message: str, _traceback_text: str) -> None:
+        LOGGER.warning('Background extension source summary refresh failed: %s', message)
+
+    def _on_extension_source_summaries_finished(self) -> None:
+        self._extension_summary_worker = None
 
     def _extension_source_stage_text(self, pipeline: str, stage_status: str) -> str:
         normalized = str(stage_status or '').strip().lower()
@@ -3789,6 +3887,33 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if self._start_extension_source_task(task_key=f'row-delete:{pipeline}', pipeline=pipeline, source_path=source_path, fn=runner, on_success=self._after_extension_source_task):
             self.statusMessageChanged.emit(self._tr('extensions_task_started', action=self._tr('extensions_row_delete'), pipeline=self._extension_pipeline_label(pipeline)))
 
+    def _discard_extension_source_runtime_state(self, pipeline: str, source_path: str) -> None:
+        normalized = normalize_vault_path(source_path)
+        if not normalized:
+            return
+        for key in ((pipeline, normalized), (pipeline, source_path)):
+            self._extension_source_progress.pop(key, None)
+            self._extension_source_summaries.pop(key, None)
+            self._extension_source_buttons.pop(key, None)
+
+    def _remove_extension_source_directory(self, pipeline: str, source_path: str) -> bool:
+        normalized = normalize_vault_path(source_path)
+        if not normalized:
+            return False
+        config = self._extension_config_for_pipeline(pipeline)
+        remaining: list[ExtensionSourceDirectory] = []
+        removed = False
+        for source in config.source_directories:
+            if normalize_vault_path(source.path).lower() == normalized.lower():
+                removed = True
+                continue
+            remaining.append(source)
+        if not removed:
+            return False
+        config.source_directories = remaining
+        self._discard_extension_source_runtime_state(pipeline, normalized)
+        return True
+
     def _after_extension_source_task(self, payload: object) -> None:
         if not isinstance(payload, dict):
             return
@@ -3803,6 +3928,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.statusMessageChanged.emit(message)
             self._append_log(message)
             return
+        if action == 'delete' and source_path:
+            removed = self._remove_extension_source_directory(pipeline, source_path)
+            if removed:
+                self._persist_extension_state()
         if action == 'preflight':
             if pipeline == 'tika':
                 message = self._tr('extensions_row_preflight_done_tika', files=int(getattr(report, 'total_files', 0) or 0), formats=len(tuple(getattr(report, 'enabled_formats', ()) or ())))
@@ -3830,11 +3959,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 )
         message = self._append_extension_recent_issues(message, report)
         message = self._append_extension_issue_summary(message, report)
-        self._set_extension_source_progress(pipeline, source_path, message)
+        if action != 'delete':
+            self._set_extension_source_progress(pipeline, source_path, message)
+        else:
+            self._discard_extension_source_runtime_state(pipeline, source_path)
         self.statusMessageChanged.emit(message)
         self._append_log(message)
 
-    def _load_extension_state(self, paths, vault_path: str) -> None:
+    def _load_extension_state(self, paths, vault_path: str, *, defer_source_summaries: bool = False) -> None:
         try:
             state = self._extension_registry.load(paths)
             self._extension_state = self._normalize_extension_registry_state(state, paths, vault_path)
@@ -3844,10 +3976,17 @@ class ConfigWorkspace(QtWidgets.QWidget):
             LOGGER.warning('Failed to load extension registry: %s', exc)
             self._extension_state_loaded = False
             self._extension_state = ExtensionRegistryState()
-        self._refresh_extension_source_summaries(self._config, paths)
+        if defer_source_summaries:
+            # PDF/Tika source summaries may scan multiple roots. Keep startup
+            # first-paint cheap and fill them in asynchronously afterwards.
+            self._extension_source_summaries = {}
+        else:
+            self._refresh_extension_source_summaries(self._config, paths)
         if hasattr(self, 'ext_pdf_enabled_check'):
             self._apply_extension_state_to_controls()
             self._schedule_tika_runtime_refresh()
+        if defer_source_summaries:
+            self._request_extension_source_summaries_refresh(self._config, paths)
         if self._extension_task_worker is None:
             self._maybe_offer_extension_resume(paths)
 
@@ -5339,11 +5478,18 @@ class ConfigWorkspace(QtWidgets.QWidget):
         dialog.exec()
     def _on_model_text_changed(self, _value: str) -> None:
         self._refresh_model_download_text()
+        # Why: startup fills persisted model names programmatically. Avoid
+        # letting those temporary text-changed signals synchronously trigger
+        # heavy runtime-management refresh before the first window paint.
+        if self._live_runtime_sync_suppressed:
+            return
         self._refresh_overview_chips()
         self._on_live_runtime_preferences_changed()
 
     def _on_reranker_model_text_changed(self, _value: str) -> None:
         self._refresh_reranker_download_text()
+        if self._live_runtime_sync_suppressed:
+            return
         self._refresh_reranker_state(self._status_snapshot)
 
     def _on_live_runtime_preferences_changed(self, *_args) -> None:
@@ -5587,7 +5733,13 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._suppress_extension_vault_refresh = False
         self.device_summary_label.setText(self._device_summary())
         self.device_runtime_status_label.setText(self._device_runtime_status_text())
-        self._load_extension_state(paths, getattr(config, 'vault_path', ''))
+        self._load_extension_state(
+            paths,
+            getattr(config, 'vault_path', ''),
+            defer_source_summaries=True,
+        )
+        self._refresh_overview_chips()
+        self._refresh_reranker_state(self._status_snapshot)
         self._schedule_markdown_status_refresh()
         if activate:
             self.runtimeConfigChanged.emit(self._config, self._paths)
@@ -5675,6 +5827,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return
         self._startup_status_after_probe = True
         self._startup_status_delay_ms = max(int(initial_status_delay_ms), 0)
+        self._startup_runtime_refresh_pending = True
         self.schedule_device_probe(delay_ms=device_probe_delay_ms, safe_mode=safe_mode)
 
     def schedule_device_probe(self, delay_ms: int = 0, *, safe_mode: bool = False) -> None:
@@ -5780,6 +5933,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._emit_query_block_state()
     def _on_initial_status_finished(self) -> None:
         self._initial_status_worker = None
+        if self._startup_runtime_refresh_pending:
+            self._startup_runtime_refresh_pending = False
+            QtCore.QTimer.singleShot(0, self._request_runtime_management_refresh)
     def _open_help_and_updates(self) -> None:
         answer = QtWidgets.QMessageBox.question(self, self._tr('help_updates_confirm_title'), self._tr('help_updates_confirm_body'))
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:

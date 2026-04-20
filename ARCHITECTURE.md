@@ -87,6 +87,10 @@ Reranker bootstrap also stays independent from the enable checkbox: users may do
 
 Full-context export now deliberately diverges from raw hit listing: result tables stay atomic for inspection, but the exported context pack may merge same-parent sibling fragments into one compact local structure so AI-facing output keeps evidence density without repeating nearly identical branches.
 
+Config-page startup also treats runtime-management refresh as a heavyweight path. Programmatic config replay must not let `model_edit` / `reranker_model_edit` text-change signals synchronously fan out into `_refresh_runtime_management_ui()` before the first window paint. Lightweight overview chips and heavyweight runtime-management status are intentionally decoupled so packaged builds do not show a long Windows "not responding" stall on first launch.
+
+The same startup rule now applies to extension-source summaries. `_load_extension_state()` may restore PDF/Tika source state synchronously, but the expensive source-summary scan must stay off the first-paint path during config replay. Startup uses placeholder extension state first and then fills source summaries in through a background worker so packaged Windows builds do not stall in the extension page before the main window is shown.
+
 
 ### 5. Watch mode must be externally stoppable
 
@@ -1628,6 +1632,7 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 - Markdown 行级 `移除` 的语义固定为“只从已保存列表与勾选范围里忘记这个来源目录，并在必要时切换当前库/停掉 watcher”，**不删除原始笔记、工作区或索引**。Why：来源目录管理和数据清理必须严格分开，不能把“移除来源目录”做成危险动作。
 - 扩展来源目录取消勾选现在正式拆成三选项：`取消勾选（不搜索） / 清除索引 / 取消`。Why：旧的 `Yes/No` 过于生硬，默认把“不想参与搜索”强绑成“必须删索引”不符合用户心智。
 - 扩展来源目录的 `selected` 只再表示“是否参与搜索”，不再表示“是否允许管理”；未勾选但保留索引的来源目录仍然允许执行预检、建库和删索引。Why：来源目录的管理权和搜索参与权是两件不同的事，UI 不能再把它们绑死在一个布尔值上。
+- 扩展来源目录行级危险按钮现在固定为“移除来源目录”语义，而不是“只删索引”：点击后必须先清理该来源对应的扩展索引/本地扩展状态，再把该目录从 PDF/Tika 扩展注册表里移除；**永远不删除原始文件夹**。Why：用户需要一个真正可闭环的来源目录移除入口，但这个入口只能触碰扩展子系统自己的数据面，不能越界到原始资料目录。
 - `probe_data_root()` 现在容忍“只有 `shared/logs` 痕迹、但还没形成完整环境”的 partial root，把它视为 `new` 而不是损坏环境。Why：最近多库/扩展任务会更早创建日志目录，不能因为这些早期日志痕迹把一个尚未正式落地的目录误判成 broken environment。
 
 ## 2026-03-26 配置页排序、主库/纳入范围与全局悬浮说明收口

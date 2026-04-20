@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-v0.4.7-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.8-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md) | [第三方许可与声明](THIRD_PARTY_NOTICES.md) | [官网](https://msjsc001.github.io/OmniClip-RAG/)
 
@@ -40,7 +40,7 @@
 > **MCP 快速入口**
 >
 > 如果你想把方寸引接到 Jan.ai、OpenClaw、Claude Desktop、Cursor 或其他支持 MCP 的客户端，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
-> 从 `v0.4.7` 起，MCP 线在继续提供手动 ZIP 的同时，也已经把共享环境根、诚实降级提示、标准 MCPB 发布物和仓库内可复现构建链全部收紧到同一版发布面。
+> 从 `v0.4.8` 起，MCP 线在继续提供手动 ZIP 的同时，也已经把共享环境根、诚实降级提示、标准 MCPB 发布物和仓库内可复现构建链全部收紧到同一版发布面。
 
 ---
 
@@ -178,9 +178,9 @@
 - 桌面版 `OmniClipRAG.exe` 负责正常建库、维护和可视化使用
 - `OmniClipRAG-MCP.exe` 负责安静地在后台给 AI 提供“只读搜索接口”
 
-从 `v0.4.7` 开始，MCP 这条线会同时提供两种分发形态：
-- `OmniClipRAG-MCP-v0.4.7-win64.zip`：给手动配置 `stdio` 的用户
-- `omniclip-rag-mcp-win-x64-v0.4.7.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
+从 `v0.4.8` 开始，MCP 这条线会同时提供两种分发形态：
+- `OmniClipRAG-MCP-v0.4.8-win64.zip`：给手动配置 `stdio` 的用户
+- `omniclip-rag-mcp-win-x64-v0.4.8.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
 
 > [!CAUTION]
 > **使用前要先做什么？**
@@ -199,7 +199,7 @@
 - 如果客户端已经支持从 Registry 发现 MCP Server，请直接搜索或添加：
   - `io.github.msjsc001/omniclip-rag-mcp`
 - 如果客户端支持官方 MCPB 安装流，请优先使用 Release 中的：
-  - `omniclip-rag-mcp-win-x64-v0.4.7.mcpb`
+  - `omniclip-rag-mcp-win-x64-v0.4.8.mcpb`
 - 更详细的官方发布线、MCPB 与 ZIP 的区别、以及不同客户端的接入说明，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
 
 ### 传统手动路线（Jan.ai / OpenClaw）
@@ -221,7 +221,7 @@
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.7\\OmniClipRAG-MCP.exe",
+      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.8\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -402,13 +402,13 @@ python launcher_mcp.py --mcp-selfcheck
 
 <br/>
 
-### V0.4.7 重点更新
-`v0.4.7` 的重点，是把 Runtime 安装链和本地语义模型兼容性真正收口：桌面版现在自带 Runtime 安装所需的 Python 路径，Runtime 组件按完整 wheel 清单安装而不是现场自由解析，长时间下载和安装会如实显示阶段进度，而本地 `BAAI/bge-m3` 也针对 `transformers 4.57.2` 的 tokenizer 元数据兼容 bug 做了自动修复。
-- 🐍 **本地语义 Runtime 不再要求普通用户先装系统 Python**：发布版现在自带 Runtime 安装用的 Python 路径，干净 Windows 新机也能直接在软件里把语义 Runtime 拉起来。
-- 📦 **Runtime 安装从“在线临场解析依赖”改成“按完整 wheel 清单安装”**：manifest 现在锁定具体 wheel 和哈希，收掉了重复 `torch`、多版 `setuptools` 这类漂移下载。
-- 📈 **长时间 Runtime 安装不再像卡死**：下载、校验、离线安装、验证几个阶段都会输出真实进度、对象和心跳，终端与结构化诊断能对得上。
-- 🧠 **`BAAI/bge-m3` 本地加载对上游 tokenizer bug 加了兼容修复**：当 `transformers==4.57.2` 在本地 `config.json` 元数据上走错分支时，程序会先修正元数据再重试，而不是直接让向量建库死在初始化阶段。
-- 🧪 **没有 N 卡的机器也能手动测试 CUDA 组件安装链**：GPU 组件默认仍是“非必需”，但现在可以手动下载/修复做链路测试，同时保持不把 CPU-only 机器误报成 `CUDA ready`。
+### V0.4.8 重点更新
+`v0.4.8` 的重点，是把“启动时第一屏卡死”和“扩展来源目录删不掉”这两条真实使用里的高摩擦问题一起收口：发布版现在会先把主窗口画出来，再后台补 Runtime 管理与扩展来源摘要；而 `拓展格式 > PDF / Tika` 里的危险按钮也终于变成真正的“移除来源目录”，会清掉对应扩展索引/状态并把该来源从配置里移除，但不会碰用户原始文件。
+- 🚀 **打包版启动首屏更稳了**：Runtime 管理区和扩展来源摘要的重刷新不再堵在首屏绘制之前，主窗口会先出来，重活再后台补齐。
+- 🧭 **PDF/Tika 来源目录终于有了真正的移除入口**：行级危险按钮不再只是“删索引”，而是删完对应扩展索引/状态后，把这个来源目录从扩展注册表和界面里一起移除。
+- 🧹 **扩展侧删除链闭环但仍然安全**：移除来源时只清扩展子系统自己的索引和状态，不会删除用户原始 PDF/Tika 文件夹。
+- 🛑 **删除任务如果中途取消，不会误移除来源目录**：只有真正完成清理后，来源目录才会从扩展配置里消失。
+- 🧪 **本地发布线版本口径重新一致**：包元数据、MCP 示例路径、release notes 和版本说明现在都已经收口到 `v0.4.8`。
 
 ### V0.4.6 重点更新
 `v0.4.6` 的重点，是把最近已经落地的多库 Markdown 来源目录能力和 UI 认知层真正收口：开始页现在正式用“主库 / 纳入范围”的白话口径表达多库关系，配置页顺序也改成更贴近真实使用路径的结构，同时桌面端新增了一套跟主题一致、可全局关闭的鼠标悬浮说明，让复杂功能不再只能靠猜。

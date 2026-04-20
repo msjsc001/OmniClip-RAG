@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -19,6 +20,7 @@ from omniclip_rag.ui_next_qt.app import StartupProgressDialog
 from omniclip_rag.config import AppConfig, ensure_data_paths, load_config, save_config
 from omniclip_rag.data_root_bootstrap import write_bootstrap_pointer
 from omniclip_rag.errors import BuildCancelledError
+from omniclip_rag.extensions.models import ExtensionDirectoryState, ExtensionSourceDirectory
 from omniclip_rag.models import QueryInsights, QueryResult, SearchHit, SpaceEstimate
 from omniclip_rag.ui_i18n import data_root_reason_text, text, tooltip
 from omniclip_rag.preflight import estimate_storage_for_vault
@@ -535,6 +537,82 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_config_workspace_overview_chips_do_not_force_runtime_management_refresh(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_refresh_runtime_management_ui', side_effect=AssertionError('overview chips should stay lightweight')):
+                workspace._refresh_overview_chips()
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_suppresses_runtime_refresh_during_programmatic_model_sync(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._live_runtime_sync_suppressed = True
+            with patch.object(workspace, '_refresh_overview_chips', side_effect=AssertionError('model sync should not refresh overview chips while suppressed')), \
+                 patch.object(workspace, '_on_live_runtime_preferences_changed', side_effect=AssertionError('model sync should not emit live runtime changes while suppressed')), \
+                 patch.object(workspace, '_refresh_reranker_state', side_effect=AssertionError('reranker sync should not probe readiness while suppressed')):
+                workspace._on_model_text_changed('BAAI/bge-m3')
+                workspace._on_reranker_model_text_changed('BAAI/bge-reranker-v2-m3')
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_suppresses_runtime_management_refresh_while_syncing_device_options(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_refresh_runtime_management_ui', side_effect=AssertionError('device option replay should not synchronously refresh runtime management UI')):
+                workspace._refresh_device_options({'device_options': ['auto', 'cpu'], 'gpu_present': False})
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_initial_status_finish_queues_runtime_refresh_in_background(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._startup_runtime_refresh_pending = True
+            scheduled: list[int] = []
+            with patch('omniclip_rag.ui_next_qt.config_workspace.QtCore.QTimer.singleShot', side_effect=lambda delay_ms, fn: (scheduled.append(delay_ms), fn())[1]), \
+                 patch.object(workspace, '_request_runtime_management_refresh', side_effect=lambda _checked=False: scheduled.append(-1)):
+                workspace._on_initial_status_finished()
+            self.assertEqual(scheduled, [0, -1])
+            self.assertFalse(workspace._startup_runtime_refresh_pending)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_apply_config_to_controls_defers_extension_source_summary_refresh(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(workspace, '_refresh_extension_source_summaries', side_effect=AssertionError('startup config replay should not synchronously rebuild extension summaries')), \
+                 patch.object(workspace, '_request_extension_source_summaries_refresh') as request_mock:
+                workspace._apply_config_to_controls(config, paths, activate=False)
+            request_mock.assert_called_once()
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_config_workspace_saves_filters_and_ui_preferences(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -948,6 +1026,80 @@ class QtUiTests(unittest.TestCase):
             workspace._refresh_extension_global_progress_ui()
             self.assertEqual(workspace.ext_global_progress_bar.maximum(), 100)
             self.assertEqual(workspace.ext_global_progress_bar.value(), 100)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_source_delete_removes_directory_from_registry_after_index_cleanup(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'extension_delete_remove_source'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        source_a = TEST_ROOT / 'extension_delete_remove_source' / 'pdf_a'
+        source_b = TEST_ROOT / 'extension_delete_remove_source' / 'pdf_b'
+        normalized_a = config_workspace_module.normalize_vault_path(str(source_a))
+        normalized_b = config_workspace_module.normalize_vault_path(str(source_b))
+        status_messages: list[str] = []
+        workspace.statusMessageChanged.connect(status_messages.append)
+        try:
+            source_a.mkdir(parents=True, exist_ok=True)
+            source_b.mkdir(parents=True, exist_ok=True)
+            workspace._extension_state.pdf_config.enabled = True
+            workspace._extension_state.pdf_config.source_directories = [
+                ExtensionSourceDirectory(path=normalized_a, state=ExtensionDirectoryState.ENABLED, selected=True, source_label='pdf_a'),
+                ExtensionSourceDirectory(path=normalized_b, state=ExtensionDirectoryState.ENABLED, selected=True, source_label='pdf_b'),
+            ]
+            workspace._extension_registry.save(paths, workspace._extension_state)
+            workspace._extension_source_progress[('pdf', normalized_a)] = '正在执行…'
+            workspace._extension_source_summaries[('pdf', normalized_a)] = {'has_indexed_data': True}
+            workspace._extension_source_buttons[('pdf', normalized_a)] = []
+            with patch.object(workspace, '_refresh_extension_source_summaries'):
+                workspace._after_extension_source_task({
+                    'pipeline': 'pdf',
+                    'source_path': normalized_a,
+                    'action': 'delete',
+                    'report': SimpleNamespace(cancelled=False, deleted_files=4, indexed_files=2, recent_issues=()),
+                })
+            remaining = [config_workspace_module.normalize_vault_path(item.path) for item in workspace._extension_state.pdf_config.source_directories]
+            saved_state = workspace._extension_registry.load(paths)
+            saved_remaining = [config_workspace_module.normalize_vault_path(item.path) for item in saved_state.pdf_config.source_directories]
+            self.assertNotIn(normalized_a, remaining)
+            self.assertIn(normalized_b, remaining)
+            self.assertNotIn(normalized_a, saved_remaining)
+            self.assertIn(normalized_b, saved_remaining)
+            self.assertNotIn(('pdf', normalized_a), workspace._extension_source_progress)
+            self.assertNotIn(('pdf', normalized_a), workspace._extension_source_summaries)
+            self.assertNotIn(('pdf', normalized_a), workspace._extension_source_buttons)
+            self.assertTrue(any('来源目录已移除' in message for message in status_messages))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_source_delete_cancelled_keeps_directory_registered(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'extension_delete_cancelled'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        source_dir = TEST_ROOT / 'extension_delete_cancelled' / 'pdf_a'
+        normalized = config_workspace_module.normalize_vault_path(str(source_dir))
+        try:
+            source_dir.mkdir(parents=True, exist_ok=True)
+            workspace._extension_state.pdf_config.enabled = True
+            workspace._extension_state.pdf_config.source_directories = [
+                ExtensionSourceDirectory(path=normalized, state=ExtensionDirectoryState.ENABLED, selected=True, source_label='pdf_a'),
+            ]
+            workspace._extension_registry.save(paths, workspace._extension_state)
+            with patch.object(workspace, '_refresh_extension_source_summaries'):
+                workspace._after_extension_source_task({
+                    'pipeline': 'pdf',
+                    'source_path': normalized,
+                    'action': 'delete',
+                    'report': SimpleNamespace(cancelled=True, resume_available=False),
+                })
+            remaining = [config_workspace_module.normalize_vault_path(item.path) for item in workspace._extension_state.pdf_config.source_directories]
+            self.assertIn(normalized, remaining)
         finally:
             workspace.deleteLater()
             app.processEvents()
