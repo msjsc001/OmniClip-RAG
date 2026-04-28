@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/msjsc001-omniclip-rag-badge.png)](https://mseep.ai/app/msjsc001-omniclip-rag)
+
 <div align="center">
 
 # 🌌 OmniClip RAG
