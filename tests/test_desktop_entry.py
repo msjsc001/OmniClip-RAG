@@ -11,6 +11,38 @@ from omniclip_rag.app_entry import desktop
 
 
 class DesktopEntryTests(unittest.TestCase):
+    def test_main_dispatches_query_worker_without_launching_qt(self) -> None:
+        with patch.object(desktop, '_apply_runtime_layout_if_needed', side_effect=AssertionError('query worker must not mutate runtime layout')), \
+             patch('omniclip_rag.query_subprocess.run_query_worker', return_value=17) as mocked:
+            result = desktop.main([
+                '--query-worker',
+                '--request', 'request.json',
+                '--output', 'result.json',
+                '--progress', 'progress.json',
+        ])
+        self.assertEqual(result, 17)
+        mocked.assert_called_once_with(
+            request_path='request.json',
+            output_path='result.json',
+            progress_path='progress.json',
+        )
+
+    def test_main_dispatches_runtime_probe_before_runtime_layout(self) -> None:
+        with patch.object(desktop, '_apply_runtime_layout_if_needed', side_effect=AssertionError('worker must not mutate runtime layout')), \
+             patch('omniclip_rag.startup_prewarm.run_runtime_probe_worker', return_value=13) as mocked:
+            result = desktop.main([
+                '--runtime-probe-worker',
+                '--probe-kind', 'startup-prewarm',
+                '--data-root', 'D:/data',
+                '--output', 'probe.json',
+            ])
+        self.assertEqual(result, 13)
+        mocked.assert_called_once_with(
+            probe_kind='startup-prewarm',
+            output_path='probe.json',
+            data_root='D:/data',
+        )
+
     def test_main_dispatches_selfcheck_query_without_launching_qt(self) -> None:
         with patch.object(desktop, '_apply_runtime_layout_if_needed') as runtime_mock, \
              patch.object(desktop, 'run_selfcheck_query', return_value=7) as mocked:

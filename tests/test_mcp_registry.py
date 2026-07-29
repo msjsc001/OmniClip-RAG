@@ -4,6 +4,7 @@ from omniclip_rag.mcp.registry import (
     MCPB_ENTRY_POINT,
     MCPB_ICON_NAME,
     REGISTRY_DESCRIPTION,
+    REGISTRY_REPOSITORY_URL,
     REGISTRY_SERVER_NAME,
     REGISTRY_TITLE,
     build_mcpb_manifest,
@@ -38,6 +39,11 @@ class McpRegistryTests(unittest.TestCase):
         self.assertEqual(payload['packages'][0]['transport']['type'], 'stdio')
         self.assertEqual(payload['packages'][0]['identifier'], mcpb_download_url('0.4.1'))
         self.assertEqual(payload['packages'][0]['fileSha256'], 'abc123')
+
+    def test_registry_identity_is_stable_while_repository_uses_canonical_owner(self) -> None:
+        self.assertEqual(REGISTRY_SERVER_NAME, 'io.github.msjsc001/omniclip-rag-mcp')
+        self.assertEqual(REGISTRY_REPOSITORY_URL, 'https://github.com/EllisMorrow/OmniClip-RAG')
+        self.assertIn('github.com/EllisMorrow/OmniClip-RAG/releases/', mcpb_download_url('0.4.9'))
 
     def test_mcpb_filename_contains_mcp_and_version(self) -> None:
         filename = mcpb_filename('0.4.1')

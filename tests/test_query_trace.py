@@ -28,6 +28,7 @@ class QueryTracePlanningTests(unittest.TestCase):
         profile = build_query_profile('我的思维', 30)
         lexical_steps = OmniClipService._query_expected_steps(
             markdown_requested=True,
+            vector_backend_enabled=True,
             query_mode='lexical-only',
             profile=profile,
             requested_families={'markdown'},
@@ -38,6 +39,7 @@ class QueryTracePlanningTests(unittest.TestCase):
 
         vector_steps = OmniClipService._query_expected_steps(
             markdown_requested=True,
+            vector_backend_enabled=True,
             query_mode='vector-only',
             profile=profile,
             requested_families={'markdown'},
@@ -48,6 +50,7 @@ class QueryTracePlanningTests(unittest.TestCase):
 
         hybrid_steps = OmniClipService._query_expected_steps(
             markdown_requested=True,
+            vector_backend_enabled=True,
             query_mode='hybrid',
             profile=profile,
             requested_families={'markdown'},
@@ -59,6 +62,7 @@ class QueryTracePlanningTests(unittest.TestCase):
 
         hybrid_no_rerank_steps = OmniClipService._query_expected_steps(
             markdown_requested=True,
+            vector_backend_enabled=True,
             query_mode='hybrid_no_rerank',
             profile=profile,
             requested_families={'markdown'},

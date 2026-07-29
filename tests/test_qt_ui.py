@@ -517,22 +517,103 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
-    def test_config_workspace_startup_background_tasks_serialize_heavy_probes(self) -> None:
+    def test_config_workspace_startup_background_tasks_begin_runtime_detection_immediately(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
-        scheduled: list[tuple[str, object]] = []
+        scheduled: list[tuple[int, object]] = []
+        query_blocks: list[tuple[bool, str, str]] = []
+        workspace.queryBlockStateChanged.connect(
+            lambda blocked, title, detail: query_blocks.append((blocked, title, detail))
+        )
         try:
-            with patch.object(workspace, '_start_device_probe', side_effect=lambda *, safe_mode=False: scheduled.append(('probe', safe_mode))), \
-                 patch.object(workspace, 'schedule_initial_status_load', side_effect=lambda delay_ms=0: scheduled.append(('status', delay_ms))):
+            with patch(
+                'omniclip_rag.ui_next_qt.config_workspace.QtCore.QTimer.singleShot',
+                side_effect=lambda delay_ms, callback: scheduled.append((delay_ms, callback)),
+            ):
                 workspace.schedule_startup_background_tasks(safe_mode=True, initial_status_delay_ms=120)
-                self.assertEqual(scheduled, [('probe', True)])
-                workspace._on_device_probe_finished()
-            self.assertEqual(scheduled, [('probe', True), ('status', 120)])
-            workspace._on_device_probe_finished()
-            self.assertEqual(scheduled, [('probe', True), ('status', 120)])
+            self.assertEqual(len(scheduled), 1)
+            self.assertEqual(scheduled[0][0], 0)
+            self.assertEqual(scheduled[0][1], workspace._start_startup_runtime_refresh)
+            self.assertEqual(workspace.runtime_chip.text(), text('zh-CN', 'runtime_chip_detecting'))
+            self.assertEqual(workspace.runtime_status_summary_label.text(), text('zh-CN', 'runtime_refresh_running'))
+            self.assertTrue(workspace._startup_prewarm_safe_mode)
+            self.assertTrue(query_blocks[-1][0])
+            self.assertEqual(
+                query_blocks[-1][2],
+                text('zh-CN', 'query_status_blocked_detail_runtime_detecting'),
+            )
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_automatically_refreshes_runtime_status_when_full_prewarm_is_skipped(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        connected: list[object] = []
+        started: list[bool] = []
+        cancelled: list[bool] = []
+
+        class _Signal:
+            def connect(self, callback) -> None:
+                connected.append(callback)
+
+        worker = SimpleNamespace(
+            succeeded=_Signal(),
+            failed=_Signal(),
+            finished=_Signal(),
+            start=lambda: started.append(True),
+            cancel=lambda: cancelled.append(True),
+        )
+        try:
+            with patch('omniclip_rag.ui_next_qt.config_workspace.inspect_runtime_environment', return_value={'runtime_complete': True}), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.read_memory_status', return_value=object()), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.evaluate_startup_status_refresh', return_value=SimpleNamespace(allowed=True, reason='allowed')), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.decision_log_payload', return_value={}), \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.RuntimeProbeWorker', return_value=worker) as worker_type:
+                workspace._start_startup_runtime_refresh()
+
+            worker_type.assert_called_once_with(probe_kind='refresh', data_root=str(paths.global_root))
+            self.assertEqual(started, [True])
+            self.assertTrue(workspace._startup_runtime_refresh_pending)
+            self.assertIs(workspace._startup_prewarm_worker, worker)
+
+            workspace._on_startup_activity()
+            self.assertEqual(cancelled, [])
+        finally:
+            with patch.object(workspace, '_schedule_startup_initial_status'):
+                workspace._on_startup_prewarm_finished()
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_applies_automatic_runtime_status_result_to_start_page(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        payload = {
+            'runtime_complete': True,
+            'runtime_status': 'cpu',
+            'torch_available': True,
+            'sentence_transformers_available': True,
+        }
+        try:
+            workspace._startup_runtime_refresh_pending = True
+            with patch.object(workspace, '_refresh_device_options') as refresh_device, \
+                 patch.object(workspace, '_refresh_runtime_management_ui') as refresh_runtime, \
+                 patch.object(workspace, '_append_log') as append_log:
+                workspace._on_startup_prewarm_success(payload)
+
+            self.assertEqual(workspace._acceleration_payload, payload)
+            refresh_device.assert_called_once_with(payload)
+            refresh_runtime.assert_called_once_with(force_refresh=False, context=payload)
+            append_log.assert_called_once_with(text('zh-CN', 'runtime_refresh_done'))
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -580,20 +661,82 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
-    def test_config_workspace_initial_status_finish_queues_runtime_refresh_in_background(self) -> None:
+    def test_config_workspace_initial_status_finish_does_not_queue_runtime_probe(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
         workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
         try:
-            workspace._startup_runtime_refresh_pending = True
-            scheduled: list[int] = []
-            with patch('omniclip_rag.ui_next_qt.config_workspace.QtCore.QTimer.singleShot', side_effect=lambda delay_ms, fn: (scheduled.append(delay_ms), fn())[1]), \
-                 patch.object(workspace, '_request_runtime_management_refresh', side_effect=lambda _checked=False: scheduled.append(-1)):
+            with patch.object(workspace, '_request_runtime_management_refresh', side_effect=AssertionError('startup status must not probe runtime')):
                 workspace._on_initial_status_finished()
-            self.assertEqual(scheduled, [0, -1])
-            self.assertFalse(workspace._startup_runtime_refresh_pending)
+            self.assertIsNone(workspace._initial_status_worker)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_startup_status_uses_isolated_child_process(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        connected: list[object] = []
+        started: list[bool] = []
+
+        class _Signal:
+            def connect(self, callback) -> None:
+                connected.append(callback)
+
+        worker = SimpleNamespace(
+            succeeded=_Signal(),
+            failed=_Signal(),
+            finished=_Signal(),
+            start=lambda: started.append(True),
+        )
+        try:
+            with patch('omniclip_rag.ui_next_qt.config_workspace.RuntimeProbeWorker', return_value=worker) as worker_type, \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.ServiceTaskWorker', side_effect=AssertionError('startup status must not use an in-process thread')):
+                workspace._load_initial_status(isolated=True)
+            worker_type.assert_called_once_with(probe_kind='workspace-status', data_root=str(paths.global_root))
+            self.assertEqual(started, [True])
+            self.assertIs(workspace._initial_status_worker, worker)
+        finally:
+            workspace._initial_status_worker = None
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_staggers_auxiliary_startup_tasks_after_status(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        scheduled: list[int] = []
+        try:
+            workspace._startup_initial_status_pending = True
+            with patch(
+                'omniclip_rag.ui_next_qt.config_workspace.QtCore.QTimer.singleShot',
+                side_effect=lambda delay_ms, callback: scheduled.append(delay_ms),
+            ):
+                workspace._on_initial_status_finished()
+            self.assertEqual(scheduled, [500, 1_500, 3_000])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_defers_full_tika_catalog_until_dialog_is_opened(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch('omniclip_rag.ui_next_qt.config_workspace.build_tika_format_catalog', return_value=[]) as catalog:
+                workspace._merge_tika_format_catalog([])
+                workspace._merge_tika_format_catalog([], full_catalog=True)
+            self.assertEqual(catalog.call_args_list[0].args, (None,))
+            self.assertEqual(catalog.call_args_list[1].args, (paths,))
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -608,7 +751,7 @@ class QtUiTests(unittest.TestCase):
             with patch.object(workspace, '_refresh_extension_source_summaries', side_effect=AssertionError('startup config replay should not synchronously rebuild extension summaries')), \
                  patch.object(workspace, '_request_extension_source_summaries_refresh') as request_mock:
                 workspace._apply_config_to_controls(config, paths, activate=False)
-            request_mock.assert_called_once()
+            request_mock.assert_not_called()
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -895,11 +1038,12 @@ class QtUiTests(unittest.TestCase):
             self.assertTrue(workspace.watch_button.isEnabled())
             with patch('omniclip_rag.ui_next_qt.config_workspace.OmniClipService') as service_cls, \
                  patch('omniclip_rag.ui_next_qt.config_workspace.save_config'), \
-                 patch('PySide6.QtWidgets.QMessageBox.information') as info_mock:
+                 patch.object(workspace, '_append_log') as log_mock:
                 service_cls.return_value.status_snapshot.return_value = snapshot
                 workspace._toggle_watch()
-            info_mock.assert_called_once()
-            self.assertIn('无索引不可监听', info_mock.call_args.args[2])
+            log_mock.assert_any_call(
+                text('zh-CN', 'md_watch_skip_not_ready', vault=Path(config.vault_path).name or config.vault_path)
+            )
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -1114,6 +1258,11 @@ class QtUiTests(unittest.TestCase):
         status_messages: list[str] = []
         workspace.statusMessageChanged.connect(status_messages.append)
         try:
+            workspace._acceleration_payload = {
+                'runtime_complete': True,
+                'torch_available': True,
+                'sentence_transformers_available': True,
+            }
             snapshot = {
                 'stats': {'files': 3, 'chunks': 7, 'refs': 1},
                 'index_state': 'ready',
@@ -1298,6 +1447,7 @@ class QtUiTests(unittest.TestCase):
             workspace.data_dir_edit.setText(str(target_root))
             with patch('omniclip_rag.ui_next_qt.config_workspace.write_bootstrap_pointer') as pointer_mock, \
                  patch('omniclip_rag.ui_next_qt.config_workspace.resolve_and_validate_active_data_root') as resolve_mock, \
+                 patch('omniclip_rag.ui_next_qt.config_workspace.ConfigWorkspace._confirm_pending_data_root_switch', return_value='continue'), \
                  patch('omniclip_rag.ui_next_qt.config_workspace.ConfigWorkspace._restart_for_data_root_switch', return_value=False) as restart_mock, \
                  patch('PySide6.QtWidgets.QMessageBox.question', return_value=QtWidgets.QMessageBox.StandardButton.Yes):
                 resolve_mock.return_value = type('Resolved', (), {'path': target_root})()
@@ -1345,7 +1495,7 @@ class QtUiTests(unittest.TestCase):
             app.processEvents()
 
 
-    def test_config_workspace_runtime_refresh_uses_background_function_worker(self) -> None:
+    def test_config_workspace_runtime_refresh_uses_isolated_probe_worker(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
@@ -1357,19 +1507,22 @@ class QtUiTests(unittest.TestCase):
             def connect(self, callback):
                 self._callbacks.append(callback)
         class _FakeWorker:
-            def __init__(self, *, fn) -> None:
-                self.fn = fn
+            def __init__(self, *, probe_kind, data_root) -> None:
+                self.probe_kind = probe_kind
+                self.data_root = data_root
                 self.succeeded = _Signal()
                 self.failed = _Signal()
+                self.cancelled = _Signal()
                 self.finished = _Signal()
                 self.started = False
             def start(self) -> None:
                 self.started = True
         try:
-            with patch('omniclip_rag.ui_next_qt.config_workspace.FunctionWorker', _FakeWorker):
+            with patch('omniclip_rag.ui_next_qt.config_workspace.RuntimeProbeWorker', _FakeWorker):
                 workspace._request_runtime_management_refresh()
             self.assertIsNotNone(workspace._runtime_refresh_worker)
             self.assertTrue(workspace._runtime_refresh_worker.started)
+            self.assertEqual(workspace._runtime_refresh_worker.probe_kind, 'refresh')
             self.assertFalse(workspace.runtime_refresh_button.isEnabled())
         finally:
             workspace.deleteLater()
@@ -1404,6 +1557,52 @@ class QtUiTests(unittest.TestCase):
             self.assertIn('GPU 加速这一项不需要安装', workspace.runtime_status_summary_label.text())
             self.assertEqual(workspace.runtime_components_table.rowCount(), 3)
             self.assertEqual(workspace.runtime_components_table.item(2, 2).text(), text('zh-CN', 'runtime_status_installed_unverified'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_config_workspace_runtime_chip_treats_deferred_probe_as_installed(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            context = {
+                'runtime_complete': True,
+                'runtime_status': 'deferred',
+                'torch_available': False,
+                'torch_error': 'runtime probe deferred',
+                'sentence_transformers_available': False,
+                'sentence_transformers_error': 'runtime probe deferred',
+                'gpu_present': False,
+                'runtime_dir': str(paths.shared_root / 'runtime'),
+                'runtime_exists': True,
+                'runtime_missing_items': [],
+            }
+            with patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_status', side_effect=lambda component_id: {
+                'component_id': component_id,
+                'status': 'ready',
+                'ready': True,
+                'missing_items': [],
+                'installed_count': 1,
+                'total_count': 1,
+                'cleanup_patterns': tuple(),
+                'profile': 'cpu',
+            }), patch('omniclip_rag.ui_next_qt.config_workspace.runtime_component_usage', return_value={'disk_usage': '0 GB', 'download_usage': '0 GB'}):
+                workspace._refresh_runtime_management_ui(force_refresh=False, context=context)
+            self.assertEqual(workspace.runtime_chip.text(), text('zh-CN', 'runtime_chip_installed_unverified'))
+            self.assertIn('文件结构完整', workspace.runtime_status_summary_label.text())
+            self.assertNotIn('未安装', workspace.runtime_status_summary_label.text())
+            self.assertNotIn('runtime probe deferred', workspace.runtime_status_summary_label.text())
+            self.assertEqual(
+                workspace.runtime_components_table.item(0, 2).text(),
+                text('zh-CN', 'runtime_status_installed_unverified'),
+            )
+            self.assertEqual(
+                workspace.runtime_components_table.item(0, 3).text(),
+                text('zh-CN', 'runtime_missing_probe_deferred'),
+            )
         finally:
             workspace.deleteLater()
             app.processEvents()

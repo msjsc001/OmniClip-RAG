@@ -84,6 +84,7 @@ class _VectorCandidate:
 _EMBEDDER_CACHE: dict[tuple[str, str, str], Embedder] = {}
 _ACCELERATION_CACHE: dict[str, object] | None = None
 _ACCELERATION_LOCK = threading.Lock()
+_QUERY_SEMANTIC_STATE = threading.local()
 _WRITE_BATCH_ROW_CAPS = {
     'cpu': {'quiet': 64, 'balanced': 96, 'peak': 128},
     'cuda': {'quiet': 128, 'balanced': 256, 'peak': 384},
@@ -106,6 +107,9 @@ _VECTOR_BATCH_CHAR_BUDGETS = {
 }
 _VECTOR_SLOW_BATCH_WARNING_SECONDS = 12.0
 _VECTOR_STALL_STACK_DUMP_SECONDS = 45.0
+_QUERY_MIN_COMMIT_HEADROOM_BYTES = 6 * 1024**3
+_QUERY_MAX_COMMIT_USAGE_PERCENT = 94.0
+_QUERY_MIN_PHYSICAL_AVAILABLE_BYTES = 4 * 1024**3
 _RUNTIME_STDLIB_SUPPORT_MODULES = (
     'asyncio.base_events',
     'asyncio.base_futures',
@@ -122,6 +126,87 @@ _RUNTIME_STDLIB_SUPPORT_MODULES = (
     'pdb',
     'timeit',
 )
+
+
+@contextmanager
+def semantic_query_session():
+    """Keep semantic fallback decisions scoped to one logical query."""
+    depth = int(getattr(_QUERY_SEMANTIC_STATE, 'depth', 0) or 0)
+    if depth == 0:
+        _QUERY_SEMANTIC_STATE.cuda_memory_failed = False
+        _QUERY_SEMANTIC_STATE.vector_failure_reason = ''
+        _QUERY_SEMANTIC_STATE.reranker_failure_reason = ''
+    _QUERY_SEMANTIC_STATE.depth = depth + 1
+    try:
+        yield
+    finally:
+        remaining = max(int(getattr(_QUERY_SEMANTIC_STATE, 'depth', 1) or 1) - 1, 0)
+        _QUERY_SEMANTIC_STATE.depth = remaining
+        if remaining == 0:
+            _QUERY_SEMANTIC_STATE.cuda_memory_failed = False
+            _QUERY_SEMANTIC_STATE.vector_failure_reason = ''
+            _QUERY_SEMANTIC_STATE.reranker_failure_reason = ''
+
+
+def semantic_query_cuda_memory_failed() -> bool:
+    return bool(getattr(_QUERY_SEMANTIC_STATE, 'depth', 0)) and bool(getattr(_QUERY_SEMANTIC_STATE, 'cuda_memory_failed', False))
+
+
+def semantic_query_session_active() -> bool:
+    return bool(getattr(_QUERY_SEMANTIC_STATE, 'depth', 0))
+
+
+def mark_semantic_query_cuda_memory_failure() -> None:
+    if getattr(_QUERY_SEMANTIC_STATE, 'depth', 0):
+        _QUERY_SEMANTIC_STATE.cuda_memory_failed = True
+
+
+def semantic_query_vector_failure_reason() -> str:
+    if not getattr(_QUERY_SEMANTIC_STATE, 'depth', 0):
+        return ''
+    return str(getattr(_QUERY_SEMANTIC_STATE, 'vector_failure_reason', '') or '')
+
+
+def mark_semantic_query_vector_failure(reason: str) -> None:
+    if getattr(_QUERY_SEMANTIC_STATE, 'depth', 0):
+        _QUERY_SEMANTIC_STATE.vector_failure_reason = str(reason or 'semantic_vector_failed')
+
+
+def semantic_query_reranker_failure_reason() -> str:
+    if not getattr(_QUERY_SEMANTIC_STATE, 'depth', 0):
+        return ''
+    return str(getattr(_QUERY_SEMANTIC_STATE, 'reranker_failure_reason', '') or '')
+
+
+def mark_semantic_query_reranker_failure(reason: str) -> None:
+    if getattr(_QUERY_SEMANTIC_STATE, 'depth', 0):
+        _QUERY_SEMANTIC_STATE.reranker_failure_reason = str(reason or 'semantic_reranker_failed')
+
+
+def _query_memory_pressure_snapshot() -> dict[str, object]:
+    try:
+        from .startup_prewarm import read_memory_status
+
+        memory = read_memory_status()
+    except Exception:
+        return {}
+    if memory is None:
+        return {}
+    reason = ''
+    if memory.commit_headroom_bytes < _QUERY_MIN_COMMIT_HEADROOM_BYTES:
+        reason = 'low-commit-headroom'
+    elif memory.commit_usage_percent >= _QUERY_MAX_COMMIT_USAGE_PERCENT:
+        reason = 'high-commit-usage'
+    elif memory.available_physical_bytes < _QUERY_MIN_PHYSICAL_AVAILABLE_BYTES:
+        reason = 'low-physical-memory'
+    return {
+        'reason': reason,
+        'commit_headroom_bytes': int(memory.commit_headroom_bytes),
+        'commit_usage_percent': round(float(memory.commit_usage_percent), 2),
+        'available_physical_bytes': int(memory.available_physical_bytes),
+    }
+
+
 _RUNTIME_STDLIB_SUPPORT_READY: set[str] = set()
 _RUNTIME_STDLIB_SUPPORT_LOCK = threading.Lock()
 _RUNTIME_STDLIB_SUPPORT_LOGGED = False
@@ -843,12 +928,6 @@ class LanceDbVectorIndex:
 
     def status(self) -> dict[str, object]:
         runtime_state = inspect_runtime_environment()
-        if self._vector_dimension is None and self._table_exists():
-            try:
-                schema = self._table().schema
-                self._vector_dimension = schema.field("vector").type.list_size
-            except Exception:
-                pass
         return {
             'backend': 'lancedb',
             'table_ready': self._table_exists(),
@@ -962,14 +1041,98 @@ class LanceDbVectorIndex:
         return [float(value) for value in values]
 
     def _encode(self, texts: list[str], *, batch_size: int | None = None):
-        embedder = self._load_embedder()
+        prior_failure = semantic_query_vector_failure_reason()
+        if prior_failure:
+            raise RuntimeError(f'Semantic vector execution was disabled for this query after an earlier failure: {prior_failure}')
         requested_device = (self.config.vector_device or 'auto').strip().lower() or 'auto'
         resolved_device = resolve_vector_device(self.config.vector_device)
+        memory_pressure: dict[str, object] = {}
+        if semantic_query_session_active() and resolved_device == 'cuda':
+            memory_pressure = _query_memory_pressure_snapshot()
+            if str(memory_pressure.get('reason') or ''):
+                mark_semantic_query_cuda_memory_failure()
+                resolved_device = 'cpu'
+                LOGGER.warning(
+                    'System memory pressure is too high for safe CUDA model loading; using CPU for this query: %s',
+                    memory_pressure,
+                )
+        try:
+            vectors = self._encode_once(
+                texts,
+                batch_size=batch_size,
+                requested_device=requested_device,
+                resolved_device=resolved_device,
+            )
+        except Exception as exc:
+            if memory_pressure:
+                report = dict(self._last_execution_report)
+                report.update({
+                    'fallback_reason': 'system_memory_to_cpu_failed',
+                    'memory_pressure': dict(memory_pressure),
+                })
+                self._last_execution_report = report
+            if not semantic_query_session_active() or resolved_device != 'cuda' or not _is_memory_pressure_exception(exc):
+                mark_semantic_query_vector_failure(exc.__class__.__name__)
+                raise
+
+            cuda_error_class = exc.__class__.__name__
+            cuda_error_message = str(exc).strip() or cuda_error_class
+            mark_semantic_query_cuda_memory_failure()
+            self._discard_embedder(device='cuda', clear_cuda=True)
+            LOGGER.warning(
+                'CUDA semantic vector execution ran out of memory; retrying this query once on CPU: %s: %s',
+                cuda_error_class,
+                cuda_error_message,
+            )
+            try:
+                vectors = self._encode_once(
+                    texts,
+                    batch_size=batch_size,
+                    requested_device=requested_device,
+                    resolved_device='cpu',
+                )
+            except Exception as fallback_exc:
+                mark_semantic_query_vector_failure(fallback_exc.__class__.__name__)
+                report = dict(self._last_execution_report)
+                report.update({
+                    'fallback_reason': 'cuda_memory_to_cpu_failed',
+                    'oom_recovered': False,
+                    'cuda_error_class': cuda_error_class,
+                    'cuda_error_message': cuda_error_message,
+                })
+                self._last_execution_report = report
+                raise
+            report = dict(self._last_execution_report)
+            report.update({
+                'fallback_reason': 'cuda_memory_to_cpu',
+                'oom_recovered': True,
+                'cuda_error_class': cuda_error_class,
+                'cuda_error_message': cuda_error_message,
+            })
+            self._last_execution_report = report
+            return vectors
+        if memory_pressure:
+            report = dict(self._last_execution_report)
+            report.update({
+                'fallback_reason': 'system_memory_to_cpu',
+                'memory_pressure': dict(memory_pressure),
+            })
+            self._last_execution_report = report
+        return vectors
+
+    def _encode_once(
+        self,
+        texts: list[str],
+        *,
+        batch_size: int | None,
+        requested_device: str,
+        resolved_device: str,
+    ):
         report: dict[str, object] = {
             'requested_device': requested_device,
             'resolved_device': resolved_device,
-            'model_device': str(getattr(embedder, 'device', '') or ''),
-            'actual_device': str(getattr(embedder, 'device', '') or resolved_device),
+            'model_device': '',
+            'actual_device': resolved_device,
             'cuda_peak_mem_before': 0,
             'cuda_peak_mem_after': 0,
             'cuda_peak_mem_delta': 0,
@@ -978,8 +1141,11 @@ class LanceDbVectorIndex:
             'execution_error_message': '',
         }
         started_at = time.perf_counter()
-        if resolved_device == 'cuda':
-            try:
+        try:
+            embedder = self._load_embedder()
+            report['model_device'] = str(getattr(embedder, 'device', '') or '')
+            report['actual_device'] = str(getattr(embedder, 'device', '') or resolved_device)
+            if resolved_device == 'cuda':
                 with _runtime_import_environment(component_id='semantic-core'):
                     import torch
                     device_name = str(getattr(embedder, 'device', '') or 'cuda:0')
@@ -995,26 +1161,37 @@ class LanceDbVectorIndex:
                     report['cuda_peak_mem_after'] = _torch_cuda_peak_memory(torch, device_name)
                     report['cuda_peak_mem_delta'] = max(int(report['cuda_peak_mem_after']) - int(report['cuda_peak_mem_before']), 0)
                     report['actual_device'] = str(getattr(vectors, 'device', '') or report['model_device'] or device_name)
-            except Exception as exc:
-                report['execution_error_class'] = exc.__class__.__name__
-                report['execution_error_message'] = str(exc).strip() or exc.__class__.__name__
-                self._last_execution_report = report
-                raise
-        else:
-            vectors = embedder.encode(
-                texts,
-                batch_size=batch_size or self.config.vector_batch_size,
-                show_progress_bar=False,
-                normalize_embeddings=True,
-            )
-        report['elapsed_ms'] = max(int((time.perf_counter() - started_at) * 1000), 0)
-        self._last_execution_report = report
-        return vectors
+            else:
+                vectors = embedder.encode(
+                    texts,
+                    batch_size=batch_size or self.config.vector_batch_size,
+                    show_progress_bar=False,
+                    normalize_embeddings=True,
+                )
+            report['elapsed_ms'] = max(int((time.perf_counter() - started_at) * 1000), 0)
+            self._last_execution_report = report
+            return vectors
+        except Exception as exc:
+            report['elapsed_ms'] = max(int((time.perf_counter() - started_at) * 1000), 0)
+            report['execution_error_class'] = exc.__class__.__name__
+            report['execution_error_message'] = str(exc).strip() or exc.__class__.__name__
+            self._last_execution_report = report
+            raise
 
     def _load_embedder(self) -> Embedder:
         if self._embedder is None:
             self._embedder = self._embedder_factory()
         return self._embedder
+
+    def _discard_embedder(self, *, device: str, clear_cuda: bool) -> None:
+        embedder = self._embedder
+        self._embedder = None
+        normalized_device = str(device or '').strip().lower()
+        for cache_key, cached in list(_EMBEDDER_CACHE.items()):
+            if cache_key[2] == normalized_device or cached is embedder:
+                _EMBEDDER_CACHE.pop(cache_key, None)
+        del embedder
+        _release_vector_memory(clear_cuda=clear_cuda)
 
     def _default_embedder_factory(self) -> Embedder:
         model_root = self.paths.cache_dir / "models"
@@ -2648,6 +2825,47 @@ def runtime_management_snapshot(*, force_refresh: bool = False, verify_gpu: bool
     return payload
 
 
+def cached_acceleration_snapshot() -> dict[str, object]:
+    """Return startup-safe runtime state without hardware or library probes."""
+    if _ACCELERATION_CACHE is not None:
+        return dict(_ACCELERATION_CACHE)
+    runtime_dir = _runtime_dir_path()
+    runtime_state = inspect_runtime_environment(runtime_dir)
+    runtime_meta = runtime_trace_metadata()
+    payload: dict[str, object] = {
+        'torch_available': False,
+        'torch_version': '',
+        'torch_cuda_build': '',
+        'torch_error': 'runtime probe deferred',
+        'sentence_transformers_available': False,
+        'sentence_transformers_error': 'runtime probe deferred',
+        'cuda_available': False,
+        'cuda_device_count': 0,
+        'cuda_name': '',
+        'gpu_present': False,
+        'gpu_name': '',
+        'nvcc_available': False,
+        'nvcc_version': '',
+        'device_options': ['auto', 'cpu'],
+        'recommended_device': 'cpu',
+        'runtime_status': 'deferred' if runtime_state.get('runtime_complete') else 'missing',
+        'runtime_exists': bool(runtime_state.get('runtime_exists')),
+        'runtime_complete': bool(runtime_state.get('runtime_complete')),
+        'runtime_missing_items': list(runtime_state.get('runtime_missing_items') or []),
+        'safe_mode': False,
+        **runtime_meta,
+        'gpu_probe_state': 'not-run',
+        'gpu_probe_verified': False,
+        'gpu_probe_reason': '',
+        'gpu_execution_state': 'not-run',
+        'gpu_execution_verified': False,
+        'gpu_execution_reason': '',
+    }
+    _merge_cached_gpu_probe_state(payload, runtime_dir, runtime_meta)
+    _merge_cached_gpu_execution_state(payload, runtime_dir, runtime_meta)
+    return payload
+
+
 def refresh_runtime_capability_snapshot(*, force_refresh: bool = False) -> dict[str, object]:
     return runtime_management_snapshot(force_refresh=force_refresh, verify_gpu=True)
 
@@ -2662,6 +2880,8 @@ def get_device_options() -> list[str]:
 
 def resolve_vector_device(device_name: str | None) -> str:
     requested = (device_name or "cpu").strip().lower() or "cpu"
+    if requested != 'cpu' and semantic_query_cuda_memory_failed():
+        return 'cpu'
     acceleration = detect_acceleration()
     if requested in {"auto", "gpu"}:
         if acceleration.get("cuda_available"):
@@ -2673,6 +2893,17 @@ def resolve_vector_device(device_name: str | None) -> str:
     if requested == "cuda" and not acceleration.get("cuda_available"):
         refreshed = detect_acceleration(force_refresh=True)
         return "cuda" if refreshed.get("cuda_available") else "cpu"
+    return requested
+
+
+def resolve_vector_device_cached(device_name: str | None) -> str:
+    """Resolve a status-only device value without importing or probing Torch."""
+    requested = (device_name or 'cpu').strip().lower() or 'cpu'
+    cached = dict(_ACCELERATION_CACHE or {})
+    if requested in {'auto', 'gpu'}:
+        return 'cuda' if cached.get('cuda_available') else 'cpu'
+    if requested == 'cuda' and cached and not cached.get('cuda_available'):
+        return 'cpu'
     return requested
 
 def _detect_nvcc_version() -> str:
@@ -2716,6 +2947,12 @@ def runtime_guidance_context(
         runtime_state.setdefault('active_runtime_dir', normalized_runtime_root)
     requested = (device_name or 'auto').strip().lower() or 'auto'
     runtime_name = (runtime_name or 'torch').strip().lower() or 'torch'
+    if requested in {'auto', 'gpu'}:
+        resolved_device = 'cuda' if acceleration.get('cuda_available') else 'cpu'
+    elif requested == 'cuda' and not acceleration.get('cuda_available'):
+        resolved_device = 'cpu'
+    else:
+        resolved_device = requested
     wants_gpu = requested in {'auto', 'gpu', 'cuda'} and bool(acceleration.get('gpu_present'))
     recommended_profile = 'cuda' if wants_gpu else 'cpu'
     app_dir = _application_root_dir()
@@ -2762,7 +2999,7 @@ def runtime_guidance_context(
         f"- 程序内 PyTorch：已加载（{acceleration.get('torch_version') or 'unknown'}）" if acceleration.get('torch_available') else '- 程序内 PyTorch：未加载',
         '- 程序内 sentence-transformers：已加载' if acceleration.get('sentence_transformers_available') else '- 程序内 sentence-transformers：未加载',
         f'- 当前设备选择：{requested}',
-        f'- 当前实际设备：{resolve_vector_device(requested)}',
+        f'- 当前实际设备：{resolved_device}',
         f"- runtime 文件夹：{'已检测到' if runtime_state['runtime_exists'] else '未检测到'}",
         f"- runtime 完整性：{'完整' if runtime_state['runtime_complete'] else '不完整'}",
     ]
@@ -2869,7 +3106,7 @@ def runtime_guidance_context(
         'runtime_pending_components': list(runtime_state.get('runtime_pending_components') or []),
         'cuda_step_status': cuda_step_status,
         'runtime_step_status': runtime_step_status,
-        'resolved_device': resolve_vector_device(requested),
+        'resolved_device': resolved_device,
         'disk_usage': disk_usage,
         'download_usage': download_usage,
         'current_status_lines': current_status_lines,
@@ -3025,9 +3262,8 @@ def _log_thread_stacks(label: str, **context: object) -> None:
 
 
 def _clear_cuda_cache() -> None:
-    try:
-        import torch
-    except Exception:
+    torch = sys.modules.get('torch')
+    if torch is None:
         return
     try:
         if torch.cuda.is_available():
@@ -3643,6 +3879,3 @@ def _wait_for_controls(pause_event: threading.Event | None, cancel_event: thread
         if pause_event is None or not pause_event.is_set():
             return
         time.sleep(0.12)
-
-
-

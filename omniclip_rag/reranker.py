@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import sys
 import time
 import weakref
 from collections.abc import Callable
@@ -23,7 +24,10 @@ from .vector_index import (
     detect_acceleration,
     download_hf_repo_snapshot,
     hf_repo_cache_dir,
+    mark_semantic_query_cuda_memory_failure,
+    mark_semantic_query_reranker_failure,
     resolve_vector_device,
+    semantic_query_reranker_failure_reason,
 )
 
 
@@ -112,6 +116,19 @@ class CrossEncoderReranker:
         limit = max(min(int(candidate_limit or 0), len(hits)), 0)
         requested_device = (self.config.vector_device or 'auto').strip().lower() or 'auto'
         resolved_device = resolve_vector_device(requested_device)
+        prior_failure = semantic_query_reranker_failure_reason()
+        if prior_failure:
+            return hits, RerankOutcome(
+                enabled=True,
+                applied=False,
+                model=self.config.reranker_model,
+                requested_device=requested_device,
+                resolved_device=resolved_device,
+                candidate_count=limit,
+                reranked_count=0,
+                skipped_reason='query_circuit_open',
+                fallback_reason='reranker_query_circuit_open',
+            )
         if limit <= 1:
             return hits, RerankOutcome(
                 enabled=True,
@@ -152,15 +169,21 @@ class CrossEncoderReranker:
             except Exception as exc:
                 if _is_oom_error(exc) and used_device == 'cuda':
                     oom_recovered = True
+                    mark_semantic_query_cuda_memory_failure()
                     _clear_cuda_cache()
-                    if batch_size > 1:
+                    # If model construction itself failed, retrying smaller
+                    # batches only reloads the same large model. Batch reduction
+                    # is useful solely when a loaded model failed in predict().
+                    if self._models.get(used_device) is not None and batch_size > 1:
                         batch_size = max(batch_size // 2, 1)
                         continue
                     if requested_device != 'cpu':
+                        self._discard_model(used_device)
                         used_device = 'cpu'
                         degraded_to_cpu = True
                         batch_size = self._initial_batch_size('cpu')
                         continue
+                mark_semantic_query_reranker_failure(exc.__class__.__name__)
                 return hits, RerankOutcome(
                     enabled=True,
                     applied=False,
@@ -258,6 +281,15 @@ class CrossEncoderReranker:
             except Exception:
                 continue
         self._models.clear()
+
+    def _discard_model(self, device: str) -> None:
+        model = self._models.pop(str(device or ''), None)
+        del model
+        try:
+            gc.collect()
+        except Exception:
+            pass
+        _clear_cuda_cache()
 
     def _download_model(
         self,
@@ -494,9 +526,8 @@ def _resolve_model_device(model: object, fallback_device: str) -> str:
 
 
 def _clear_cuda_cache() -> None:
-    try:
-        import torch
-    except Exception:
+    torch = sys.modules.get('torch')
+    if torch is None:
         return
     try:
         if torch.cuda.is_available():

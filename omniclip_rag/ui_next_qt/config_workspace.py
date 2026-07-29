@@ -43,7 +43,8 @@ from ..preflight import estimate_model_cache_bytes
 from ..service import WATCHDOG_AVAILABLE, OmniClipService
 from ..ui_i18n import data_root_probe_summary_text, data_root_reason_text, text, tooltip
 from ..ui_shared import merge_page_filter_defaults
-from ..vector_index import build_runtime_install_command, detect_acceleration, get_local_model_dir, hf_repo_cache_dir, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, refresh_runtime_capability_snapshot, release_process_vector_resources, resolve_vector_device, runtime_component_catalog, runtime_component_status, runtime_component_usage, runtime_dependency_issue, runtime_guidance_context, runtime_install_sources, runtime_management_snapshot
+from ..vector_index import build_runtime_install_command, cached_acceleration_snapshot, detect_acceleration, get_local_model_dir, hf_repo_cache_dir, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, release_process_vector_resources, resolve_vector_device, resolve_vector_device_cached, runtime_component_catalog, runtime_component_status, runtime_component_usage, runtime_dependency_issue, runtime_guidance_context, runtime_install_sources
+from ..startup_prewarm import STARTUP_IDLE_DELAY_MS, decision_log_payload, evaluate_startup_prewarm, evaluate_startup_status_refresh, read_memory_status
 from ..reranker import get_local_reranker_dir, get_local_reranker_repo_cache_dir, is_local_reranker_ready, release_process_reranker_resources, reranker_download_guidance_context
 from ..extensions.models import (
     ExtensionDirectoryState,
@@ -71,8 +72,8 @@ from .runtime_guidance_dialog import RuntimeGuidanceDialog
 from .runtime_install_dialog import RuntimeInstallDialog
 from .model_download_dialog import ModelDownloadDialog
 from .tika_format_dialog import TikaFormatDialog
-from .workers import FunctionWorker, ProgressFunctionWorker, ServiceTaskWorker, WatchWorker
-REPO_URL = 'https://github.com/msjsc001/OmniClip-RAG'
+from .workers import FunctionWorker, ProgressFunctionWorker, RuntimeProbeWorker, ServiceTaskWorker, WatchWorker
+REPO_URL = 'https://github.com/EllisMorrow/OmniClip-RAG'
 LOGGER = logging.getLogger(__name__)
 
 
@@ -141,6 +142,20 @@ class _DownloadTaskState:
     last_sample_at: float = 0.0
     started_at: float = 0.0
     source_switched: bool = False
+
+
+class _StartupActivityFilter(QtCore.QObject):
+    activity = QtCore.Signal()
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() in {
+            QtCore.QEvent.Type.KeyPress,
+            QtCore.QEvent.Type.MouseButtonPress,
+            QtCore.QEvent.Type.Wheel,
+            QtCore.QEvent.Type.TouchBegin,
+        }:
+            self.activity.emit()
+        return super().eventFilter(watched, event)
 
 
 class ConfigWorkspace(QtWidgets.QWidget):
@@ -244,10 +259,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._download_monitor_timer.setInterval(1000)
         self._download_monitor_timer.timeout.connect(self._poll_download_task)
         self._watch_worker: WatchWorker | None = None
-        self._acceleration_payload: dict[str, object] | None = None
+        self._acceleration_payload: dict[str, object] | None = cached_acceleration_snapshot()
         self._device_probe_worker: FunctionWorker | None = None
-        self._runtime_refresh_worker: FunctionWorker | None = None
-        self._runtime_verify_worker: FunctionWorker | None = None
+        self._runtime_refresh_worker: RuntimeProbeWorker | None = None
+        self._runtime_verify_worker: RuntimeProbeWorker | None = None
         self._runtime_install_monitor_timer = QtCore.QTimer(self)
         self._runtime_install_monitor_timer.setInterval(1000)
         self._runtime_install_monitor_timer.timeout.connect(self._poll_runtime_install_progress)
@@ -258,11 +273,23 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._device_probe_scheduled = False
         self._device_runtime_prompt_suppressed = False
         self._live_runtime_sync_suppressed = False
-        self._initial_status_worker: ServiceTaskWorker | None = None
+        self._initial_status_worker: ServiceTaskWorker | RuntimeProbeWorker | None = None
         self._initial_status_scheduled = False
         self._startup_status_after_probe = False
         self._startup_status_delay_ms = 0
         self._startup_runtime_refresh_pending = False
+        self._startup_runtime_detection_active = False
+        self._startup_initial_status_pending = False
+        self._startup_auxiliary_tasks_scheduled = False
+        self._startup_prewarm_worker: RuntimeProbeWorker | None = None
+        self._startup_prewarm_done = False
+        self._startup_prewarm_safe_mode = False
+        self._startup_prewarm_timer = QtCore.QTimer(self)
+        self._startup_prewarm_timer.setSingleShot(True)
+        self._startup_prewarm_timer.timeout.connect(self._start_startup_prewarm)
+        self._startup_activity_filter = _StartupActivityFilter(self)
+        self._startup_activity_filter.activity.connect(self._on_startup_activity)
+        self._startup_activity_filter_installed = False
         self._resume_prompt_workspace_id: str | None = None
         self._rebuild_pause_event = __import__('threading').Event()
         self._rebuild_cancel_event = __import__('threading').Event()
@@ -1481,7 +1508,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if not acceleration:
             return self._tr('device_summary_detecting')
         requested = self._current_device_value() if hasattr(self, 'device_combo') else self._normalize_device_code(getattr(self._config, 'vector_device', 'auto'))
-        resolved = resolve_vector_device(requested)
+        resolved = resolve_vector_device_cached(requested)
         gpu_name = str(acceleration.get('gpu_name') or acceleration.get('cuda_name') or '').strip()
         nvcc_version = str(acceleration.get('nvcc_version') or '').strip()
         runtime_complete = bool(acceleration.get('runtime_complete', True))
@@ -1498,16 +1525,19 @@ class ConfigWorkspace(QtWidgets.QWidget):
         return self._tr('device_summary_cpu_only')
 
     def _runtime_available_for_device(self, device_name: str) -> bool:
-        try:
-            config, _paths = self._collect_config(False)
-        except Exception:
-            config = replace(self._config)
-        probe_config = replace(config, vector_device=device_name)
-        return runtime_dependency_issue(probe_config) is None
+        if not self._backend_enabled_value(getattr(self._config, 'vector_backend', 'disabled')):
+            return True
+        acceleration = dict(self._acceleration_payload or {})
+        if not bool(acceleration.get('runtime_complete')):
+            return False
+        if not bool(acceleration.get('torch_available')) or not bool(acceleration.get('sentence_transformers_available')):
+            return False
+        requested = self._normalize_device_code(device_name)
+        return requested != 'cuda' or bool(acceleration.get('cuda_available'))
 
     def _actual_mode_text(self) -> str:
         requested = self._current_device_value() if hasattr(self, 'device_combo') else self._normalize_device_code(getattr(self._config, 'vector_device', 'auto'))
-        resolved = resolve_vector_device(requested)
+        resolved = resolve_vector_device_cached(requested)
         if resolved == 'cuda' and self._runtime_available_for_device(requested):
             return self._tr('device_status_mode_gpu')
         return self._tr('device_status_mode_cpu')
@@ -1983,7 +2013,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if not is_local_model_ready(config, paths):
             return config, snapshot, False
         candidate = replace(config, vector_backend='lancedb')
-        if runtime_dependency_issue(candidate) is not None:
+        acceleration = dict(self._acceleration_payload or {})
+        if not (
+            bool(acceleration.get('runtime_complete'))
+            and bool(acceleration.get('torch_available'))
+            and bool(acceleration.get('sentence_transformers_available'))
+        ):
             return config, snapshot, False
         try:
             save_config(candidate, paths)
@@ -2410,6 +2445,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _runtime_component_state(self, component_id: str, *, force_refresh: bool = False, context: dict[str, object] | None = None) -> dict[str, object]:
         context = dict(context or self._current_runtime_repair_context(force_refresh=force_refresh))
         normalized_component = (component_id or '').strip().lower()
+        runtime_probe_deferred = (
+            bool(context.get('runtime_complete'))
+            and str(context.get('runtime_status') or '').strip().lower() == 'deferred'
+        )
         if normalized_component == 'gpu-acceleration':
             gpu_present = bool(context.get('gpu_present'))
             if not gpu_present:
@@ -2489,6 +2528,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 state['status'] = 'pending'
             elif state['ready']:
                 state['status'] = 'ready'
+            elif install_ok and runtime_probe_deferred:
+                state['status'] = 'installed-unverified'
             else:
                 state['status'] = 'missing' if int(base_state.get('installed_count', 0) or 0) <= 0 else 'incomplete'
             usage = runtime_component_usage('semantic-core', 'cuda')
@@ -2499,7 +2540,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
         state = dict(runtime_component_status(component_id))
         pending_status = str(state.get('status') or '').strip().lower() == 'pending'
         extra_failures: list[str] = []
-        if normalized_component == 'semantic-core' and not pending_status:
+        base_ready = bool(state.get('ready'))
+        deferred_semantic_probe = normalized_component == 'semantic-core' and runtime_probe_deferred and base_ready
+        if normalized_component == 'semantic-core' and not pending_status and not deferred_semantic_probe:
             if 'torch_available' in context and not bool(context.get('torch_available')):
                 detail = str(context.get('torch_error') or self._tr('runtime_missing_unknown')).strip()
                 extra_failures.append(f"torch（{detail}）")
@@ -2515,6 +2558,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if pending_status:
             state['ready'] = False
             state['status'] = 'pending'
+        elif deferred_semantic_probe:
+            state['ready'] = False
+            state['status'] = 'installed-unverified'
+            state['missing_items'] = [self._tr('runtime_missing_probe_deferred')]
         elif state['ready']:
             state['status'] = 'ready'
         elif missing_items:
@@ -2548,6 +2595,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return self._tr('runtime_missing_not_needed_gpu')
         if normalized_status == 'pending':
             return self._tr('runtime_missing_pending')
+        if normalized_status == 'installed-unverified':
+            return self._tr('runtime_missing_probe_deferred')
         items = [str(item).strip() for item in list(state.get('missing_items') or []) if str(item).strip()]
         if not items:
             return self._tr('runtime_missing_none')
@@ -2616,7 +2665,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if hasattr(self, 'runtime_status_summary_label'):
             self.runtime_status_summary_label.setText(self._tr('runtime_refresh_running'))
         self.statusMessageChanged.emit(self._tr('runtime_refresh_running'))
-        worker = FunctionWorker(fn=lambda: runtime_management_snapshot(force_refresh=True, verify_gpu=False))
+        worker = RuntimeProbeWorker(
+            probe_kind='refresh',
+            data_root=str(self._paths.global_root),
+        )
         self._runtime_refresh_worker = worker
         worker.succeeded.connect(self._handle_runtime_management_refresh_success)
         worker.failed.connect(self._handle_runtime_management_refresh_failure)
@@ -2646,7 +2698,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _request_runtime_gpu_verification(self, _checked: bool = False) -> None:
         if self._runtime_refresh_worker is not None or self._runtime_verify_worker is not None:
             return
-        context = self._current_runtime_repair_context(force_refresh=True)
+        context = self._current_runtime_repair_context(force_refresh=False)
         if not bool(context.get('gpu_present')):
             message = self._tr('runtime_verify_not_available_no_gpu')
             QtWidgets.QMessageBox.information(self, self._tr('runtime_component_gpu_acceleration'), message)
@@ -2663,7 +2715,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if hasattr(self, 'runtime_status_summary_label'):
             self.runtime_status_summary_label.setText(self._tr('runtime_verify_running'))
         self.statusMessageChanged.emit(self._tr('runtime_verify_running'))
-        worker = FunctionWorker(fn=lambda: runtime_management_snapshot(force_refresh=True, verify_gpu=True))
+        worker = RuntimeProbeWorker(
+            probe_kind='verify',
+            data_root=str(self._paths.global_root),
+        )
         self._runtime_verify_worker = worker
         worker.succeeded.connect(self._handle_runtime_gpu_verification_success)
         worker.failed.connect(self._handle_runtime_gpu_verification_failure)
@@ -2769,6 +2824,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
         vector_state = self._runtime_component_state('vector-store', force_refresh=force_refresh, context=context)
         gpu_state = self._runtime_component_state('gpu-acceleration', force_refresh=force_refresh, context=context)
         overall_ready = bool(semantic_state.get('ready')) and bool(vector_state.get('ready'))
+        core_installation_complete = all(
+            str(state.get('status') or '').strip().lower() in {'ready', 'installed-unverified'}
+            for state in (semantic_state, vector_state)
+        )
+        verification_deferred = core_installation_complete and any(
+            str(state.get('status') or '').strip().lower() == 'installed-unverified'
+            for state in (semantic_state, vector_state)
+        )
         gpu_present = bool(context.get('gpu_present'))
         full_ready = overall_ready and gpu_present and bool(gpu_state.get('ready'))
         runtime_dir = str(context.get('runtime_dir') or '')
@@ -2786,6 +2849,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
             elif overall_ready:
                 self.runtime_chip.setText(self._tr('runtime_chip_cpu_ready'))
                 self._set_chip_style(self.runtime_chip, ok=True)
+            elif verification_deferred:
+                self.runtime_chip.setText(self._tr('runtime_chip_installed_unverified'))
+                self._set_chip_style(self.runtime_chip, warn=True)
             elif context.get('runtime_exists'):
                 self.runtime_chip.setText(self._tr('runtime_chip_incomplete'))
                 self._set_chip_style(self.runtime_chip, warn=True)
@@ -2799,6 +2865,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 summary = self._tr('runtime_page_summary_ready')
             elif overall_ready:
                 summary = f"{self._tr('runtime_page_summary_ready_cpu')}\n{self._tr('runtime_page_summary_gpu_pending', detail=self._runtime_missing_text(gpu_state))}"
+            elif verification_deferred:
+                summary = self._tr('runtime_page_summary_installed_unverified')
             elif context.get('runtime_exists'):
                 summary = self._tr('runtime_page_summary_incomplete', items=missing_summary or self._tr('runtime_missing_unknown'))
             else:
@@ -2808,7 +2876,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 summary = self._tr('runtime_page_summary_pending_only', components=', '.join(pending_components))
             elif pending_components:
                 summary = f"{summary}\n{self._tr('runtime_page_summary_pending', components=', '.join(pending_components))}"
-            if (not pending_components) and context.get('sentence_transformers_error') and not bool(semantic_state.get('ready')):
+            if (
+                (not pending_components)
+                and not verification_deferred
+                and context.get('sentence_transformers_error')
+                and not bool(semantic_state.get('ready'))
+            ):
                 summary = f"{summary}\n{self._tr('runtime_page_summary_extra_failure', detail=str(context.get('sentence_transformers_error') or ''))}"
             self.runtime_status_summary_label.setText(summary)
         if hasattr(self, 'runtime_root_label'):
@@ -3125,7 +3198,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
                     directory_item.setFont(font)
                 table.setItem(row, 1, directory_item)
 
-                status_item = QtWidgets.QTableWidgetItem(self._extension_source_status_text(source))
+                status_item = QtWidgets.QTableWidgetItem(self._extension_source_status_text(pipeline, source))
                 status_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
                 status_item.setData(QtCore.Qt.ItemDataRole.UserRole, source.path)
                 if source.state in {ExtensionDirectoryState.MISSING_TEMPORARILY, ExtensionDirectoryState.REMOVED_CONFIRMED}:
@@ -3143,7 +3216,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         finally:
             table.blockSignals(False)
 
-    def _extension_source_status_text(self, source: ExtensionSourceDirectory) -> str:
+    def _extension_source_status_text(self, pipeline: str, source: ExtensionSourceDirectory) -> str:
         if source.state == ExtensionDirectoryState.MISSING_TEMPORARILY:
             return self._tr('extensions_source_state_missing')
         if source.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
@@ -3152,7 +3225,35 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return self._tr('extensions_source_state_unselected_kept')
         if source.last_error:
             return self._tr('extensions_status_error')
-        return self._tr('extensions_status_ready') if source.state == ExtensionDirectoryState.ENABLED else self._tr('extensions_status_not_built')
+        if source.state == ExtensionDirectoryState.ERROR:
+            return self._tr('extensions_status_error')
+        if source.state == ExtensionDirectoryState.STALE:
+            return self._tr('extensions_status_stale')
+        pipeline_status = self._extension_status_for_pipeline(pipeline)
+        index_state = getattr(pipeline_status, 'index_state', ExtensionIndexState.NOT_BUILT)
+        status_keys = {
+            ExtensionIndexState.BUILDING: 'extensions_status_building',
+            ExtensionIndexState.PAUSED: 'extensions_status_paused',
+            ExtensionIndexState.CANCELLING: 'extensions_status_cancelling',
+            ExtensionIndexState.INTERRUPTED: 'extensions_status_interrupted',
+            ExtensionIndexState.RESUMABLE: 'extensions_status_resumable',
+            ExtensionIndexState.STALE: 'extensions_status_stale',
+            ExtensionIndexState.ERROR: 'extensions_status_error',
+        }
+        if bool(getattr(pipeline_status, 'build_in_progress', False)):
+            return self._tr('extensions_status_building')
+        if index_state in status_keys:
+            return self._tr(status_keys[index_state])
+        summary = self._extension_source_summaries.get((pipeline, normalize_vault_path(source.path)))
+        if summary is not None:
+            return self._tr(
+                'extensions_status_ready'
+                if bool(summary.get('has_indexed_data'))
+                else 'extensions_source_state_enabled_unbuilt'
+            )
+        if index_state in {ExtensionIndexState.READY, ExtensionIndexState.WATCHING}:
+            return self._tr('extensions_source_state_enabled_checking')
+        return self._tr('extensions_source_state_enabled_unbuilt')
 
     def _extension_source_progress_text(self, pipeline: str, source: ExtensionSourceDirectory) -> str:
         key = (pipeline, source.path)
@@ -3984,9 +4085,14 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._refresh_extension_source_summaries(self._config, paths)
         if hasattr(self, 'ext_pdf_enabled_check'):
             self._apply_extension_state_to_controls()
-            self._schedule_tika_runtime_refresh()
+            if not defer_source_summaries:
+                self._schedule_tika_runtime_refresh()
         if defer_source_summaries:
-            self._request_extension_source_summaries_refresh(self._config, paths)
+            if self.isVisible():
+                QtCore.QTimer.singleShot(
+                    500,
+                    lambda config=self._config, active_paths=paths: self._request_extension_source_summaries_refresh(config, active_paths),
+                )
         if self._extension_task_worker is None:
             self._maybe_offer_extension_resume(paths)
 
@@ -4168,8 +4274,11 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return self._tr('extensions_progress_stage_parsing_tika' if pipeline == 'tika' else 'extensions_progress_stage_parsing_pdf')
         return self._extension_pipeline_label(pipeline)
 
-    def _merge_tika_format_catalog(self, current_formats: list) -> list:
-        catalog = build_tika_format_catalog(self._paths)
+    def _merge_tika_format_catalog(self, current_formats: list, *, full_catalog: bool = False) -> list:
+        # Parsing tika-mimetypes.xml from the installed JAR costs about a second
+        # on Windows. Use the bundled catalog during startup and parse the JAR
+        # only when the user actually opens the format picker.
+        catalog = build_tika_format_catalog(self._paths if full_catalog else None)
         return merge_tika_format_selections(current_formats, catalog)
 
     def _managed_extension_sources(self, active_vault: str) -> list[tuple[str, str]]:
@@ -4774,6 +4883,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._persist_extension_state(announce_key='extensions_config_saved')
 
     def _open_tika_format_dialog(self) -> None:
+        self._extension_state.tika_config.selected_formats = self._merge_tika_format_catalog(
+            self._extension_state.tika_config.selected_formats,
+            full_catalog=True,
+        )
         dialog = TikaFormatDialog(
             selections=self._extension_state.tika_config.selected_formats,
             language_code=self._language_code,
@@ -5642,6 +5755,13 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 self._tr('query_status_blocked_detail_data_root_switch'),
             )
             return
+        if self._startup_runtime_detection_active:
+            self.queryBlockStateChanged.emit(
+                True,
+                self._tr('query_status_blocked_title'),
+                self._tr('query_status_blocked_detail_runtime_detecting'),
+            )
+            return
         if self._busy and self._active_task_key:
             self.queryBlockStateChanged.emit(True, self._tr('query_status_blocked_title'), self._tr('query_status_blocked_detail_task', task=self._tr(self._active_task_key)))
             return
@@ -5740,7 +5860,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         )
         self._refresh_overview_chips()
         self._refresh_reranker_state(self._status_snapshot)
-        self._schedule_markdown_status_refresh()
+        if self.isVisible():
+            QtCore.QTimer.singleShot(250, self._schedule_markdown_status_refresh)
         if activate:
             self.runtimeConfigChanged.emit(self._config, self._paths)
     def _collect_config(self, require_vault: bool, *, use_data_root_input: bool = False, vault_override: str | None = None) -> tuple[AppConfig, Any]:
@@ -5822,13 +5943,185 @@ class ConfigWorkspace(QtWidgets.QWidget):
         device_probe_delay_ms: int = 0,
         initial_status_delay_ms: int = 0,
     ) -> None:
-        """Serialize heavy startup probes so packaged cold starts do not race native imports."""
+        """Start one isolated Runtime probe, then stagger the remaining startup work."""
         if self._recovery_mode:
             return
-        self._startup_status_after_probe = True
+        if self._startup_prewarm_done or self._startup_prewarm_worker is not None:
+            return
+        self._startup_prewarm_safe_mode = bool(safe_mode)
         self._startup_status_delay_ms = max(int(initial_status_delay_ms), 0)
+        self._startup_runtime_detection_active = True
+        if hasattr(self, 'runtime_chip'):
+            self.runtime_chip.setText(self._tr('runtime_chip_detecting'))
+            self._set_chip_style(self.runtime_chip)
+        if hasattr(self, 'runtime_status_summary_label'):
+            self.runtime_status_summary_label.setText(self._tr('runtime_refresh_running'))
+        self._emit_query_block_state()
+        QtCore.QTimer.singleShot(max(int(device_probe_delay_ms), 0), self._start_startup_runtime_refresh)
+
+    def _start_startup_runtime_refresh(self) -> None:
+        if self._startup_prewarm_done or self._startup_prewarm_worker is not None:
+            return
+        runtime_state = inspect_runtime_environment(runtime_dir=self._active_runtime_target_dir())
+        memory = read_memory_status()
+        decision = evaluate_startup_status_refresh(
+            runtime_complete=bool(runtime_state.get('runtime_complete')),
+            safe_mode=self._startup_prewarm_safe_mode,
+            memory=memory,
+        )
+        LOGGER.info('Startup runtime status refresh decision: %s', json.dumps(decision_log_payload(decision), ensure_ascii=False))
+        if not decision.allowed:
+            self._startup_prewarm_done = True
+            self._startup_runtime_detection_active = False
+            self._refresh_runtime_management_ui(force_refresh=False)
+            self._append_log(self._tr('startup_runtime_refresh_skipped', reason=decision.reason))
+            self._emit_query_block_state()
+            self._schedule_startup_initial_status()
+            return
         self._startup_runtime_refresh_pending = True
-        self.schedule_device_probe(delay_ms=device_probe_delay_ms, safe_mode=safe_mode)
+        self._append_log(self._tr('runtime_refresh_running'))
+        worker = RuntimeProbeWorker(
+            probe_kind='refresh',
+            data_root=str(self._paths.global_root),
+        )
+        self._startup_prewarm_worker = worker
+        worker.succeeded.connect(self._on_startup_prewarm_success)
+        worker.failed.connect(self._on_startup_prewarm_failure)
+        worker.finished.connect(self._on_startup_prewarm_finished)
+        worker.start()
+
+    def _schedule_startup_initial_status(self) -> None:
+        if self._recovery_mode or self._startup_initial_status_pending:
+            return
+        if self._initial_status_scheduled or self._initial_status_worker is not None:
+            return
+        self._startup_initial_status_pending = True
+        self._initial_status_scheduled = True
+        delay_ms = max(self._startup_status_delay_ms, 250)
+        QtCore.QTimer.singleShot(delay_ms, lambda: self._load_initial_status(isolated=True))
+
+    def _schedule_startup_auxiliary_tasks(self) -> None:
+        if self._recovery_mode or self._startup_auxiliary_tasks_scheduled:
+            return
+        self._startup_auxiliary_tasks_scheduled = True
+        QtCore.QTimer.singleShot(500, self._schedule_markdown_status_refresh)
+        QtCore.QTimer.singleShot(
+            1_500,
+            lambda config=self._config, paths=self._paths: self._request_extension_source_summaries_refresh(config, paths),
+        )
+        QtCore.QTimer.singleShot(3_000, self._schedule_tika_runtime_refresh)
+
+    def _on_startup_activity(self) -> None:
+        if self._startup_prewarm_done:
+            return
+        if self._startup_prewarm_worker is not None:
+            if self._startup_runtime_refresh_pending:
+                # The status-only probe is already isolated and low priority.
+                # Let it finish so the Start page does not require a manual refresh.
+                return
+            self._startup_prewarm_done = True
+            self._startup_prewarm_worker.cancel()
+            self._append_log(self._tr('startup_prewarm_cancelled'))
+            return
+        if self._startup_prewarm_timer.isActive():
+            self._startup_prewarm_timer.start(STARTUP_IDLE_DELAY_MS)
+
+    def _start_startup_prewarm(self) -> None:
+        if self._startup_prewarm_done or self._startup_prewarm_worker is not None:
+            return
+        runtime_state = inspect_runtime_environment()
+        memory = read_memory_status()
+        decision = evaluate_startup_prewarm(
+            vector_backend=getattr(self._config, 'vector_backend', 'disabled'),
+            runtime_complete=bool(runtime_state.get('runtime_complete')),
+            safe_mode=self._startup_prewarm_safe_mode,
+            memory=memory,
+        )
+        LOGGER.info('Startup runtime prewarm decision: %s', json.dumps(decision_log_payload(decision), ensure_ascii=False))
+        if not decision.allowed:
+            status_decision = evaluate_startup_status_refresh(
+                runtime_complete=bool(runtime_state.get('runtime_complete')),
+                safe_mode=self._startup_prewarm_safe_mode,
+                memory=memory,
+            )
+            LOGGER.info('Startup runtime status refresh decision: %s', json.dumps(decision_log_payload(status_decision), ensure_ascii=False))
+            if status_decision.allowed:
+                self._startup_runtime_refresh_pending = True
+                self._append_log(self._tr('runtime_refresh_running'))
+                worker = RuntimeProbeWorker(
+                    probe_kind='refresh',
+                    data_root=str(self._paths.global_root),
+                )
+                self._startup_prewarm_worker = worker
+                worker.succeeded.connect(self._on_startup_prewarm_success)
+                worker.failed.connect(self._on_startup_prewarm_failure)
+                worker.finished.connect(self._on_startup_prewarm_finished)
+                worker.start()
+                return
+            self._startup_prewarm_done = True
+            self._append_log(self._tr('startup_prewarm_skipped', reason=decision.reason))
+            self._remove_startup_activity_filter()
+            return
+        self._append_log(self._tr('startup_prewarm_running'))
+        worker = RuntimeProbeWorker(
+            probe_kind='startup-prewarm',
+            data_root=str(self._paths.global_root),
+        )
+        self._startup_prewarm_worker = worker
+        worker.succeeded.connect(self._on_startup_prewarm_success)
+        worker.failed.connect(self._on_startup_prewarm_failure)
+        worker.finished.connect(self._on_startup_prewarm_finished)
+        worker.start()
+
+    def _on_startup_prewarm_success(self, payload: object) -> None:
+        status_only = self._startup_runtime_refresh_pending
+        if isinstance(payload, dict):
+            self._acceleration_payload = dict(payload)
+            self._refresh_device_options(self._acceleration_payload)
+            self._refresh_runtime_management_ui(
+                force_refresh=False,
+                context=self._acceleration_payload,
+            )
+        self._append_log(self._tr('runtime_refresh_done' if status_only else 'startup_prewarm_ready'))
+
+    def _on_startup_prewarm_failure(self, message: str, traceback_text: str) -> None:
+        status_only = self._startup_runtime_refresh_pending
+        LOGGER.warning('Startup runtime %s failed: %s\n%s', 'status refresh' if status_only else 'prewarm', message, traceback_text)
+        self._append_log(
+            self._tr(
+                'runtime_refresh_failed' if status_only else 'startup_prewarm_failed',
+                error=str(message or '').strip(),
+            )
+        )
+
+    def _on_startup_prewarm_finished(self) -> None:
+        status_only = self._startup_runtime_refresh_pending
+        self._startup_prewarm_worker = None
+        self._startup_runtime_refresh_pending = False
+        self._startup_runtime_detection_active = False
+        self._startup_prewarm_done = True
+        self._remove_startup_activity_filter()
+        self._emit_query_block_state()
+        if status_only:
+            self._schedule_startup_initial_status()
+
+    def _remove_startup_activity_filter(self) -> None:
+        self._startup_prewarm_timer.stop()
+        if not self._startup_activity_filter_installed:
+            return
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self._startup_activity_filter)
+        self._startup_activity_filter_installed = False
+
+    def cancel_startup_prewarm(self) -> None:
+        self._startup_prewarm_done = True
+        self._startup_runtime_detection_active = False
+        self._startup_prewarm_timer.stop()
+        if self._startup_prewarm_worker is not None:
+            self._startup_prewarm_worker.cancel()
+        self._remove_startup_activity_filter()
+        self._emit_query_block_state()
 
     def schedule_device_probe(self, delay_ms: int = 0, *, safe_mode: bool = False) -> None:
         if self._recovery_mode:
@@ -5876,9 +6169,23 @@ class ConfigWorkspace(QtWidgets.QWidget):
             QtCore.QTimer.singleShot(delay_ms, self._load_initial_status)
             return
         self._load_initial_status()
-    def _load_initial_status(self) -> None:
+    def _load_initial_status(self, *, isolated: bool = False) -> None:
         self._initial_status_scheduled = False
         if self._initial_status_worker is not None or self._busy or self._watch_active:
+            if isolated:
+                self._startup_initial_status_pending = False
+                self._schedule_startup_auxiliary_tasks()
+            return
+        if isolated:
+            worker = RuntimeProbeWorker(
+                probe_kind='workspace-status',
+                data_root=str(self._paths.global_root),
+            )
+            worker.succeeded.connect(self._on_isolated_initial_status_success)
+            worker.failed.connect(self._on_initial_status_failed)
+            worker.finished.connect(self._on_initial_status_finished)
+            self._initial_status_worker = worker
+            worker.start()
             return
         try:
             config, paths = self._collect_config(False)
@@ -5900,6 +6207,15 @@ class ConfigWorkspace(QtWidgets.QWidget):
         worker.finished.connect(self._on_initial_status_finished)
         self._initial_status_worker = worker
         worker.start()
+
+    def _on_isolated_initial_status_success(self, snapshot: object) -> None:
+        self._on_initial_status_success(
+            {
+                'status': snapshot,
+                'config': self._config,
+                'paths': self._paths,
+            }
+        )
     def _on_initial_status_success(self, payload: object) -> None:
         if not isinstance(payload, dict):
             return
@@ -5933,9 +6249,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._emit_query_block_state()
     def _on_initial_status_finished(self) -> None:
         self._initial_status_worker = None
-        if self._startup_runtime_refresh_pending:
-            self._startup_runtime_refresh_pending = False
-            QtCore.QTimer.singleShot(0, self._request_runtime_management_refresh)
+        if self._startup_initial_status_pending:
+            self._startup_initial_status_pending = False
+            self._schedule_startup_auxiliary_tasks()
     def _open_help_and_updates(self) -> None:
         answer = QtWidgets.QMessageBox.question(self, self._tr('help_updates_confirm_title'), self._tr('help_updates_confirm_body'))
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:

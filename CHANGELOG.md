@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+## V0.4.10 - 2026-07-29
+
+### Added
+
+- Added [RELEASE_NOTES_v0.4.10](releases/RELEASE_NOTES_v0.4.10.md) for the Runtime state-synchronization and query-process isolation candidate release.
+- Added a query subprocess protocol with progress reporting, typed result serialization, native-crash detection, and one clean lexical-only recovery attempt.
+
+### Changed
+
+- Changed visible app/package/release metadata to `v0.4.10` across the desktop app, MCP line, setup examples, release notes, and packaging metadata.
+- Changed startup query readiness so searches remain disabled until the automatic Runtime status probe finishes.
+- Changed safe startup so it still runs the isolated status-only Runtime probe while continuing to suppress semantic prewarming.
+- Changed desktop shutdown so an active query subprocess is terminated instead of being orphaned.
+
+### Fixed
+
+- Fixed the Start page retaining a stale `runtime needs repair` state until the Runtime page was refreshed manually.
+- Fixed native PyTorch, SentenceTransformer, and CrossEncoder access violations terminating the entire Qt desktop process during a query.
+- Fixed lexical-only recovery paths importing the semantic runtime solely to populate diagnostic metadata.
+
+## V0.4.9 - 2026-07-29
+
+### Added
+
+- Added [RELEASE_NOTES_v0.4.9](releases/RELEASE_NOTES_v0.4.9.md) for the isolated Runtime detection, startup scheduling, status-truth, and application-icon release.
+- Added an explicit `runtime detecting…` state that begins automatically after the first window is shown and updates the Start and Runtime pages without a manual refresh.
+- Added isolated startup worker modes for Runtime validation and the initial workspace status snapshot.
+
+### Changed
+
+- Changed visible app/package/release metadata to `v0.4.9` across the desktop app, MCP line, setup examples, release notes, and local packaging metadata.
+- Changed startup scheduling so Runtime detection finishes before the initial workspace snapshot, followed by staggered Markdown, extension-source, and Tika refreshes.
+- Changed full Tika format-catalog parsing to run only when the format picker is opened instead of during first-window initialization.
+- Changed public GitHub links to the canonical `EllisMorrow/OmniClip-RAG` repository while retaining the existing `io.github.msjsc001/omniclip-rag-mcp` Registry identity for version continuity.
+- Changed the Windows application icon to a simpler flat ring-and-spark design that remains recognizable at small sizes.
+
+### Fixed
+
+- Fixed the remaining post-first-paint pause caused by in-process service initialization, simultaneous background jobs, and startup-time Tika JAR catalog parsing.
+- Fixed the Runtime status race that required users to click `刷新检测` after every launch before the Start page recognized an installed Runtime.
+- Fixed structural Runtime detection reporting complete-but-unverified installations as missing.
+- Fixed PDF/Tika source rows collapsing enabled-but-unbuilt and not-yet-confirmed index states into misleading status labels.
+
 ## V0.4.8 - 2026-04-20
 
 ### Added

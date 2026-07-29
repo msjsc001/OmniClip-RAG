@@ -679,6 +679,9 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._external_blocked = blocked
         self._external_block_title = title
         self._external_block_detail = detail
+        query_enabled = not self._busy and not self._external_blocked
+        self.search_button.setEnabled(query_enabled)
+        self.search_copy_button.setEnabled(query_enabled)
         self._refresh_query_status_banner()
 
     def rerun_current_query(self) -> None:
@@ -697,6 +700,12 @@ class QueryWorkspace(QtWidgets.QWidget):
 
     def search_and_copy(self) -> None:
         self._start_query(copy_result=True)
+
+    def shutdown(self) -> None:
+        worker = self._worker
+        cancel = getattr(worker, 'cancel', None)
+        if callable(cancel):
+            cancel()
 
     def copy_current_context(self) -> None:
         self._rebuild_context_view()
@@ -1114,8 +1123,8 @@ class QueryWorkspace(QtWidgets.QWidget):
 
     def _on_query_finished(self) -> None:
         self._busy = False
-        self.search_button.setEnabled(True)
-        self.search_copy_button.setEnabled(True)
+        self.search_button.setEnabled(not self._external_blocked)
+        self.search_copy_button.setEnabled(not self._external_blocked)
         self.copy_context_button.setEnabled(True)
         self.page_blocklist_button.setEnabled(True)
         self.sensitive_filter_button.setEnabled(True)

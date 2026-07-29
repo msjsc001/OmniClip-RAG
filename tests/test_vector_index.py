@@ -15,7 +15,7 @@ from unittest.mock import patch
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import RuntimeDependencyError
 from omniclip_rag.canary_backend import CANARY_VECTOR_MODEL_ID
-from omniclip_rag.vector_index import LanceDbVectorIndex, _MODEL_DOWNLOAD_IGNORE_PATTERNS, _discover_active_runtime_dir, _preferred_runtime_dir_path, _probe_runtime_semantic_core_inprocess, _runtime_component_dependency_ids, _runtime_import_environment, _runtime_search_roots, _sanitize_local_model_snapshot, build_runtime_install_command, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, prepare_local_model_snapshot, probe_runtime_gpu_execution, refresh_runtime_capability_snapshot, runtime_dependency_issue, runtime_guidance_context, runtime_management_snapshot, probe_runtime_gpu_query_execution
+from omniclip_rag.vector_index import LanceDbVectorIndex, _MODEL_DOWNLOAD_IGNORE_PATTERNS, _discover_active_runtime_dir, _preferred_runtime_dir_path, _probe_runtime_semantic_core_inprocess, _runtime_component_dependency_ids, _runtime_import_environment, _runtime_search_roots, _sanitize_local_model_snapshot, build_runtime_install_command, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, prepare_local_model_snapshot, probe_runtime_gpu_execution, refresh_runtime_capability_snapshot, resolve_vector_device, runtime_dependency_issue, runtime_guidance_context, runtime_management_snapshot, probe_runtime_gpu_query_execution, semantic_query_session
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1111,6 +1111,109 @@ class VectorIndexTests(unittest.TestCase):
         self.assertTrue(hits)
         self.assertEqual(hits[0].chunk_id, 'a')
 
+    def test_query_cuda_model_load_oom_retries_cpu_once_and_latches_cpu_for_other_vaults(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_cuda_oom_fallback'))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+            vector_device='auto',
+        )
+        factory_devices: list[str] = []
+
+        class CpuEmbedder:
+            device = 'cpu'
+
+            def encode(self, texts, *, batch_size=16, show_progress_bar=False, normalize_embeddings=True):
+                return [[float(len(text)), 1.0, 0.0] for text in texts]
+
+        def embedder_factory():
+            device = resolve_vector_device(config.vector_device)
+            factory_devices.append(device)
+            if device == 'cuda':
+                raise RuntimeError('CUDA out of memory while loading model')
+            return CpuEmbedder()
+
+        with patch('omniclip_rag.vector_index.detect_acceleration', return_value={'cuda_available': True}), \
+             patch('omniclip_rag.vector_index._query_memory_pressure_snapshot', return_value={}), \
+             semantic_query_session():
+            first_index = LanceDbVectorIndex(config, data_paths, embedder_factory=embedder_factory)
+            self.assertEqual(first_index._encode(['first']), [[5.0, 1.0, 0.0]])
+            self.assertEqual(first_index.last_execution_report()['fallback_reason'], 'cuda_memory_to_cpu')
+            self.assertTrue(first_index.last_execution_report()['oom_recovered'])
+
+            second_index = LanceDbVectorIndex(config, data_paths, embedder_factory=embedder_factory)
+            self.assertEqual(second_index._encode(['second']), [[6.0, 1.0, 0.0]])
+            self.assertEqual(factory_devices, ['cuda', 'cpu', 'cpu'])
+
+        with patch('omniclip_rag.vector_index.detect_acceleration', return_value={'cuda_available': True}):
+            self.assertEqual(resolve_vector_device(config.vector_device), 'cuda')
+
+    def test_query_vector_circuit_prevents_repeated_model_load_after_cpu_fallback_failure(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_vector_circuit'))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+            vector_device='auto',
+        )
+        factory_devices: list[str] = []
+
+        def failing_factory():
+            device = resolve_vector_device(config.vector_device)
+            factory_devices.append(device)
+            if device == 'cuda':
+                raise RuntimeError('CUDA out of memory while loading model')
+            raise MemoryError('CPU model load also failed')
+
+        with patch('omniclip_rag.vector_index.detect_acceleration', return_value={'cuda_available': True}), \
+             patch('omniclip_rag.vector_index._query_memory_pressure_snapshot', return_value={}), \
+             semantic_query_session():
+            first_index = LanceDbVectorIndex(config, data_paths, embedder_factory=failing_factory)
+            with self.assertRaises(MemoryError):
+                first_index._encode(['first'])
+            second_index = LanceDbVectorIndex(config, data_paths, embedder_factory=failing_factory)
+            with self.assertRaisesRegex(RuntimeError, 'disabled for this query'):
+                second_index._encode(['second'])
+            self.assertEqual(factory_devices, ['cuda', 'cpu'])
+
+    def test_query_critical_system_memory_pressure_skips_cuda_model_load(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_memory_preflight'))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+            vector_device='auto',
+        )
+        factory_devices: list[str] = []
+
+        class CpuEmbedder:
+            device = 'cpu'
+
+            def encode(self, texts, *, batch_size=16, show_progress_bar=False, normalize_embeddings=True):
+                return [[float(len(text)), 1.0, 0.0] for text in texts]
+
+        def embedder_factory():
+            device = resolve_vector_device(config.vector_device)
+            factory_devices.append(device)
+            return CpuEmbedder()
+
+        pressure = {
+            'reason': 'low-commit-headroom',
+            'commit_headroom_bytes': 5 * 1024**3,
+            'commit_usage_percent': 95.0,
+            'available_physical_bytes': 9 * 1024**3,
+        }
+        with patch('omniclip_rag.vector_index.detect_acceleration', return_value={'cuda_available': True}), \
+             patch('omniclip_rag.vector_index._query_memory_pressure_snapshot', return_value=pressure), \
+             semantic_query_session():
+            index = LanceDbVectorIndex(config, data_paths, embedder_factory=embedder_factory)
+            self.assertEqual(index._encode(['query']), [[5.0, 1.0, 0.0]])
+
+        self.assertEqual(factory_devices, ['cpu'])
+        self.assertEqual(index.last_execution_report()['fallback_reason'], 'system_memory_to_cpu')
+        self.assertEqual(index.last_execution_report()['memory_pressure'], pressure)
+
     def test_lancedb_rebuild_accepts_iterable_stream(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "iterable_rebuild"))
         config = AppConfig(
@@ -1516,7 +1619,9 @@ class VectorIndexTests(unittest.TestCase):
         config = AppConfig(
             vault_path=str(ROOT),
             data_root=str(data_paths.global_root),
-            vector_model="BAAI/bge-m3",
+            # Use an unsupported ModelScope id so this Hugging Face logging
+            # test stays hermetic instead of starting a real network download.
+            vector_model="Example/logging-model",
         )
         logs: list[str] = []
 

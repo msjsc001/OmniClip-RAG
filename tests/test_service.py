@@ -497,7 +497,7 @@ class ServiceTests(unittest.TestCase):
         vault_copy.mkdir(parents=True, exist_ok=True)
         (vault_copy / "page_a.md").write_text("- 鞋履搭配\n  id:: 77777777-7777-7777-7777-777777777777\n", encoding="utf-8")
         data_paths = ensure_data_paths(str(data_root))
-        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root), vector_backend='lancedb')
         service = OmniClipService(config, data_paths)
         vector_stub = _InjectVectorIndex()
         service.vector_index = vector_stub
@@ -520,7 +520,7 @@ class ServiceTests(unittest.TestCase):
         (vault_copy / "page_a.md").write_text("- 鞋子记录\n  id:: 11111111-1111-1111-1111-111111111111\n", encoding="utf-8")
         (vault_copy / "page_b.md").write_text("- 足部装备\n  id:: 22222222-2222-2222-2222-222222222222\n", encoding="utf-8")
         data_paths = ensure_data_paths(str(data_root))
-        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root), vector_backend='lancedb')
         service = OmniClipService(config, data_paths)
         vector_stub = _InjectVectorIndex()
         service.vector_index = vector_stub

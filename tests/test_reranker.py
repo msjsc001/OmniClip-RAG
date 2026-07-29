@@ -18,6 +18,7 @@ from omniclip_rag.reranker import (
     reranker_download_guidance_context,
 )
 from omniclip_rag.vector_index import _MODEL_DOWNLOAD_IGNORE_PATTERNS
+from omniclip_rag.vector_index import semantic_query_session
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +86,38 @@ class RerankerTests(unittest.TestCase):
         self.assertTrue(outcome.oom_recovered)
         self.assertTrue(outcome.degraded_to_cpu)
         self.assertEqual(outcome.resolved_device, 'cpu')
+        self.assertEqual(len(reranked), 2)
+
+    def test_reranker_model_load_oom_does_not_retry_cuda_for_smaller_batches(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'loader_oom'))
+        model_dir = paths.cache_dir / 'models' / 'BAAI__bge-reranker-v2-m3'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / 'config.json').write_text('{}', encoding='utf-8')
+        (model_dir / 'pytorch_model.bin').write_text('x', encoding='utf-8')
+        config = AppConfig(
+            vault_path='.',
+            data_root=str(paths.global_root),
+            reranker_enabled=True,
+            vector_device='cuda',
+        )
+        loaded_devices: list[str] = []
+
+        def loader(_local_dir, device):
+            loaded_devices.append(device)
+            if device == 'cuda':
+                raise RuntimeError('CUDA out of memory while loading reranker')
+            return _FakeModel(device)
+
+        reranker = CrossEncoderReranker(config, paths, loader=loader)
+        hits = [
+            SearchHit(score=40.0, title='A', anchor='A', source_path='a.md', rendered_text='alpha', chunk_id='a'),
+            SearchHit(score=30.0, title='B', anchor='B', source_path='b.md', rendered_text='beta', chunk_id='b'),
+        ]
+        with patch('omniclip_rag.reranker.resolve_vector_device', return_value='cuda'), semantic_query_session():
+            reranked, outcome = reranker.rerank('test', hits, 2)
+        self.assertTrue(outcome.applied)
+        self.assertTrue(outcome.degraded_to_cpu)
+        self.assertEqual(loaded_devices, ['cuda', 'cpu'])
         self.assertEqual(len(reranked), 2)
 
     def test_reranker_download_guidance_context_builds_commands_and_dirs(self) -> None:

@@ -35,7 +35,7 @@ from .preflight import estimate_storage_for_vault
 from .runtime_recovery import record_runtime_incident
 from .storage import MetadataStore, _build_fts_query
 from .timing import BuildEtaTracker, append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
-from .vector_index import create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, prepare_local_model_snapshot, release_process_vector_resources, resolve_vector_device, runtime_dependency_issue, runtime_trace_metadata
+from .vector_index import cached_acceleration_snapshot, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, prepare_local_model_snapshot, release_process_vector_resources, resolve_vector_device, resolve_vector_device_cached, runtime_dependency_issue, runtime_trace_metadata, semantic_query_session
 from .runtime_layout import list_pending_runtime_updates, load_runtime_component_registry, runtime_component_registry_path
 
 try:
@@ -147,6 +147,21 @@ class _LazyChunkLookup:
         return self._cache[chunk_id]
 
 
+def release_process_query_resources() -> None:
+    """Release semantic models shared by services in the current process."""
+    # A multi-vault query deliberately keeps these process-level caches alive
+    # until every vault has finished. Releasing them after each vault forced the
+    # same large models to be loaded repeatedly and amplified memory pressure.
+    try:
+        release_process_vector_resources(clear_cuda=True, reset_acceleration=False)
+    except Exception:
+        pass
+    try:
+        release_process_reranker_resources(clear_cuda=True)
+    except Exception:
+        pass
+
+
 class OmniClipService:
     def __init__(self, config: AppConfig, paths: DataPaths) -> None:
         self.config = config
@@ -163,15 +178,9 @@ class OmniClipService:
         self.reranker = create_reranker(config, paths)
         self.extension_query_broker = ExtensionQueryBroker(config=config, paths=paths)
 
-    def close(self) -> None:
-        try:
-            release_process_vector_resources(clear_cuda=True, reset_acceleration=False)
-        except Exception:
-            pass
-        try:
-            release_process_reranker_resources(clear_cuda=True)
-        except Exception:
-            pass
+    def close(self, *, release_process_resources: bool = True) -> None:
+        if release_process_resources:
+            release_process_query_resources()
         try:
             self.extension_query_broker.close()
         except Exception:
@@ -1135,6 +1144,11 @@ class OmniClipService:
             'vector_cuda_peak_mem_delta': int(vector_execution.get('cuda_peak_mem_delta') or 0),
             'vector_execution_error_class': str(vector_execution.get('execution_error_class') or ''),
             'vector_execution_error_message': str(vector_execution.get('execution_error_message') or ''),
+            'vector_fallback_reason': str(vector_execution.get('fallback_reason') or ''),
+            'vector_oom_recovered': bool(vector_execution.get('oom_recovered')),
+            'vector_cuda_error_class': str(vector_execution.get('cuda_error_class') or ''),
+            'vector_cuda_error_message': str(vector_execution.get('cuda_error_message') or ''),
+            'vector_memory_pressure': dict(vector_execution.get('memory_pressure') or {}),
             'fusion_candidates_raw': int(fused_count),
             'reranker_applied': reranker_applied,
             'reranker_skip_reason': reranker_skip_reason,
@@ -1153,6 +1167,7 @@ class OmniClipService:
             'stage_ms': stage_ms,
         }
 
+    @semantic_query_session()
     def query(
         self,
         query_text: str,
@@ -1267,13 +1282,22 @@ class OmniClipService:
                                     vector_execution = dict(last_execution_fn() or {})
                                 trace_vector_candidates = len(vector_candidates)
                                 _emit_query_progress(on_progress, 'vector', percent=35, candidates=len(vector_candidates), limit=vector_limit)
-                                if str(vector_execution.get('actual_device') or '').startswith('cuda'):
+                                if str(vector_execution.get('fallback_reason') or '') == 'system_memory_to_cpu':
+                                    runtime_warnings.append('markdown_vector_system_memory_to_cpu')
+                                    fallback_reason = 'vector_system_memory_to_cpu'
+                                elif str(vector_execution.get('fallback_reason') or '') == 'cuda_memory_to_cpu':
+                                    runtime_warnings.append('markdown_vector_cuda_memory_to_cpu')
+                                    fallback_reason = 'vector_cuda_memory_to_cpu'
+                                elif str(vector_execution.get('actual_device') or '').startswith('cuda'):
                                     runtime_warnings.append('markdown_vector_cuda_ready')
                                 elif resolve_vector_device(self.config.vector_device) == 'cpu':
                                     runtime_warnings.append('markdown_vector_cpu_ready')
                             except Exception as exc:
                                 trace_vector_error_class = exc.__class__.__name__
                                 trace_vector_error = str(exc).strip() or exc.__class__.__name__
+                                last_execution_fn = getattr(self.vector_index, 'last_execution_report', None)
+                                if callable(last_execution_fn):
+                                    vector_execution = dict(last_execution_fn() or {})
                                 runtime_warnings.append('markdown_vector_query_failed')
                                 fallback_reason = 'vector_query_failed'
                                 LOGGER.exception('Markdown vector search failed during query and was isolated from lexical retrieval.')
@@ -1380,7 +1404,14 @@ class OmniClipService:
             reranker_enabled=reranker_enabled,
             expected_steps=expected_steps,
         )
-        acceleration_payload = detect_acceleration(force_refresh=False)
+        # A lexical-only recovery query must not import torch merely to enrich
+        # diagnostic metadata. That path is used after a native semantic worker
+        # crash, so loading the same runtime again would defeat the isolation.
+        acceleration_payload = (
+            detect_acceleration(force_refresh=False)
+            if vector_query_planned or reranker_enabled
+            else cached_acceleration_snapshot()
+        )
         insights.query_fingerprint = self._build_query_fingerprint_payload(
             vector_status=vector_status,
             fts_rows_in_scope=fts_rows_in_scope,
@@ -1561,7 +1592,7 @@ class OmniClipService:
         tika_ready = bool(extension_registry.tika_config.enabled and extension_registry.snapshot.tika.index_state == ExtensionIndexState.READY)
         available_query_families = [family for family, enabled in (('markdown', index_ready), ('pdf', pdf_ready), ('tika', tika_ready)) if enabled]
         resolved_vault = str(self.config.vault_dir) if self.config.vault_path else ''
-        query_recommendation = asdict(self._query_runtime_advisor.current_recommendation(resolve_vector_device(self.config.vector_device), getattr(self.config, 'reranker_enabled', False)))
+        query_recommendation = asdict(self._query_runtime_advisor.current_recommendation(resolve_vector_device_cached(self.config.vector_device), getattr(self.config, 'reranker_enabled', False)))
         runtime_state = inspect_runtime_environment()
         vector_status = self._vector_index_status()
         index_meta = self._index_trace_metadata()

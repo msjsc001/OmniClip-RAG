@@ -13,17 +13,21 @@ import traceback
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from ..runtime_canary import run_gpu_query_canary
-from ..headless.bootstrap import apply_runtime_layout_if_needed as _shared_apply_runtime_layout_if_needed
-
-
 def _apply_runtime_layout_if_needed() -> None:
     try:
+        from ..headless.bootstrap import apply_runtime_layout_if_needed as _shared_apply_runtime_layout_if_needed
+
         _shared_apply_runtime_layout_if_needed()
     except Exception:
         # Why: desktop startup must keep working even when runtime layout cleanup
         # hits a damaged installation. The query trace will capture the real cause.
         pass
+
+
+def run_gpu_query_canary() -> dict[str, object]:
+    from ..runtime_canary import run_gpu_query_canary as _run_gpu_query_canary
+
+    return dict(_run_gpu_query_canary())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,7 +52,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--output', default='')
     parser.add_argument('--query-mode', default='hybrid')
     parser.add_argument('--selfcheck-runtime', default='')
+    parser.add_argument('--runtime-probe-worker', action='store_true')
+    parser.add_argument('--probe-kind', default='')
+    parser.add_argument('--query-worker', action='store_true')
+    parser.add_argument('--request', default='')
+    parser.add_argument('--progress', default='')
     args, _unknown = parser.parse_known_args(argv)
+    if bool(args.runtime_probe_worker):
+        from ..startup_prewarm import run_runtime_probe_worker
+
+        return run_runtime_probe_worker(
+            probe_kind=args.probe_kind,
+            output_path=args.output,
+            data_root=args.data_root,
+        )
+    if bool(args.query_worker):
+        from ..query_subprocess import run_query_worker
+
+        return run_query_worker(
+            request_path=args.request,
+            output_path=args.output,
+            progress_path=args.progress,
+        )
     _apply_runtime_layout_if_needed()
     if _should_run_runtime_selfcheck(args):
         return run_selfcheck_runtime(

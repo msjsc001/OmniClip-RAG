@@ -1,18 +1,35 @@
 from __future__ import annotations
 
 import logging
+import json
+import os
+import subprocess
+import tempfile
 import threading
+import time
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6 import QtCore
 
-from ..config import ensure_data_paths, normalize_vault_path
 from ..errors import BuildCancelledError, RuntimeDependencyError
-from ..models import QueryInsights, QueryResult
+from ..query_subprocess import (
+    config_to_payload,
+    query_result_from_payload,
+    query_worker_command,
+    query_worker_creationflags,
+    query_worker_environment,
+    write_json_atomic,
+)
 from ..service import WATCHDOG_AVAILABLE, OmniClipService
+from ..startup_prewarm import (
+    STARTUP_PREWARM_TIMEOUT_SECONDS,
+    idle_priority_creationflags,
+    runtime_probe_command,
+    runtime_probe_environment,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -42,57 +59,186 @@ class QueryTaskResult:
 #      保留 Qt Signal 做跨线程 UI 更新（Signal.emit() 本身线程安全）。
 
 
-class QueryWorker(QtCore.QObject):
+class _IsolatedQueryWorker(QtCore.QObject):
     progress = QtCore.Signal(object)
     succeeded = QtCore.Signal(object)
     failed = QtCore.Signal(str, str)
     finished = QtCore.Signal()
 
-    def __init__(self, *, config, paths, query_text: str, copy_result: bool, score_threshold: float, allowed_families: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        *,
+        config,
+        query_text: str,
+        copy_result: bool,
+        score_threshold: float,
+        allowed_families: tuple[str, ...],
+    ) -> None:
         super().__init__()
         self._config = config
-        self._paths = paths
         self._query_text = query_text
         self._copy_result = copy_result
         self._score_threshold = score_threshold
         self._allowed_families = tuple(allowed_families)
         self._thread: threading.Thread | None = None
+        self._process: subprocess.Popen | None = None
+        self._cancel_event = threading.Event()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def cancel(self) -> None:
+        self._cancel_event.set()
+        process = self._process
+        if process is not None and process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    def _request_payload(self, *, query_mode: str = 'hybrid') -> dict[str, object]:
+        return {
+            'config': config_to_payload(self._config),
+            'query_text': self._query_text,
+            'copy_result': self._copy_result,
+            'score_threshold': self._score_threshold,
+            'allowed_families': list(self._allowed_families),
+            'query_mode': query_mode,
+        }
+
+    def _run_child(self, request: dict[str, object]) -> tuple[dict[str, object] | None, str]:
+        with tempfile.TemporaryDirectory(prefix='omniclip-query-') as temp_dir:
+            temp_root = Path(temp_dir)
+            request_path = temp_root / 'request.json'
+            output_path = temp_root / 'result.json'
+            progress_path = temp_root / 'progress.json'
+            write_json_atomic(request_path, request)
+            command = query_worker_command(
+                request_path=request_path,
+                output_path=output_path,
+                progress_path=progress_path,
+            )
+            kwargs: dict[str, object] = {
+                'env': query_worker_environment(),
+                'stdin': subprocess.DEVNULL,
+                'stdout': subprocess.DEVNULL,
+                'stderr': subprocess.DEVNULL,
+            }
+            creationflags = query_worker_creationflags()
+            if creationflags:
+                kwargs['creationflags'] = creationflags
+            self._process = subprocess.Popen(command, **kwargs)
+            last_progress_text = ''
+            while self._process.poll() is None:
+                if self._cancel_event.is_set():
+                    self.cancel()
+                    try:
+                        self._process.wait(timeout=5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                    return None, '查询已取消'
+                if progress_path.exists():
+                    try:
+                        progress_text = progress_path.read_text(encoding='utf-8')
+                        if progress_text and progress_text != last_progress_text:
+                            last_progress_text = progress_text
+                            _safe_emit(self.progress, dict(json.loads(progress_text)))
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                time.sleep(0.1)
+            return_code = int(self._process.returncode or 0)
+            self._process = None
+            if output_path.exists():
+                try:
+                    return dict(json.loads(output_path.read_text(encoding='utf-8'))), ''
+                except (OSError, json.JSONDecodeError) as exc:
+                    return None, f'查询子进程返回了损坏的结果：{exc}'
+            return None, f'查询子进程异常退出（代码 {return_code}）'
+
+    def _emit_success(self, payload: dict[str, object], *, semantic_crash_recovered: bool) -> None:
+        result = query_result_from_payload(dict(payload.get('result') or {}))
+        if semantic_crash_recovered:
+            warnings = tuple(getattr(result.insights, 'runtime_warnings', ()) or ())
+            result.insights.runtime_warnings = tuple(dict.fromkeys([
+                *warnings,
+                'semantic_query_process_recovered',
+            ]))
+            result.insights.trace_lines = tuple(dict.fromkeys([
+                *tuple(getattr(result.insights, 'trace_lines', ()) or ()),
+                '语义查询子进程异常退出，本次已自动使用独立字面检索完成。',
+            ]))
+        _safe_emit(
+            self.succeeded,
+            QueryTaskResult(
+                query_text=str(payload.get('query_text') or self._query_text),
+                copied=bool(payload.get('copied')),
+                score_threshold=float(payload.get('score_threshold') or self._score_threshold),
+                allowed_families=tuple(payload.get('allowed_families') or self._allowed_families),
+                result=result,
+                status_snapshot=dict(payload.get('status_snapshot') or {}),
+            ),
+        )
+
     def _run(self) -> None:
-        service = OmniClipService(self._config, self._paths)
         try:
-            result = service.query(
-                self._query_text,
-                copy_result=self._copy_result,
-                score_threshold=self._score_threshold,
-                allowed_families=self._allowed_families,
-                on_progress=lambda payload: _safe_emit(self.progress, dict(payload)),
+            payload, crash_message = self._run_child(self._request_payload())
+            if self._cancel_event.is_set():
+                return
+            if payload is not None and str(payload.get('status') or '').lower() == 'ok':
+                self._emit_success(payload, semantic_crash_recovered=False)
+                return
+            if payload is not None:
+                message = str(payload.get('error_message') or '').strip() or '查询子进程执行失败。'
+                detail = str(payload.get('traceback') or '').strip()
+                _safe_emit(self.failed, message, detail)
+                return
+
+            LOGGER.error('%s; retrying in a fresh lexical-only subprocess.', crash_message)
+            _safe_emit(self.progress, {
+                'stage_status': 'lexical_fallback',
+                'overall_percent': 10.0,
+            })
+            fallback_payload, fallback_crash = self._run_child(
+                self._request_payload(query_mode='lexical-only')
             )
-            snapshot = service.status_snapshot()
-            _safe_emit(
-                self.succeeded,
-                QueryTaskResult(
-                    query_text=self._query_text,
-                    copied=self._copy_result,
-                    score_threshold=self._score_threshold,
-                    allowed_families=self._allowed_families,
-                    result=result,
-                    status_snapshot=snapshot,
-                )
+            if self._cancel_event.is_set():
+                return
+            if (
+                fallback_payload is not None
+                and str(fallback_payload.get('status') or '').lower() == 'ok'
+            ):
+                self._emit_success(fallback_payload, semantic_crash_recovered=True)
+                return
+            if fallback_payload is not None:
+                fallback_message = str(fallback_payload.get('error_message') or '').strip()
+                fallback_detail = str(fallback_payload.get('traceback') or '').strip()
+            else:
+                fallback_message = fallback_crash
+                fallback_detail = ''
+            message = (
+                f'{crash_message}。主程序仍在运行；自动字面检索也未能完成：'
+                f'{fallback_message or "未知错误"}'
             )
-        except RuntimeDependencyError as exc:
-            LOGGER.exception('Query worker failed because the vector runtime is not ready.')
-            _safe_emit(self.failed, str(exc).strip(), traceback.format_exc())
+            _safe_emit(self.failed, message, fallback_detail)
         except Exception as exc:
-            LOGGER.exception('Query worker crashed unexpectedly.')
+            LOGGER.exception('Isolated query coordinator crashed unexpectedly.')
             _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
-            service.close()
+            self._process = None
             _safe_emit(self.finished)
+
+
+class QueryWorker(_IsolatedQueryWorker):
+    def __init__(self, *, config, paths, query_text: str, copy_result: bool, score_threshold: float, allowed_families: tuple[str, ...]) -> None:
+        del paths
+        super().__init__(
+            config=config,
+            query_text=query_text,
+            copy_result=copy_result,
+            score_threshold=score_threshold,
+            allowed_families=allowed_families,
+        )
 
 
 class FunctionWorker(QtCore.QObject):
@@ -116,6 +262,87 @@ class FunctionWorker(QtCore.QObject):
             LOGGER.exception('Background function worker crashed unexpectedly.')
             _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
+            _safe_emit(self.finished)
+
+
+class RuntimeProbeWorker(QtCore.QObject):
+    succeeded = QtCore.Signal(object)
+    failed = QtCore.Signal(str, str)
+    cancelled = QtCore.Signal()
+    finished = QtCore.Signal()
+
+    def __init__(
+        self,
+        *,
+        probe_kind: str,
+        data_root: str,
+        timeout_seconds: int = STARTUP_PREWARM_TIMEOUT_SECONDS,
+    ) -> None:
+        super().__init__()
+        self._probe_kind = str(probe_kind)
+        self._data_root = str(data_root or '')
+        self._timeout_seconds = max(int(timeout_seconds), 1)
+        self._cancel_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._process: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+        process = self._process
+        if process is not None and process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+    def _run(self) -> None:
+        try:
+            with tempfile.TemporaryDirectory(prefix='omniclip-runtime-probe-') as temp_dir:
+                output_path = Path(temp_dir) / 'result.json'
+                command = runtime_probe_command(
+                    probe_kind=self._probe_kind,
+                    output_path=output_path,
+                    data_root=self._data_root,
+                )
+                kwargs: dict[str, object] = {
+                    'env': runtime_probe_environment(data_root=self._data_root),
+                    'stdin': subprocess.DEVNULL,
+                    'stdout': subprocess.DEVNULL,
+                    'stderr': subprocess.DEVNULL,
+                }
+                creationflags = idle_priority_creationflags()
+                if creationflags:
+                    kwargs['creationflags'] = creationflags
+                self._process = subprocess.Popen(command, **kwargs)
+                deadline = time.monotonic() + self._timeout_seconds
+                while self._process.poll() is None:
+                    if self._cancel_event.wait(0.1):
+                        self.cancel()
+                        _safe_emit(self.cancelled)
+                        return
+                    if time.monotonic() >= deadline:
+                        self.cancel()
+                        raise TimeoutError(f'Runtime probe exceeded {self._timeout_seconds} seconds')
+                if self._cancel_event.is_set():
+                    _safe_emit(self.cancelled)
+                    return
+                if not output_path.exists():
+                    raise RuntimeError(f'Runtime probe exited with code {self._process.returncode} without a result')
+                result = json.loads(output_path.read_text(encoding='utf-8'))
+                if str(result.get('status') or '').lower() != 'ok':
+                    message = str(result.get('error_message') or '').strip() or 'Runtime probe failed'
+                    detail = str(result.get('traceback') or '').strip()
+                    raise RuntimeError(f'{message}\n{detail}'.strip())
+                _safe_emit(self.succeeded, dict(result.get('payload') or {}))
+        except Exception as exc:
+            LOGGER.exception('Runtime probe subprocess failed.')
+            _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
+        finally:
+            self._process = None
             _safe_emit(self.finished)
 
 
@@ -235,12 +462,7 @@ class ServiceFunctionWorker(QtCore.QObject):
             _safe_emit(self.finished)
 
 
-class MultiVaultQueryWorker(QtCore.QObject):
-    progress = QtCore.Signal(object)
-    succeeded = QtCore.Signal(object)
-    failed = QtCore.Signal(str, str)
-    finished = QtCore.Signal()
-
+class MultiVaultQueryWorker(_IsolatedQueryWorker):
     def __init__(
         self,
         *,
@@ -250,178 +472,13 @@ class MultiVaultQueryWorker(QtCore.QObject):
         score_threshold: float,
         allowed_families: tuple[str, ...],
     ) -> None:
-        super().__init__()
-        self._config = config
-        self._query_text = query_text
-        self._copy_result = copy_result
-        self._score_threshold = score_threshold
-        self._allowed_families = tuple(allowed_families)
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def _selected_vaults(self) -> list[str]:
-        ordered: list[str] = []
-        seen: set[str] = set()
-        raw_values = list(getattr(self._config, 'md_selected_vault_paths', ()) or ())
-        if not raw_values:
-            raw_values = [getattr(self._config, 'vault_path', '')]
-        for raw_value in raw_values:
-            normalized = normalize_vault_path(raw_value)
-            lowered = normalized.lower()
-            if not normalized or lowered in seen:
-                continue
-            seen.add(lowered)
-            ordered.append(normalized)
-        return ordered
-
-    def _emit_outer_progress(
-        self,
-        *,
-        index: int,
-        total: int,
-        vault_path: str,
-        payload: dict[str, object] | None = None,
-    ) -> None:
-        payload = dict(payload or {})
-        inner_percent = float(payload.get('overall_percent', 0.0) or 0.0)
-        outer_percent = ((index - 1) + (max(0.0, min(inner_percent, 100.0)) / 100.0)) / max(total, 1) * 100.0
-        payload['overall_percent'] = outer_percent
-        payload['vault_path'] = vault_path
-        payload.setdefault('current_path', vault_path)
-        payload.setdefault('stage_status', 'query_vault')
-        _safe_emit(self.progress, payload)
-
-    def _decorate_hits(self, hits: list[object], *, vault_path: str, multi_vault: bool) -> list[object]:
-        if not multi_vault:
-            return list(hits)
-        vault_name = Path(vault_path).name or vault_path
-        decorated: list[object] = []
-        for hit in hits:
-            source_label = str(getattr(hit, 'source_label', '') or '').strip()
-            if source_label:
-                source_label = f'{vault_name} · {source_label}'
-            else:
-                source_label = vault_name
-            decorated.append(replace(hit, source_label=source_label))
-        return decorated
-
-    def _run(self) -> None:
-        selected_vaults = self._selected_vaults()
-        if not selected_vaults:
-            _safe_emit(self.failed, 'No markdown vault is enabled for querying.', '')
-            _safe_emit(self.finished)
-            return
-        total = len(selected_vaults)
-        merged_hits: list[object] = []
-        runtime_warnings: list[str] = []
-        trace_lines: list[str] = []
-        snapshots: dict[str, dict[str, object]] = {}
-        multi_vault = total > 1
-        try:
-            for index, vault_path in enumerate(selected_vaults, start=1):
-                config = replace(
-                    self._config,
-                    vault_path=vault_path,
-                    md_selected_vault_paths=list(selected_vaults),
-                )
-                paths = ensure_data_paths(getattr(config, 'data_root', None), vault_path)
-                service = OmniClipService(config, paths)
-                try:
-                    snapshot = service.status_snapshot()
-                    snapshots[vault_path] = dict(snapshot)
-                    available_families = {str(item).strip().lower() for item in snapshot.get('query_available_families', []) if str(item).strip()}
-                    requested = {item.strip().lower() for item in self._allowed_families if item.strip()}
-                    if not (available_families & requested):
-                        self._emit_outer_progress(
-                            index=index,
-                            total=total,
-                            vault_path=vault_path,
-                            payload={
-                                'stage_status': 'skip_unavailable',
-                                'overall_percent': 100.0,
-                                'current_path': vault_path,
-                            },
-                        )
-                        trace_lines.append(f'已跳过未就绪来源目录：{vault_path}')
-                        continue
-                    self._emit_outer_progress(
-                        index=index,
-                        total=total,
-                        vault_path=vault_path,
-                        payload={
-                            'stage_status': 'query_vault',
-                            'overall_percent': 0.0,
-                            'current_path': vault_path,
-                        },
-                    )
-                    result = service.query(
-                        self._query_text,
-                        copy_result=self._copy_result,
-                        score_threshold=self._score_threshold,
-                        allowed_families=self._allowed_families,
-                        on_progress=lambda payload, i=index, t=total, v=vault_path: self._emit_outer_progress(
-                            index=i,
-                            total=t,
-                            vault_path=v,
-                            payload=dict(payload),
-                        ),
-                    )
-                    merged_hits.extend(self._decorate_hits(list(getattr(result, 'hits', []) or ()), vault_path=vault_path, multi_vault=multi_vault))
-                    insights = getattr(result, 'insights', None)
-                    if insights is not None:
-                        runtime_warnings.extend(tuple(getattr(insights, 'runtime_warnings', ()) or ()))
-                        trace_lines.extend(tuple(getattr(insights, 'trace_lines', ()) or ()))
-                finally:
-                    service.close()
-            merged_hits.sort(key=lambda hit: float(getattr(hit, 'score', 0.0) or 0.0), reverse=True)
-            final_limit = max(int(getattr(self._config, 'query_limit', 15) or 15), 1)
-            final_hits = merged_hits[:final_limit]
-            dedup_warnings = tuple(dict.fromkeys(str(item).strip() for item in runtime_warnings if str(item).strip()))
-            dedup_trace_lines = tuple(dict.fromkeys(str(item).strip() for item in trace_lines if str(item).strip()))
-            result = QueryResult(
-                hits=final_hits,
-                context_text='',
-                insights=QueryInsights(
-                    selected_hits=len(final_hits),
-                    runtime_warnings=dedup_warnings,
-                    trace_lines=dedup_trace_lines,
-                    query_plan={
-                        'mode': 'multi_vault_fanout',
-                        'vaults': list(selected_vaults),
-                    },
-                ),
-            )
-            _safe_emit(
-                self.succeeded,
-                QueryTaskResult(
-                    query_text=self._query_text,
-                    copied=self._copy_result,
-                    score_threshold=self._score_threshold,
-                    allowed_families=self._allowed_families,
-                    result=result,
-                    status_snapshot={
-                        'mode': 'multi_vault_fanout',
-                        'vaults': list(selected_vaults),
-                        'vault_snapshots': snapshots,
-                    },
-                ),
-            )
-        except RuntimeDependencyError as exc:
-            LOGGER.exception('Multi-vault query worker failed because the vector runtime is not ready.')
-            _safe_emit(self.failed, str(exc).strip(), traceback.format_exc())
-        except Exception as exc:
-            LOGGER.exception('Multi-vault query worker crashed unexpectedly.')
-            _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
-        finally:
-            _safe_emit(self.finished)
-
-    def _emit_log(self, message: str) -> None:
-        text_value = str(message or '').strip()
-        if text_value:
-            _safe_emit(self.log, text_value)
+        super().__init__(
+            config=config,
+            query_text=query_text,
+            copy_result=copy_result,
+            score_threshold=score_threshold,
+            allowed_families=allowed_families,
+        )
 
 
 class WatchWorker(QtCore.QObject):
