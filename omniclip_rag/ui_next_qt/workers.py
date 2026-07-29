@@ -1,12 +1,7 @@
 from __future__ import annotations
 
 import logging
-import json
-import os
-import subprocess
-import tempfile
 import threading
-import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -18,12 +13,6 @@ from ..config import ensure_data_paths, normalize_vault_path
 from ..errors import BuildCancelledError, RuntimeDependencyError
 from ..models import QueryInsights, QueryResult
 from ..service import WATCHDOG_AVAILABLE, OmniClipService
-from ..startup_prewarm import (
-    STARTUP_PREWARM_TIMEOUT_SECONDS,
-    idle_priority_creationflags,
-    runtime_probe_command,
-    runtime_probe_environment,
-)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -127,87 +116,6 @@ class FunctionWorker(QtCore.QObject):
             LOGGER.exception('Background function worker crashed unexpectedly.')
             _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
-            _safe_emit(self.finished)
-
-
-class RuntimeProbeWorker(QtCore.QObject):
-    succeeded = QtCore.Signal(object)
-    failed = QtCore.Signal(str, str)
-    cancelled = QtCore.Signal()
-    finished = QtCore.Signal()
-
-    def __init__(
-        self,
-        *,
-        probe_kind: str,
-        data_root: str,
-        timeout_seconds: int = STARTUP_PREWARM_TIMEOUT_SECONDS,
-    ) -> None:
-        super().__init__()
-        self._probe_kind = str(probe_kind)
-        self._data_root = str(data_root or '')
-        self._timeout_seconds = max(int(timeout_seconds), 1)
-        self._cancel_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._process: subprocess.Popen | None = None
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def cancel(self) -> None:
-        self._cancel_event.set()
-        process = self._process
-        if process is not None and process.poll() is None:
-            try:
-                process.kill()
-            except OSError:
-                pass
-
-    def _run(self) -> None:
-        try:
-            with tempfile.TemporaryDirectory(prefix='omniclip-runtime-probe-') as temp_dir:
-                output_path = Path(temp_dir) / 'result.json'
-                command = runtime_probe_command(
-                    probe_kind=self._probe_kind,
-                    output_path=output_path,
-                    data_root=self._data_root,
-                )
-                kwargs: dict[str, object] = {
-                    'env': runtime_probe_environment(data_root=self._data_root),
-                    'stdin': subprocess.DEVNULL,
-                    'stdout': subprocess.DEVNULL,
-                    'stderr': subprocess.DEVNULL,
-                }
-                creationflags = idle_priority_creationflags()
-                if creationflags:
-                    kwargs['creationflags'] = creationflags
-                self._process = subprocess.Popen(command, **kwargs)
-                deadline = time.monotonic() + self._timeout_seconds
-                while self._process.poll() is None:
-                    if self._cancel_event.wait(0.1):
-                        self.cancel()
-                        _safe_emit(self.cancelled)
-                        return
-                    if time.monotonic() >= deadline:
-                        self.cancel()
-                        raise TimeoutError(f'Runtime probe exceeded {self._timeout_seconds} seconds')
-                if self._cancel_event.is_set():
-                    _safe_emit(self.cancelled)
-                    return
-                if not output_path.exists():
-                    raise RuntimeError(f'Runtime probe exited with code {self._process.returncode} without a result')
-                result = json.loads(output_path.read_text(encoding='utf-8'))
-                if str(result.get('status') or '').lower() != 'ok':
-                    message = str(result.get('error_message') or '').strip() or 'Runtime probe failed'
-                    detail = str(result.get('traceback') or '').strip()
-                    raise RuntimeError(f'{message}\n{detail}'.strip())
-                _safe_emit(self.succeeded, dict(result.get('payload') or {}))
-        except Exception as exc:
-            LOGGER.exception('Runtime probe subprocess failed.')
-            _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
-        finally:
-            self._process = None
             _safe_emit(self.finished)
 
 

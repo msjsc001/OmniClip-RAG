@@ -296,50 +296,6 @@ class ExtensionSkeletonTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
-    def test_extension_source_status_separates_enabled_from_built(self) -> None:
-        app = get_app()
-        theme = build_theme('light', 100)
-        paths = ensure_data_paths(str(TEST_ROOT / 'data_source_status'), str(SAMPLE_ROOT))
-        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
-        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
-        source = ExtensionSourceDirectory(
-            path=str(SAMPLE_ROOT),
-            selected=True,
-            state=ExtensionDirectoryState.ENABLED,
-        )
-        try:
-            workspace._extension_state.snapshot.pdf.index_state = ExtensionIndexState.NOT_BUILT
-            workspace._extension_source_summaries = {}
-            self.assertEqual(
-                workspace._extension_source_status_text('pdf', source),
-                text('zh-CN', 'extensions_source_state_enabled_unbuilt'),
-            )
-
-            workspace._extension_state.snapshot.pdf.index_state = ExtensionIndexState.READY
-            self.assertEqual(
-                workspace._extension_source_status_text('pdf', source),
-                text('zh-CN', 'extensions_source_state_enabled_checking'),
-            )
-
-            workspace._extension_source_summaries[('pdf', str(SAMPLE_ROOT))] = {
-                'has_indexed_data': False,
-                'indexed_files': 0,
-                'indexed_chunks': 0,
-            }
-            self.assertEqual(
-                workspace._extension_source_status_text('pdf', source),
-                text('zh-CN', 'extensions_source_state_enabled_unbuilt'),
-            )
-
-            workspace._extension_source_summaries[('pdf', str(SAMPLE_ROOT))]['has_indexed_data'] = True
-            self.assertEqual(
-                workspace._extension_source_status_text('pdf', source),
-                text('zh-CN', 'extensions_status_ready'),
-            )
-        finally:
-            workspace.deleteLater()
-            app.processEvents()
-
     def test_extension_source_progress_includes_stage_file_and_close_hint(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)

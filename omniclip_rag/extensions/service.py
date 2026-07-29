@@ -477,7 +477,6 @@ class PdfExtensionService:
         *,
         coordinator: ExtensionTaskCoordinator | None = None,
         registry: ExtensionRegistry | None = None,
-        probe_vector_runtime: bool = True,
     ) -> None:
         self.config = config
         self.paths = paths
@@ -485,8 +484,8 @@ class PdfExtensionService:
         self.registry = registry or ExtensionRegistry()
         self.extension_paths = build_extension_data_paths(paths, 'pdf')
         self.store = MetadataStore(self.extension_paths.sqlite_file)
-        self._vector_runtime_issue = runtime_dependency_issue(config) if probe_vector_runtime and _vector_backend_enabled(config) else None
-        self._vector_enabled = probe_vector_runtime and _vector_backend_enabled(config) and not self._vector_runtime_issue
+        self._vector_runtime_issue = runtime_dependency_issue(config) if _vector_backend_enabled(config) else None
+        self._vector_enabled = _vector_backend_enabled(config) and not self._vector_runtime_issue
         if self._vector_runtime_issue:
             LOGGER.warning('PDF extension is falling back to lexical-only mode because vector runtime is unavailable. %s', self._vector_runtime_issue)
         self.vector_index = create_vector_index(config, self.extension_paths) if self._vector_enabled else NullVectorIndex()
@@ -1607,7 +1606,6 @@ class TikaExtensionService:
         coordinator: ExtensionTaskCoordinator | None = None,
         registry: ExtensionRegistry | None = None,
         runtime_manager: TikaSidecarManager | None = None,
-        probe_vector_runtime: bool = True,
     ) -> None:
         self.config = config
         self.paths = paths
@@ -1616,8 +1614,8 @@ class TikaExtensionService:
         self.runtime_manager = runtime_manager or TikaSidecarManager()
         self.extension_paths = build_extension_data_paths(paths, 'tika')
         self.store = MetadataStore(self.extension_paths.sqlite_file)
-        self._vector_runtime_issue = runtime_dependency_issue(config) if probe_vector_runtime and _vector_backend_enabled(config) else None
-        self._vector_enabled = probe_vector_runtime and _vector_backend_enabled(config) and not self._vector_runtime_issue
+        self._vector_runtime_issue = runtime_dependency_issue(config) if _vector_backend_enabled(config) else None
+        self._vector_enabled = _vector_backend_enabled(config) and not self._vector_runtime_issue
         if self._vector_runtime_issue:
             LOGGER.warning('Tika extension is falling back to lexical-only mode because vector runtime is unavailable. %s', self._vector_runtime_issue)
         self.vector_index = create_vector_index(config, self.extension_paths) if self._vector_enabled else NullVectorIndex()
@@ -2984,7 +2982,7 @@ class ExtensionService:
             service.close()
 
     def run_pdf_source_summaries(self, *, source_paths: list[str] | tuple[str, ...] | None = None) -> dict[str, ExtensionSourceIndexSummary]:
-        service = self._pdf_service(probe_vector_runtime=False)
+        service = self._pdf_service()
         try:
             return service.source_summaries(source_paths=source_paths)
         finally:
@@ -3050,32 +3048,21 @@ class ExtensionService:
             service.close()
 
     def run_tika_source_summaries(self, *, source_paths: list[str] | tuple[str, ...] | None = None) -> dict[str, ExtensionSourceIndexSummary]:
-        service = self._tika_service(probe_vector_runtime=False)
+        service = self._tika_service()
         try:
             return service.source_summaries(source_paths=source_paths)
         finally:
             service.close()
 
-    def _pdf_service(self, *, probe_vector_runtime: bool = True) -> PdfExtensionService:
+    def _pdf_service(self) -> PdfExtensionService:
         if self.config is None or self.paths is None:
             raise RuntimeError('extension_service_requires_config_and_paths')
-        return PdfExtensionService(
-            self.config,
-            self.paths,
-            coordinator=self.coordinator,
-            probe_vector_runtime=probe_vector_runtime,
-        )
+        return PdfExtensionService(self.config, self.paths, coordinator=self.coordinator)
 
-    def _tika_service(self, *, probe_vector_runtime: bool = True) -> TikaExtensionService:
+    def _tika_service(self) -> TikaExtensionService:
         if self.config is None or self.paths is None:
             raise RuntimeError('extension_service_requires_config_and_paths')
-        return TikaExtensionService(
-            self.config,
-            self.paths,
-            coordinator=self.coordinator,
-            runtime_manager=self.runtime_manager,
-            probe_vector_runtime=probe_vector_runtime,
-        )
+        return TikaExtensionService(self.config, self.paths, coordinator=self.coordinator, runtime_manager=self.runtime_manager)
 
 
 def _vector_backend_enabled(config: AppConfig) -> bool:

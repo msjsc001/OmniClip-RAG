@@ -8,9 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RESOURCES = ROOT / "resources"
 
-BG = (18, 59, 74, 255)
-RING = (116, 211, 231, 255)
-STAR = (255, 183, 3, 255)
+BG = (15, 123, 108, 255)
+FG = (255, 255, 255, 255)
 TRANSPARENT = (0, 0, 0, 0)
 
 
@@ -41,39 +40,16 @@ def in_ring(x: float, y: float, cx: float, cy: float, outer: float, inner: float
     return inner ** 2 <= distance <= outer ** 2
 
 
-def in_polygon(x: float, y: float, points: tuple[tuple[float, float], ...]) -> bool:
-    inside = False
-    previous_x, previous_y = points[-1]
-    for current_x, current_y in points:
-        crosses = (current_y > y) != (previous_y > y)
-        if crosses:
-            intersection_x = (previous_x - current_x) * (y - current_y) / (previous_y - current_y) + current_x
-            if x < intersection_x:
-                inside = not inside
-        previous_x, previous_y = current_x, current_y
-    return inside
-
-
 def pixel_for(x: float, y: float, size: float) -> tuple[int, int, int, int]:
     if not in_rounded_rect(x, y, size, size * 0.22):
         return TRANSPARENT
 
-    center = size * 0.5
-    if in_ring(x, y, center, center, size * 0.332, size * 0.262):
-        return RING
+    left = in_ring(x, y, size * 0.36, size * 0.52, size * 0.18, size * 0.095)
+    right = in_ring(x, y, size * 0.64, size * 0.52, size * 0.18, size * 0.095)
+    bridge = abs(y - size * 0.52) <= size * 0.034 and size * 0.44 <= x <= size * 0.56
 
-    star = (
-        (size * 0.50, size * 0.293),
-        (size * 0.559, size * 0.441),
-        (size * 0.707, size * 0.50),
-        (size * 0.559, size * 0.559),
-        (size * 0.50, size * 0.707),
-        (size * 0.441, size * 0.559),
-        (size * 0.293, size * 0.50),
-        (size * 0.441, size * 0.441),
-    )
-    if in_polygon(x, y, star):
-        return STAR
+    if left or right or bridge:
+        return FG
     return BG
 
 
@@ -133,9 +109,6 @@ def write_ico(path: Path, sizes: list[int]) -> None:
 
 def main() -> None:
     RESOURCES.mkdir(parents=True, exist_ok=True)
-    source_dir = ROOT / "icon"
-    source_dir.mkdir(parents=True, exist_ok=True)
-    (source_dir / "image.png").write_bytes(encode_png(512, render_icon(512, supersample=2)))
     for size, name in ((256, "app_icon.png"), (32, "app_icon_32.png")):
         (RESOURCES / name).write_bytes(encode_png(size, render_icon(size)))
     write_ico(RESOURCES / "app_icon.ico", [16, 32, 48, 64, 128, 256])

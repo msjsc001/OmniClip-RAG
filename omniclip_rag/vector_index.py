@@ -843,6 +843,12 @@ class LanceDbVectorIndex:
 
     def status(self) -> dict[str, object]:
         runtime_state = inspect_runtime_environment()
+        if self._vector_dimension is None and self._table_exists():
+            try:
+                schema = self._table().schema
+                self._vector_dimension = schema.field("vector").type.list_size
+            except Exception:
+                pass
         return {
             'backend': 'lancedb',
             'table_ready': self._table_exists(),
@@ -2642,47 +2648,6 @@ def runtime_management_snapshot(*, force_refresh: bool = False, verify_gpu: bool
     return payload
 
 
-def cached_acceleration_snapshot() -> dict[str, object]:
-    """Return startup-safe runtime state without hardware or library probes."""
-    if _ACCELERATION_CACHE is not None:
-        return dict(_ACCELERATION_CACHE)
-    runtime_dir = _runtime_dir_path()
-    runtime_state = inspect_runtime_environment(runtime_dir)
-    runtime_meta = runtime_trace_metadata()
-    payload: dict[str, object] = {
-        'torch_available': False,
-        'torch_version': '',
-        'torch_cuda_build': '',
-        'torch_error': 'runtime probe deferred',
-        'sentence_transformers_available': False,
-        'sentence_transformers_error': 'runtime probe deferred',
-        'cuda_available': False,
-        'cuda_device_count': 0,
-        'cuda_name': '',
-        'gpu_present': False,
-        'gpu_name': '',
-        'nvcc_available': False,
-        'nvcc_version': '',
-        'device_options': ['auto', 'cpu'],
-        'recommended_device': 'cpu',
-        'runtime_status': 'deferred' if runtime_state.get('runtime_complete') else 'missing',
-        'runtime_exists': bool(runtime_state.get('runtime_exists')),
-        'runtime_complete': bool(runtime_state.get('runtime_complete')),
-        'runtime_missing_items': list(runtime_state.get('runtime_missing_items') or []),
-        'safe_mode': False,
-        **runtime_meta,
-        'gpu_probe_state': 'not-run',
-        'gpu_probe_verified': False,
-        'gpu_probe_reason': '',
-        'gpu_execution_state': 'not-run',
-        'gpu_execution_verified': False,
-        'gpu_execution_reason': '',
-    }
-    _merge_cached_gpu_probe_state(payload, runtime_dir, runtime_meta)
-    _merge_cached_gpu_execution_state(payload, runtime_dir, runtime_meta)
-    return payload
-
-
 def refresh_runtime_capability_snapshot(*, force_refresh: bool = False) -> dict[str, object]:
     return runtime_management_snapshot(force_refresh=force_refresh, verify_gpu=True)
 
@@ -2708,17 +2673,6 @@ def resolve_vector_device(device_name: str | None) -> str:
     if requested == "cuda" and not acceleration.get("cuda_available"):
         refreshed = detect_acceleration(force_refresh=True)
         return "cuda" if refreshed.get("cuda_available") else "cpu"
-    return requested
-
-
-def resolve_vector_device_cached(device_name: str | None) -> str:
-    """Resolve a status-only device value without importing or probing Torch."""
-    requested = (device_name or 'cpu').strip().lower() or 'cpu'
-    cached = dict(_ACCELERATION_CACHE or {})
-    if requested in {'auto', 'gpu'}:
-        return 'cuda' if cached.get('cuda_available') else 'cpu'
-    if requested == 'cuda' and cached and not cached.get('cuda_available'):
-        return 'cpu'
     return requested
 
 def _detect_nvcc_version() -> str:
@@ -2762,12 +2716,6 @@ def runtime_guidance_context(
         runtime_state.setdefault('active_runtime_dir', normalized_runtime_root)
     requested = (device_name or 'auto').strip().lower() or 'auto'
     runtime_name = (runtime_name or 'torch').strip().lower() or 'torch'
-    if requested in {'auto', 'gpu'}:
-        resolved_device = 'cuda' if acceleration.get('cuda_available') else 'cpu'
-    elif requested == 'cuda' and not acceleration.get('cuda_available'):
-        resolved_device = 'cpu'
-    else:
-        resolved_device = requested
     wants_gpu = requested in {'auto', 'gpu', 'cuda'} and bool(acceleration.get('gpu_present'))
     recommended_profile = 'cuda' if wants_gpu else 'cpu'
     app_dir = _application_root_dir()
@@ -2814,7 +2762,7 @@ def runtime_guidance_context(
         f"- 程序内 PyTorch：已加载（{acceleration.get('torch_version') or 'unknown'}）" if acceleration.get('torch_available') else '- 程序内 PyTorch：未加载',
         '- 程序内 sentence-transformers：已加载' if acceleration.get('sentence_transformers_available') else '- 程序内 sentence-transformers：未加载',
         f'- 当前设备选择：{requested}',
-        f'- 当前实际设备：{resolved_device}',
+        f'- 当前实际设备：{resolve_vector_device(requested)}',
         f"- runtime 文件夹：{'已检测到' if runtime_state['runtime_exists'] else '未检测到'}",
         f"- runtime 完整性：{'完整' if runtime_state['runtime_complete'] else '不完整'}",
     ]
@@ -2921,7 +2869,7 @@ def runtime_guidance_context(
         'runtime_pending_components': list(runtime_state.get('runtime_pending_components') or []),
         'cuda_step_status': cuda_step_status,
         'runtime_step_status': runtime_step_status,
-        'resolved_device': resolved_device,
+        'resolved_device': resolve_vector_device(requested),
         'disk_usage': disk_usage,
         'download_usage': download_usage,
         'current_status_lines': current_status_lines,
@@ -3077,8 +3025,9 @@ def _log_thread_stacks(label: str, **context: object) -> None:
 
 
 def _clear_cuda_cache() -> None:
-    torch = sys.modules.get('torch')
-    if torch is None:
+    try:
+        import torch
+    except Exception:
         return
     try:
         if torch.cuda.is_available():
@@ -3694,3 +3643,6 @@ def _wait_for_controls(pause_event: threading.Event | None, cancel_event: thread
         if pause_event is None or not pause_event.is_set():
             return
         time.sleep(0.12)
+
+
+

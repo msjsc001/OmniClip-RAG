@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-v0.4.9-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-quick-start--workflow) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-core-philosophy--priceless-boundaries) [![Downloads](https://img.shields.io/github/downloads/EllisMorrow/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500?style=flat-square)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.8-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-quick-start--workflow) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-core-philosophy--priceless-boundaries) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500?style=flat-square)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md) | [MCP Setup](MCP_SETUP.md) | [Third-Party Notices](THIRD_PARTY_NOTICES.md) | [Website](https://msjsc001.github.io/OmniClip-RAG/)
 
@@ -40,7 +40,7 @@
 > **TL;DR: MCP Quickstart**
 >
 > OmniClip RAG now ships a **read-only local-first MCP server** for searching private Markdown, PDF, and Tika-backed knowledge bases on Windows.
-> Download `OmniClipRAG-MCP-v0.4.9-win64.zip` for manual `stdio` setup or `omniclip-rag-mcp-win-x64-v0.4.9.mcpb` for the official MCP Registry / MCPB path.
+> Download `OmniClipRAG-MCP-v0.4.8-win64.zip` for manual `stdio` setup or `omniclip-rag-mcp-win-x64-v0.4.8.mcpb` for the official MCP Registry / MCPB path.
 > Point your MCP client at `OmniClipRAG-MCP.exe`, then ask the AI to call `omniclip.status` first and `omniclip.search` for the actual retrieval flow. Full details: [MCP_SETUP.md](MCP_SETUP.md).
 
 ---
@@ -176,8 +176,8 @@ The foundation is built as a single portable green EXE. No complicated scripting
 `OmniClip RAG MCP Server` lets MCP-capable AI clients search your local knowledge base through the same read-only retrieval core that powers the desktop app.
 
 From `v0.4.8`, the MCP line is packaged in two parallel distribution forms:
-- `OmniClipRAG-MCP-v0.4.9-win64.zip` for manual file-based setup
-- `omniclip-rag-mcp-win-x64-v0.4.9.mcpb` for the official MCP Registry and MCPB-aware clients
+- `OmniClipRAG-MCP-v0.4.8-win64.zip` for manual file-based setup
+- `omniclip-rag-mcp-win-x64-v0.4.8.mcpb` for the official MCP Registry and MCPB-aware clients
 
 > [!CAUTION]
 > **What You Need First**
@@ -193,7 +193,7 @@ From `v0.4.8`, the MCP line is packaged in two parallel distribution forms:
 
 Since `v0.4.1`, OmniClip RAG keeps a first-class MCP Registry / MCPB line, so clients that support Registry discovery or MCPB installation can use that path first.
 - If your client supports Registry discovery, look for: `io.github.msjsc001/omniclip-rag-mcp`
-- If your client supports MCPB installation, prefer the Release asset: `omniclip-rag-mcp-win-x64-v0.4.9.mcpb`
+- If your client supports MCPB installation, prefer the Release asset: `omniclip-rag-mcp-win-x64-v0.4.8.mcpb`
 
 For the full Registry/MCPB explanation and client-specific setup notes, see [MCP_SETUP.md](MCP_SETUP.md).
 
@@ -205,7 +205,7 @@ If you downloaded the ZIP package manually, or your client does not support the 
 In Jan.ai, create a new MCP server with the following values:
 - `Server Name`: `OmniClip RAG`
 - `Transport Type`: `STDIO`
-- `Command`: the full path to `OmniClipRAG-MCP.exe` (e.g. `D:\Apps\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.9\OmniClipRAG-MCP.exe`)
+- `Command`: the full path to `OmniClipRAG-MCP.exe` (e.g. `D:\Apps\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.8\OmniClipRAG-MCP.exe`)
 - `Arguments`: leave empty
 - `Environment Variables`: leave empty by default
 
@@ -216,7 +216,7 @@ Register the MCP server in OpenClaw's config file (`%USERPROFILE%\.openclaw\open
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.9\\OmniClipRAG-MCP.exe",
+      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.8\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -396,14 +396,6 @@ python launcher_mcp.py --mcp-selfcheck
 <summary><b>📦 Click to expand: V0.4+ Architecture & Release Evolution</b></summary>
 
 <br/>
-
-### V0.4.9 Key Updates
-`v0.4.9` completes the startup-responsiveness work with an isolated Runtime probe, truthful detecting states, staggered background refreshes, and a new high-contrast flat application icon.
-- ⚡ **Runtime detection starts automatically after first paint**: the Start and Runtime pages immediately show a detecting state and update themselves without requiring a manual refresh.
-- 🧵 **Heavy startup work is isolated from the GUI process**: Runtime validation and the initial workspace snapshot run in disposable child processes, while Markdown, extension, and Tika refreshes start in a controlled sequence.
-- 🪶 **First paint avoids unnecessary parser and ML initialization**: the full Tika format catalog is parsed only when the format picker is opened, and lightweight status paths no longer probe vector dependencies.
-- 🧭 **Status labels are more truthful**: an installed but not-yet-verified Runtime is no longer reported as missing, while enabled PDF/Tika sources distinguish unbuilt state from pending verification.
-- ✨ **The application icon is now a simpler flat mark**: the new balanced ring-and-spark design remains recognizable at Windows thumbnail sizes.
 
 ### V0.4.8 Key Updates
 `v0.4.8` is the startup responsiveness and extension-source removal release: packaged GUI startup now yields the first window before heavyweight Runtime-management and extension-summary refresh work finishes, while `拓展格式 > PDF / Tika` source rows now have a true remove action that clears matching extension index/state data and then removes the source directory from extension settings without ever touching the user's original files.

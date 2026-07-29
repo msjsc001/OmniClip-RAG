@@ -2,29 +2,6 @@
 
 ## Unreleased
 
-## V0.4.9 - 2026-07-29
-
-### Added
-
-- Added [RELEASE_NOTES_v0.4.9](releases/RELEASE_NOTES_v0.4.9.md) for the isolated Runtime detection, startup scheduling, status-truth, and application-icon release.
-- Added an explicit `runtime detecting…` state that begins automatically after the first window is shown and updates the Start and Runtime pages without a manual refresh.
-- Added isolated startup worker modes for Runtime validation and the initial workspace status snapshot.
-
-### Changed
-
-- Changed visible app/package/release metadata to `v0.4.9` across the desktop app, MCP line, setup examples, release notes, and local packaging metadata.
-- Changed startup scheduling so Runtime detection finishes before the initial workspace snapshot, followed by staggered Markdown, extension-source, and Tika refreshes.
-- Changed full Tika format-catalog parsing to run only when the format picker is opened instead of during first-window initialization.
-- Changed public GitHub links to the canonical `EllisMorrow/OmniClip-RAG` repository while retaining the existing `io.github.msjsc001/omniclip-rag-mcp` Registry identity for version continuity.
-- Changed the Windows application icon to a simpler flat ring-and-spark design that remains recognizable at small sizes.
-
-### Fixed
-
-- Fixed the remaining post-first-paint pause caused by in-process service initialization, simultaneous background jobs, and startup-time Tika JAR catalog parsing.
-- Fixed the Runtime status race that required users to click `刷新检测` after every launch before the Start page recognized an installed Runtime.
-- Fixed structural Runtime detection reporting complete-but-unverified installations as missing.
-- Fixed PDF/Tika source rows collapsing enabled-but-unbuilt and not-yet-confirmed index states into misleading status labels.
-
 ## V0.4.8 - 2026-04-20
 
 ### Added

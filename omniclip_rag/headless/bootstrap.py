@@ -4,7 +4,6 @@ import logging
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from ..app_logging import configure_file_logging
 from ..config import (
@@ -19,14 +18,9 @@ from ..config import (
 )
 from ..data_root_bootstrap import resolve_and_validate_active_data_root
 from ..runtime_layout import apply_pending_runtime_updates
+from ..service import OmniClipService
 from ..ui_i18n import normalize_language
 
-if TYPE_CHECKING:
-    from ..service import OmniClipService
-
-# Kept as an overridable seam for headless tests while avoiding the service
-# import on the desktop launcher's initial import path.
-OmniClipService = None
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,7 +37,7 @@ class RuntimeBundle:
 @dataclass(slots=True)
 class HeadlessContext:
     bundle: RuntimeBundle
-    service: object
+    service: OmniClipService
     applied_components: tuple[str, ...] = ()
 
     def close(self) -> None:
@@ -110,12 +104,8 @@ def create_headless_context(
     vault_path: str | None = None,
     apply_runtime_updates: bool = True,
 ) -> HeadlessContext:
-    service_cls = OmniClipService
-    if service_cls is None:
-        from ..service import OmniClipService as service_cls
-
     applied_components = tuple(apply_runtime_layout_if_needed(data_root)) if apply_runtime_updates else ()
     bundle = load_runtime_bundle(data_root=data_root, vault_path=vault_path)
     configure_file_logging(bundle.paths, bundle.config)
-    service = service_cls(bundle.config, bundle.paths)
+    service = OmniClipService(bundle.config, bundle.paths)
     return HeadlessContext(bundle=bundle, service=service, applied_components=applied_components)
