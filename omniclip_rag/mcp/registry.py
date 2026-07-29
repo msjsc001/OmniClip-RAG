@@ -9,10 +9,10 @@ REGISTRY_SCHEMA_URL = 'https://static.modelcontextprotocol.io/schemas/2025-12-11
 REGISTRY_SERVER_NAME = 'io.github.msjsc001/omniclip-rag-mcp'
 REGISTRY_TITLE = 'OmniClip RAG'
 REGISTRY_DESCRIPTION = 'Read-only local-first MCP server for private Markdown, PDF, and Tika-backed search on Windows.'
-REGISTRY_REPOSITORY_URL = 'https://github.com/msjsc001/OmniClip-RAG'
-REGISTRY_DOCUMENTATION_URL = 'https://github.com/msjsc001/OmniClip-RAG/blob/main/MCP_SETUP.md'
-REGISTRY_SUPPORT_URL = 'https://github.com/msjsc001/OmniClip-RAG/issues'
-REGISTRY_RELEASES_URL = 'https://github.com/msjsc001/OmniClip-RAG/releases'
+REGISTRY_REPOSITORY_URL = 'https://github.com/EllisMorrow/OmniClip-RAG'
+REGISTRY_DOCUMENTATION_URL = 'https://github.com/EllisMorrow/OmniClip-RAG/blob/main/MCP_SETUP.md'
+REGISTRY_SUPPORT_URL = 'https://github.com/EllisMorrow/OmniClip-RAG/issues'
+REGISTRY_RELEASES_URL = 'https://github.com/EllisMorrow/OmniClip-RAG/releases'
 MCPB_MANIFEST_VERSION = '0.4'
 MCPB_BUNDLE_PREFIX = 'omniclip-rag-mcp-win-x64'
 MCP_EXE_NAME = 'OmniClipRAG-MCP.exe'
@@ -40,7 +40,7 @@ def build_mcpb_manifest(version: str = __version__) -> dict[str, Any]:
         'version': version,
         'description': REGISTRY_DESCRIPTION,
         'author': {
-            'name': 'msjsc001',
+            'name': 'EllisMorrow',
         },
         'repository': {
             'type': 'git',

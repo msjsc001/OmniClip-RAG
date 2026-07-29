@@ -4,15 +4,15 @@
   "title": "OmniClip RAG",
   "description": "Read-only local-first MCP server for private Markdown, PDF, and Tika-backed search on Windows.",
   "repository": {
-    "url": "https://github.com/msjsc001/OmniClip-RAG",
+    "url": "https://github.com/EllisMorrow/OmniClip-RAG",
     "source": "github"
   },
-  "version": "0.4.8",
+  "version": "0.4.9",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/msjsc001/OmniClip-RAG/releases/download/v0.4.8/omniclip-rag-mcp-win-x64-v0.4.8.mcpb",
-      "fileSha256": "a480e802354ed595908cb8785bfaa93d18b67dd1fbd66a45536fe2d62e45e96e",
+      "identifier": "https://github.com/EllisMorrow/OmniClip-RAG/releases/download/v0.4.9/omniclip-rag-mcp-win-x64-v0.4.9.mcpb",
+      "fileSha256": "3b9747ec2824c522e1de99b3551d28576f41002efa60ae26b1637388e70bbbd8",
       "transport": {
         "type": "stdio"
       }

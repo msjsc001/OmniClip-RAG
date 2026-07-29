@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import sys
 import time
 import weakref
 from collections.abc import Callable
@@ -494,9 +495,8 @@ def _resolve_model_device(model: object, fallback_device: str) -> str:
 
 
 def _clear_cuda_cache() -> None:
-    try:
-        import torch
-    except Exception:
+    torch = sys.modules.get('torch')
+    if torch is None:
         return
     try:
         if torch.cuda.is_available():

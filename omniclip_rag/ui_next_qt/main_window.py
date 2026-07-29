@@ -444,8 +444,12 @@ class MainWindow(QtWidgets.QMainWindow):
         replacement.activateWindow()
         QtCore.QTimer.singleShot(0, lambda snap=snapshot, win=replacement: win._apply_window_snapshot(snap))
         if not self._recovery_mode:
-            QtCore.QTimer.singleShot(60, replacement.config_workspace.schedule_device_probe)
-            QtCore.QTimer.singleShot(180, replacement.config_workspace.schedule_initial_status_load)
+            QtCore.QTimer.singleShot(
+                60,
+                lambda workspace=replacement.config_workspace: workspace.schedule_startup_background_tasks(
+                    initial_status_delay_ms=120,
+                ),
+            )
         self.close()
 
     def _save_config_safely(self, config, paths) -> None:
@@ -473,6 +477,10 @@ class MainWindow(QtWidgets.QMainWindow):
             apply_application_style(app, self._theme, tooltips_enabled=bool(enabled))
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        try:
+            self.config_workspace.cancel_startup_prewarm()
+        except Exception:
+            pass
         try:
             self.config_workspace.shutdown_extension_runtimes()
         except Exception:

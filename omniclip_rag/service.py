@@ -35,7 +35,7 @@ from .preflight import estimate_storage_for_vault
 from .runtime_recovery import record_runtime_incident
 from .storage import MetadataStore, _build_fts_query
 from .timing import BuildEtaTracker, append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
-from .vector_index import create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, prepare_local_model_snapshot, release_process_vector_resources, resolve_vector_device, runtime_dependency_issue, runtime_trace_metadata
+from .vector_index import create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, prepare_local_model_snapshot, release_process_vector_resources, resolve_vector_device, resolve_vector_device_cached, runtime_dependency_issue, runtime_trace_metadata
 from .runtime_layout import list_pending_runtime_updates, load_runtime_component_registry, runtime_component_registry_path
 
 try:
@@ -1561,7 +1561,7 @@ class OmniClipService:
         tika_ready = bool(extension_registry.tika_config.enabled and extension_registry.snapshot.tika.index_state == ExtensionIndexState.READY)
         available_query_families = [family for family, enabled in (('markdown', index_ready), ('pdf', pdf_ready), ('tika', tika_ready)) if enabled]
         resolved_vault = str(self.config.vault_dir) if self.config.vault_path else ''
-        query_recommendation = asdict(self._query_runtime_advisor.current_recommendation(resolve_vector_device(self.config.vector_device), getattr(self.config, 'reranker_enabled', False)))
+        query_recommendation = asdict(self._query_runtime_advisor.current_recommendation(resolve_vector_device_cached(self.config.vector_device), getattr(self.config, 'reranker_enabled', False)))
         runtime_state = inspect_runtime_environment()
         vector_status = self._vector_index_status()
         index_meta = self._index_trace_metadata()

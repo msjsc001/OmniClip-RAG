@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-v0.4.8-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/msjsc001/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/msjsc001/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.9-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/EllisMorrow/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.msjsc001/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md) | [第三方许可与声明](THIRD_PARTY_NOTICES.md) | [官网](https://msjsc001.github.io/OmniClip-RAG/)
 
@@ -179,8 +179,8 @@
 - `OmniClipRAG-MCP.exe` 负责安静地在后台给 AI 提供“只读搜索接口”
 
 从 `v0.4.8` 开始，MCP 这条线会同时提供两种分发形态：
-- `OmniClipRAG-MCP-v0.4.8-win64.zip`：给手动配置 `stdio` 的用户
-- `omniclip-rag-mcp-win-x64-v0.4.8.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
+- `OmniClipRAG-MCP-v0.4.9-win64.zip`：给手动配置 `stdio` 的用户
+- `omniclip-rag-mcp-win-x64-v0.4.9.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
 
 > [!CAUTION]
 > **使用前要先做什么？**
@@ -199,7 +199,7 @@
 - 如果客户端已经支持从 Registry 发现 MCP Server，请直接搜索或添加：
   - `io.github.msjsc001/omniclip-rag-mcp`
 - 如果客户端支持官方 MCPB 安装流，请优先使用 Release 中的：
-  - `omniclip-rag-mcp-win-x64-v0.4.8.mcpb`
+  - `omniclip-rag-mcp-win-x64-v0.4.9.mcpb`
 - 更详细的官方发布线、MCPB 与 ZIP 的区别、以及不同客户端的接入说明，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
 
 ### 传统手动路线（Jan.ai / OpenClaw）
@@ -221,7 +221,7 @@
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.8\\OmniClipRAG-MCP.exe",
+      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.9\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -401,6 +401,14 @@ python launcher_mcp.py --mcp-selfcheck
 <summary><b>📦 展开查看 V0.4+ 系列的核心演进（数据底座升级与 MCP 接入）</b></summary>
 
 <br/>
+
+### V0.4.9 重点更新
+`v0.4.9` 完成了启动响应优化的最后一段：Runtime 自动检测被隔离到独立进程，界面会真实显示检测中状态，其他后台刷新按顺序错峰启动，同时换用了更适合 Windows 小尺寸显示的新扁平图标。
+- ⚡ **首屏出现后自动检测 Runtime**：开始页和 Runtime 页会立即显示“检测中”，完成后自动刷新，不需要再手动点“刷新检测”。
+- 🧵 **重型启动工作与 GUI 主进程隔离**：Runtime 验证和初始工作区状态快照放到一次性子进程中，Markdown、扩展来源和 Tika 状态按控制后的顺序启动。
+- 🪶 **首屏不再提前触发无关的解析和机器学习初始化**：完整 Tika 格式目录只在打开格式选择器时解析，轻量状态读取也不再探测向量依赖。
+- 🧭 **状态表达更准确**：结构完整但尚未运行验证的 Runtime 不再误报“未安装”；已启用的 PDF/Tika 来源也会区分“未建库”和“等待确认”。
+- ✨ **应用图标更换为简洁的扁平标记**：新的圆环与星芒图形在 Windows 缩略图尺寸下仍保持清晰识别。
 
 ### V0.4.8 重点更新
 `v0.4.8` 的重点，是把“启动时第一屏卡死”和“扩展来源目录删不掉”这两条真实使用里的高摩擦问题一起收口：发布版现在会先把主窗口画出来，再后台补 Runtime 管理与扩展来源摘要；而 `拓展格式 > PDF / Tika` 里的危险按钮也终于变成真正的“移除来源目录”，会清掉对应扩展索引/状态并把该来源从配置里移除，但不会碰用户原始文件。
