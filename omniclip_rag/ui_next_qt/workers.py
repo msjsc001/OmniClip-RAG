@@ -30,9 +30,14 @@ from ..startup_prewarm import (
     runtime_probe_command,
     runtime_probe_environment,
 )
+from ..watch_subprocess import (
+    watch_reindex_worker_command,
+    watch_reindex_worker_environment,
+)
 
 
 LOGGER = logging.getLogger(__name__)
+_WATCH_REINDEX_PROCESS_LOCK = threading.Lock()
 
 
 def _safe_emit(signal, *args) -> None:
@@ -565,9 +570,16 @@ class WatchWorker(QtCore.QObject):
         self._force_polling = force_polling
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._process: subprocess.Popen | None = None
 
     def stop(self) -> None:
         self._stop_event.set()
+        process = self._process
+        if process is not None and process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -590,6 +602,98 @@ class WatchWorker(QtCore.QObject):
         thread.join(timeout=timeout)
         return not thread.is_alive()
 
+    @staticmethod
+    def _reap_process(process: subprocess.Popen, *, terminate: bool) -> None:
+        if terminate and process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                LOGGER.warning('Live-watch reindex child could not be reaped.')
+        except OSError:
+            pass
+
+    def _run_reindex_child(
+        self,
+        changed: list[str],
+        deleted: list[str],
+        _stop_event: threading.Event,
+    ) -> dict[str, object]:
+        acquired = False
+        while not self._stop_event.is_set():
+            acquired = _WATCH_REINDEX_PROCESS_LOCK.acquire(timeout=0.1)
+            if acquired:
+                break
+        if not acquired:
+            raise BuildCancelledError('cancelled')
+
+        try:
+            with tempfile.TemporaryDirectory(prefix='omniclip-watch-') as temp_dir:
+                temp_root = Path(temp_dir)
+                request_path = temp_root / 'request.json'
+                output_path = temp_root / 'result.json'
+                write_json_atomic(
+                    request_path,
+                    {
+                        'config': config_to_payload(self._config),
+                        'changed': list(changed),
+                        'deleted': list(deleted),
+                    },
+                )
+                kwargs: dict[str, object] = {
+                    'env': watch_reindex_worker_environment(),
+                    'stdin': subprocess.DEVNULL,
+                    'stdout': subprocess.DEVNULL,
+                    'stderr': subprocess.DEVNULL,
+                }
+                creationflags = query_worker_creationflags()
+                if creationflags:
+                    kwargs['creationflags'] = creationflags
+                process: subprocess.Popen | None = None
+                try:
+                    process = subprocess.Popen(
+                        watch_reindex_worker_command(
+                            request_path=request_path,
+                            output_path=output_path,
+                        ),
+                        **kwargs,
+                    )
+                    self._process = process
+                    while process.poll() is None:
+                        if self._stop_event.wait(0.1):
+                            raise BuildCancelledError('cancelled')
+                    return_code = int(process.wait() or 0)
+                    if self._stop_event.is_set():
+                        raise BuildCancelledError('cancelled')
+                    if not output_path.exists():
+                        raise RuntimeError(f'热监听增量子进程异常退出（代码 {return_code}）')
+                    payload = dict(json.loads(output_path.read_text(encoding='utf-8')))
+                    if str(payload.get('status') or '').lower() != 'ok':
+                        message = str(payload.get('error_message') or '').strip()
+                        detail = str(payload.get('traceback') or '').strip()
+                        raise RuntimeError(message or detail or '热监听增量子进程执行失败。')
+                    return payload
+                finally:
+                    if process is not None:
+                        self._reap_process(
+                            process,
+                            terminate=process.poll() is None,
+                        )
+                    if self._process is process:
+                        self._process = None
+        finally:
+            _WATCH_REINDEX_PROCESS_LOCK.release()
+
     def _run(self) -> None:
         service = OmniClipService(self._config, self._paths)
         raw_mode = 'polling' if self._force_polling or not WATCHDOG_AVAILABLE else 'watchdog'
@@ -599,13 +703,12 @@ class WatchWorker(QtCore.QObject):
                 interval=self._interval,
                 force_polling=self._force_polling,
                 on_update=lambda payload: _safe_emit(self.updated, dict(payload)),
+                reindex_runner=self._run_reindex_child,
             )
         except Exception as exc:
             LOGGER.exception('Watch worker crashed unexpectedly.')
             _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
-            # Watchers share process-level model caches with sibling vaults and
-            # queries. Stopping one vault must not release another vault's model.
-            service.close(release_process_resources=False)
+            service.close()
             _safe_emit(self.stopped, raw_mode)
             _safe_emit(self.finished)

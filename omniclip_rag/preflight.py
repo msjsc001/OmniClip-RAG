@@ -8,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import AppConfig, DataPaths
+from .config import AppConfig, DataPaths, is_ignored_vault_relative_path
 from .errors import BuildCancelledError
 from .models import SpaceEstimate
 from .parser import parse_markdown_file
@@ -288,8 +288,15 @@ def _scan_vault(
     files: list[Path] = []
     for root, dirnames, filenames in os.walk(config.vault_dir, topdown=True):
         _wait_for_preflight_controls(pause_event, cancel_event)
-        dirnames[:] = [name for name in dirnames if name not in ignore]
         current_root = Path(root)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not is_ignored_vault_relative_path(
+                (current_root / name).relative_to(config.vault_dir),
+                ignore,
+            )
+        ]
         for filename in filenames:
             _wait_for_preflight_controls(pause_event, cancel_event)
             if not filename.lower().endswith('.md'):

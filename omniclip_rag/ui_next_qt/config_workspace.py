@@ -5830,9 +5830,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._refresh_preflight_notice()
         if self._watch_active:
             try:
-                seconds = float(self.interval_edit.text().strip() or '2.0')
+                seconds = float(self.interval_edit.text().strip() or '10.0')
             except ValueError:
-                seconds = 2.0
+                seconds = 10.0
             active_watchers = max(len(self._md_watch_workers), 1)
             if self._md_watch_stopping:
                 self.watch_summary_label.setText(self._tr('md_watch_stopping_multi', count=len(self._md_watch_stopping)))
@@ -5945,7 +5945,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.runtime_combo.setCurrentText(config.vector_runtime)
             self._refresh_device_options(self._acceleration_payload)
             self._set_device_value(config.vector_device or 'auto')
-            self.interval_edit.setText(str(config.poll_interval_seconds))
+            self.interval_edit.setText(str(getattr(config, 'watch_debounce_seconds', 10.0)))
             self.build_profile_combo.setCurrentText(self._build_profile_label(getattr(config, 'build_resource_profile', 'balanced')))
             self.watch_peak_combo.setCurrentText(self._watch_peak_label(getattr(config, 'watch_resource_peak_percent', 15)))
             self.log_size_spin.setValue(normalize_log_file_size_mb(getattr(config, 'log_file_size_mb', DEFAULT_LOG_FILE_SIZE_MB), DEFAULT_LOG_FILE_SIZE_MB))
@@ -5996,7 +5996,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         paths = build_data_paths(Path(data_root), vault or None)
         if not use_data_root_input or data_root == self._active_data_root():
             paths = materialize_data_directories(paths)
-        interval = float(self.interval_edit.text().strip() or '2.0')
+        interval = float(self.interval_edit.text().strip() or '10.0')
         reranker_batch_cpu = int(self.reranker_batch_cpu_edit.text().strip() or '4')
         reranker_batch_cuda = int(self.reranker_batch_cuda_edit.text().strip() or '8')
         if interval <= 0 or reranker_batch_cpu <= 0 or reranker_batch_cuda <= 0:
@@ -6008,7 +6008,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             data_root=str(paths.global_root),
             query_limit=int(getattr(self._config, 'query_limit', 15) or 15),
             query_score_threshold=float(getattr(self._config, 'query_score_threshold', 35.0) or 35.0),
-            poll_interval_seconds=interval,
+            poll_interval_seconds=float(getattr(self._config, 'poll_interval_seconds', 2.0) or 2.0),
+            watch_debounce_seconds=interval,
             build_resource_profile=self._build_profile_code(self.build_profile_combo.currentText()),
             watch_resource_peak_percent=self._watch_peak_value(self.watch_peak_combo.currentText()),
             log_file_size_mb=normalize_log_file_size_mb(self.log_size_spin.value(), DEFAULT_LOG_FILE_SIZE_MB),
@@ -6489,7 +6490,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.runtime_combo.setCurrentText('torch')
         self._refresh_device_options(self._acceleration_payload)
         self._set_device_value('auto')
-        self.interval_edit.setText('2.0')
+        self.interval_edit.setText('10.0')
         self.build_profile_combo.setCurrentText(self._build_profile_label('balanced'))
         self.watch_peak_combo.setCurrentText(self._watch_peak_label(15))
         self.log_size_spin.setValue(DEFAULT_LOG_FILE_SIZE_MB)
@@ -7753,7 +7754,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if backend_enabled and not is_local_model_ready(config, paths):
             self._append_log(self._tr('md_watch_skip_model_missing', vault=Path(normalized).name or normalized), focus_log=True)
             return False
-        worker = WatchWorker(config=config, paths=paths, interval=config.poll_interval_seconds, force_polling=self.polling_check.isChecked())
+        worker = WatchWorker(
+            config=config,
+            paths=paths,
+            interval=float(getattr(config, 'watch_debounce_seconds', 10.0) or 10.0),
+            force_polling=self.polling_check.isChecked(),
+        )
         worker.updated.connect(lambda payload, v=normalized: self._on_watch_updated_for_vault(v, payload))
         worker.failed.connect(lambda message, traceback_text, v=normalized: self._on_watch_failed_for_vault(v, message, traceback_text))
         worker.stopped.connect(lambda raw_mode, v=normalized: self._on_watch_stopped_for_vault(v, raw_mode))

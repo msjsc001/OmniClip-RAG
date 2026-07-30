@@ -12,7 +12,7 @@ from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import BuildCancelledError, RuntimeDependencyError
 from omniclip_rag.models import RerankOutcome, SearchHit
 from omniclip_rag.retrieval_policy import build_query_profile
-from omniclip_rag.service import OmniClipService
+from omniclip_rag.service import OmniClipService, _VaultEventHandler
 from omniclip_rag.timing import load_build_history
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_ROOT = ROOT / "笔记样本"
@@ -1157,6 +1157,98 @@ class ServiceTests(unittest.TestCase):
             with patch.object(service, '_snapshot_safe', wraps=service._snapshot_safe) as snapshot_mock:
                 service.watch_until_stopped(stop_event, interval=0.01, force_polling=True)
             snapshot_mock.assert_not_called()
+        finally:
+            service.close()
+
+    def test_watchdog_idle_does_not_repeat_full_vault_scans(self) -> None:
+        data_root = ROOT / '.tmp' / 'watchdog_idle_data_test'
+        vault = ROOT / '.tmp' / 'watchdog_idle_vault_test'
+        vault.mkdir(parents=True, exist_ok=True)
+        (vault / 'page.md').write_text('- idle watch\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root), str(vault))
+        config = AppConfig(
+            vault_path=str(vault),
+            data_root=str(data_paths.global_root),
+            vector_backend='disabled',
+        )
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+
+        class FakeObserver:
+            def schedule(self, handler, path, recursive=True):
+                self.handler = handler
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def join(self, timeout=None):
+                pass
+
+            def is_alive(self):
+                return False
+
+        try:
+            service.rebuild_index()
+            stop_event = threading.Event()
+            runner_calls: list[tuple[list[str], list[str]]] = []
+            stopper = threading.Timer(1.2, stop_event.set)
+            with patch('omniclip_rag.service.Observer', FakeObserver), \
+                 patch.object(service, '_snapshot_safe', wraps=service._snapshot_safe) as snapshot_mock:
+                stopper.start()
+                service.watch_until_stopped(
+                    stop_event=stop_event,
+                    interval=0.5,
+                    reindex_runner=lambda changed, deleted, _stop: (
+                        runner_calls.append((list(changed), list(deleted)))
+                        or {'stats': service.store.stats(), 'events': []}
+                    ),
+                )
+                stopper.join(timeout=2.0)
+            self.assertFalse(stopper.is_alive())
+            self.assertEqual(snapshot_mock.call_count, 1)
+            self.assertEqual(runner_calls, [])
+        finally:
+            service.close()
+
+    def test_watchdog_handler_waits_for_configured_quiet_period(self) -> None:
+        vault = ROOT / '.tmp' / 'watchdog_debounce_vault_test'
+        vault.mkdir(parents=True, exist_ok=True)
+        target = vault / 'page.md'
+        target.write_text('- first\n', encoding='utf-8')
+        handler = _VaultEventHandler(vault, set())
+        event = SimpleNamespace(is_directory=False, src_path=str(target), event_type='modified')
+
+        with patch('omniclip_rag.service.time.time', return_value=100.0):
+            handler.on_any_event(event)
+        with patch('omniclip_rag.service.time.time', return_value=109.9):
+            self.assertEqual(handler.pop_due_changes(10.0), ([], []))
+        with patch('omniclip_rag.service.time.time', return_value=110.1):
+            self.assertEqual(handler.pop_due_changes(10.0), (['page.md'], []))
+
+    def test_snapshot_ignores_logseq_generated_history_directories(self) -> None:
+        vault = ROOT / '.tmp' / 'watch_ignore_generated_vault_test'
+        data_root = ROOT / '.tmp' / 'watch_ignore_generated_data_test'
+        (vault / 'pages').mkdir(parents=True, exist_ok=True)
+        (vault / 'pages' / 'kept.md').write_text('- keep\n', encoding='utf-8')
+        for relative in (
+            Path('.stversions') / 'old.md',
+            Path('logseq') / 'bak' / 'old.md',
+            Path('logseq') / '.recycle' / 'old.md',
+            Path('logseq') / '.tine-trash' / 'old.md',
+        ):
+            target = vault / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('- ignore\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        try:
+            snapshot, reason = service._snapshot_safe()
+            self.assertIsNone(reason)
+            self.assertEqual(set(snapshot or {}), {'pages/kept.md'})
         finally:
             service.close()
 

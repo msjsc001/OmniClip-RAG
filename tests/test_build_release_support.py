@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from build import GUI_TARGET, BuildTarget, _prepare_bundled_python
+from build import GUI_TARGET, BuildTarget, _copy_support_files, _prepare_bundled_python
 from omniclip_rag import __version__
 
 
@@ -61,6 +61,28 @@ class BuildReleaseSupportTests(unittest.TestCase):
             _prepare_bundled_python(target)
 
         self.assertTrue((output_dir / 'runtime_support' / 'python' / 'tools' / 'python.exe').exists())
+
+    def test_copy_support_files_excludes_local_python_bytecode(self) -> None:
+        source_dir = TEST_ROOT / 'runtime_support_source'
+        cache_dir = source_dir / '__pycache__'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (source_dir / 'install.py').write_text('print("ok")\n', encoding='utf-8')
+        (cache_dir / 'install.cpython-313.pyc').write_bytes(b'local-build-path')
+        output_dir = TEST_ROOT / 'OmniClipRAG-vtest'
+        target = BuildTarget(
+            exe_basename='OmniClipRAG',
+            spec_path=ROOT / 'OmniClipRAG.spec',
+            output_name='OmniClipRAG-vtest',
+            output_dir=output_dir,
+            release_zip_path=TEST_ROOT / 'OmniClipRAG-vtest.zip',
+            support_files={source_dir: output_dir / 'runtime_support'},
+            protected_runtime_dir=None,
+        )
+
+        _copy_support_files(target)
+
+        self.assertTrue((output_dir / 'runtime_support' / 'install.py').exists())
+        self.assertFalse((output_dir / 'runtime_support' / '__pycache__').exists())
 
     def test_current_release_metadata_uses_package_version(self) -> None:
         project = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))

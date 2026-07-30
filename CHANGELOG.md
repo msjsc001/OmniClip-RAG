@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## V0.4.13 - 2026-07-30
+
+### Added
+
+- Added [RELEASE_NOTES_v0.4.13](releases/RELEASE_NOTES_v0.4.13.md) for the event-driven live-watch and disposable incremental-indexing release.
+- Added a configurable live-watch quiet period, defaulting to 10 seconds, so repeated edits to the same files are merged into one incremental update after editing settles.
+- Added an isolated Markdown watch-reindex worker mode so parsing, embedding, and vector writes run outside the GUI process and release Windows Commit, RAM, and CUDA memory when each batch exits.
+
+### Changed
+
+- Changed visible app/package metadata and MCP setup examples to `v0.4.13`.
+- Changed Markdown `watchdog` mode to use filesystem events after one startup reconciliation instead of recursively rescanning every watched vault on every interval.
+- Changed multi-vault incremental updates to run one isolated semantic worker at a time, preventing two watched vaults from loading duplicate GPU models concurrently.
+- Changed the old “watch interval” setting into an explicit “quiet time before update” control; forced polling remains available only as a compatibility fallback.
+- Changed Markdown vault traversal to exclude generated history and recovery trees such as `.stversions`, `logseq/bak`, `logseq/.recycle`, and `logseq/.tine-trash`.
+
+### Fixed
+
+- Fixed idle live watch continuously consuming CPU, disk I/O, and temporary memory despite receiving no file events.
+- Fixed completed or stopped live-watch sessions retaining large Torch/model allocations in the desktop process.
+- Fixed Logseq backup, version-history, recycle, and conflict files repeatedly triggering unnecessary embedding work.
+
 ## V0.4.12 - 2026-07-30
 
 ### Added

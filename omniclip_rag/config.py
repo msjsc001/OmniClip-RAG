@@ -31,11 +31,38 @@ SUPPORTED_UI_THEMES = {
 UI_SCALE_PERCENT_MIN = 80
 UI_SCALE_PERCENT_MAX = 200
 WATCH_RESOURCE_PEAK_OPTIONS = (5, 10, 15, 20, 30, 40, 50, 60, 70, 80, 90)
+INTERNAL_VAULT_IGNORE_PREFIXES = (
+    '.stversions',
+    'logseq/bak',
+    'logseq/.recycle',
+    'logseq/.tine-trash',
+)
 DEFAULT_LOG_FILE_SIZE_MB = 16
 LOG_FILE_SIZE_MB_MIN = 4
 LOG_FILE_SIZE_MB_MAX = 256
 _INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 _FILE_ATTRIBUTE_DIRECTORY = 0x10
+
+
+def is_ignored_vault_relative_path(
+    relative_path: str | Path,
+    ignore_dirs: list[str] | set[str] | tuple[str, ...],
+) -> bool:
+    normalized = str(relative_path or '').replace('\\', '/').strip('/').lower()
+    if not normalized:
+        return False
+    parts = tuple(part for part in normalized.split('/') if part)
+    ignored_names = {
+        str(item).strip().replace('\\', '/').strip('/').lower()
+        for item in ignore_dirs or ()
+        if str(item).strip()
+    }
+    if any(part in ignored_names for part in parts):
+        return True
+    return any(
+        normalized == prefix or normalized.startswith(prefix + '/')
+        for prefix in INTERNAL_VAULT_IGNORE_PREFIXES
+    )
 
 
 @dataclass(slots=True)
@@ -83,6 +110,7 @@ class AppConfig:
     query_limit: int = 15
     query_score_threshold: float = 35.0
     poll_interval_seconds: float = 2.0
+    watch_debounce_seconds: float = 10.0
     vector_backend: str = "disabled"
     vector_model: str = "BAAI/bge-m3"
     vector_candidate_limit: int = 24

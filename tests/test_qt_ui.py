@@ -1691,6 +1691,30 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_config_workspace_saves_watch_quiet_period_separately_from_polling(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(
+            vault_path=str(SAMPLE_ROOT),
+            data_root=str(paths.global_root),
+            poll_interval_seconds=2.0,
+            watch_debounce_seconds=10.0,
+        )
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace.interval_edit.setText('30')
+            workspace._save_only()
+            loaded = load_config(paths)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.watch_debounce_seconds, 30.0)
+            self.assertEqual(loaded.poll_interval_seconds, 2.0)
+            self.assertEqual(text('zh-CN', 'interval_label'), '停止修改后等待（秒）')
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_config_workspace_ui_theme_choices_include_classic_themes(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)

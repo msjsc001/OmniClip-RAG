@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-v0.4.12-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-quick-start--workflow) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-core-philosophy--priceless-boundaries) [![Downloads](https://img.shields.io/github/downloads/EllisMorrow/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.EllisMorrow/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500?style=flat-square)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.13-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-quick-start--workflow) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-core-philosophy--priceless-boundaries) [![Downloads](https://img.shields.io/github/downloads/EllisMorrow/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.EllisMorrow/omniclip-rag-mcp) [![Chinese Docs](https://img.shields.io/badge/docs-中文说明-f0a500?style=flat-square)](README.zh-CN.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Architecture](ARCHITECTURE.md) | [MCP Setup](MCP_SETUP.md) | [Third-Party Notices](THIRD_PARTY_NOTICES.md) | [Website](https://msjsc001.github.io/OmniClip-RAG/)
 
@@ -39,9 +39,9 @@
 > [!TIP]
 > **TL;DR: MCP Quickstart**
 >
-> For the ordinary Windows desktop app, download the release asset whose name contains `WIN-EXE`, such as `OmniClipRAG-v0.4.12-WIN-EXE.zip`.
+> For the ordinary Windows desktop app, download the release asset whose name contains `WIN-EXE`, such as `OmniClipRAG-v0.4.13-WIN-EXE.zip`.
 > OmniClip RAG now ships a **read-only local-first MCP server** for searching private Markdown, PDF, and Tika-backed knowledge bases on Windows.
-> Download `OmniClipRAG-MCP-v0.4.12-win64.zip` for manual `stdio` setup or `omniclip-rag-mcp-win-x64-v0.4.12.mcpb` for the official MCP Registry / MCPB path.
+> Download `OmniClipRAG-MCP-v0.4.13-win64.zip` for manual `stdio` setup or `omniclip-rag-mcp-win-x64-v0.4.13.mcpb` for the official MCP Registry / MCPB path.
 > Point your MCP client at `OmniClipRAG-MCP.exe`, then ask the AI to call `omniclip.status` first and `omniclip.search` for the actual retrieval flow. Full details: [MCP_SETUP.md](MCP_SETUP.md).
 
 ---
@@ -177,8 +177,8 @@ The foundation is built as a single portable green EXE. No complicated scripting
 `OmniClip RAG MCP Server` lets MCP-capable AI clients search your local knowledge base through the same read-only retrieval core that powers the desktop app.
 
 From `v0.4.8`, the MCP line is packaged in two parallel distribution forms:
-- `OmniClipRAG-MCP-v0.4.12-win64.zip` for manual file-based setup
-- `omniclip-rag-mcp-win-x64-v0.4.12.mcpb` for the official MCP Registry and MCPB-aware clients
+- `OmniClipRAG-MCP-v0.4.13-win64.zip` for manual file-based setup
+- `omniclip-rag-mcp-win-x64-v0.4.13.mcpb` for the official MCP Registry and MCPB-aware clients
 
 > [!CAUTION]
 > **What You Need First**
@@ -195,7 +195,7 @@ From `v0.4.8`, the MCP line is packaged in two parallel distribution forms:
 Since `v0.4.1`, OmniClip RAG keeps a first-class MCP Registry / MCPB line, so clients that support Registry discovery or MCPB installation can use that path first.
 - If your client supports Registry discovery, look for: `io.github.EllisMorrow/omniclip-rag-mcp`
 - The MCPB keeps its legacy internal package identity so existing installations continue to recognize upgrades after the GitHub account rename.
-- If your client supports MCPB installation, prefer the Release asset: `omniclip-rag-mcp-win-x64-v0.4.12.mcpb`
+- If your client supports MCPB installation, prefer the Release asset: `omniclip-rag-mcp-win-x64-v0.4.13.mcpb`
 
 For the full Registry/MCPB explanation and client-specific setup notes, see [MCP_SETUP.md](MCP_SETUP.md).
 
@@ -207,7 +207,7 @@ If you downloaded the ZIP package manually, or your client does not support the 
 In Jan.ai, create a new MCP server with the following values:
 - `Server Name`: `OmniClip RAG`
 - `Transport Type`: `STDIO`
-- `Command`: the full path to `OmniClipRAG-MCP.exe` (e.g. `D:\Apps\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.12\OmniClipRAG-MCP.exe`)
+- `Command`: the full path to `OmniClipRAG-MCP.exe` (e.g. `D:\Apps\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.13\OmniClipRAG-MCP.exe`)
 - `Arguments`: leave empty
 - `Environment Variables`: leave empty by default
 
@@ -218,7 +218,7 @@ Register the MCP server in OpenClaw's config file (`%USERPROFILE%\.openclaw\open
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.12\\OmniClipRAG-MCP.exe",
+      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.13\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -398,6 +398,14 @@ python launcher_mcp.py --mcp-selfcheck
 <summary><b>📦 Click to expand: V0.4+ Architecture & Release Evolution</b></summary>
 
 <br/>
+
+### V0.4.13 Key Updates
+`v0.4.13` makes Markdown live watch genuinely event-driven and moves each incremental parse, embedding, and CUDA workload into a disposable child process.
+- ⚡ **Idle watch no longer rescans every vault**: after startup reconciliation, `watchdog` responds only to real filesystem changes.
+- ⏱️ **Users can set the quiet period after editing**: the 10-second default merges repeated saves into one incremental update.
+- 🧹 **Large resources are released after every batch**: parsing, embedding, and vector writes finish in a disposable process so Windows can reclaim Commit, RAM, and VRAM.
+- 🧵 **Watched vaults do not load duplicate models concurrently**: semantic update batches are serialized to reduce GPU and Windows Commit peaks.
+- 🚫 **Generated Logseq history and recovery trees are ignored**: `.stversions`, backups, recycle trees, and conflict-trash files no longer trigger pointless updates.
 
 ### V0.4.12 Key Updates
 `v0.4.12` replaces the universal Reranker memory floor with a model-aware live resource estimate and makes query progress visible directly beside the Search action.

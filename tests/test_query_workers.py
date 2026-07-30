@@ -5,14 +5,17 @@ import json
 import logging
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.app_logging import _close_fault_handler
+from omniclip_rag.errors import BuildCancelledError
 from omniclip_rag.models import (
     QueryInsights,
     QueryLimitRecommendation,
@@ -35,7 +38,7 @@ from omniclip_rag.ui_next_qt.workers import QueryWorker, WatchWorker
 
 
 class MultiVaultQueryWorkerTests(unittest.TestCase):
-    def test_watch_worker_stop_waits_for_thread_and_preserves_shared_models(self) -> None:
+    def test_watch_worker_stop_waits_for_thread_and_keeps_monitor_lightweight(self) -> None:
         entered = threading.Event()
         close_release_values: list[bool] = []
 
@@ -44,6 +47,7 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
                 pass
 
             def watch_until_stopped(self, stop_event, **kwargs) -> None:
+                self.reindex_runner = kwargs.get('reindex_runner')
                 entered.set()
                 stop_event.wait(2.0)
 
@@ -63,7 +67,45 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
             worker.stop()
             self.assertTrue(worker.wait(timeout=2.0))
         self.assertFalse(worker.is_running())
-        self.assertEqual(close_release_values, [False])
+        self.assertEqual(close_release_values, [True])
+
+    def test_watch_worker_stop_terminates_and_reaps_active_reindex_child(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix='omniclip-watch-stop-test-'))
+        try:
+            worker = WatchWorker(
+                config=AppConfig(vault_path=str(root), data_root=str(root / 'data')),
+                paths=SimpleNamespace(),
+                interval=10.0,
+                force_polling=False,
+            )
+            errors: list[BaseException] = []
+
+            def run_child() -> None:
+                try:
+                    worker._run_reindex_child(['page.md'], [], threading.Event())
+                except BaseException as exc:
+                    errors.append(exc)
+
+            with patch(
+                'omniclip_rag.ui_next_qt.workers.watch_reindex_worker_command',
+                return_value=[sys.executable, '-c', 'import time; time.sleep(30)'],
+            ):
+                thread = threading.Thread(target=run_child)
+                thread.start()
+                deadline = time.monotonic() + 5.0
+                while worker._process is None and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                process = worker._process
+                self.assertIsNotNone(process)
+                worker.stop()
+                thread.join(timeout=5.0)
+            self.assertFalse(thread.is_alive())
+            assert process is not None
+            self.assertIsNotNone(process.poll())
+            self.assertTrue(errors)
+            self.assertIsInstance(errors[0], BuildCancelledError)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_query_worker_subprocess_round_trip_uses_synthetic_vault(self) -> None:
         root = Path(tempfile.mkdtemp(prefix='omniclip-query-worker-test-'))

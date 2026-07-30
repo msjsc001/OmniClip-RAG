@@ -55,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--runtime-probe-worker', action='store_true')
     parser.add_argument('--probe-kind', default='')
     parser.add_argument('--query-worker', action='store_true')
+    parser.add_argument('--watch-reindex-worker', action='store_true')
     parser.add_argument('--request', default='')
     parser.add_argument('--progress', default='')
     args, _unknown = parser.parse_known_args(argv)
@@ -73,6 +74,13 @@ def main(argv: list[str] | None = None) -> int:
             request_path=args.request,
             output_path=args.output,
             progress_path=args.progress,
+        )
+    if bool(args.watch_reindex_worker):
+        from ..watch_subprocess import run_watch_reindex_worker
+
+        return run_watch_reindex_worker(
+            request_path=args.request,
+            output_path=args.output,
         )
     _apply_runtime_layout_if_needed()
     if _should_run_runtime_selfcheck(args):
@@ -792,4 +800,3 @@ def launch_desktop(ui_mode: str = 'next') -> int:
         print('Qt desktop startup failed. Please repair or reinstall the app.', file=sys.stderr, flush=True)
         return 1
     return qt_main()
-

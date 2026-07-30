@@ -42,6 +42,7 @@ FORBIDDEN_BUNDLE_PACKAGE_PREFIXES = (
     'numpy',
     'pandas',
 )
+RELEASE_COPY_IGNORE = shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo')
 _VERSION_PATTERN = re.compile(r"__version__\s*=\s*'([^']+)'")
 
 
@@ -204,7 +205,7 @@ def _copy_support_files(target: BuildTarget) -> None:
         if destination.exists():
             _remove_path(destination)
         if source.is_dir():
-            shutil.copytree(source, destination)
+            shutil.copytree(source, destination, ignore=RELEASE_COPY_IGNORE)
         else:
             shutil.copy2(source, destination)
 

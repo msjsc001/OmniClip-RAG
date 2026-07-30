@@ -21,7 +21,7 @@ from pathlib import Path
 from . import __version__
 from .app_logging import clear_log_files, configure_file_logging
 from .clipboard import copy_text
-from .config import AppConfig, DataPaths, normalize_watch_resource_peak_percent
+from .config import AppConfig, DataPaths, is_ignored_vault_relative_path, normalize_watch_resource_peak_percent
 from .errors import BuildCancelledError, RuntimeDependencyError
 from .extensions.query import ExtensionQueryBroker, normalize_markdown_hit
 from .extensions.registry import ExtensionRegistry
@@ -228,8 +228,15 @@ class OmniClipService:
             return
         ignore = set(self.config.ignore_dirs)
         for root, dirnames, filenames in os.walk(self.config.vault_dir, topdown=True):
-            dirnames[:] = sorted(name for name in dirnames if name not in ignore)
             current_root = Path(root)
+            dirnames[:] = sorted(
+                name
+                for name in dirnames
+                if not is_ignored_vault_relative_path(
+                    (current_root / name).relative_to(self.config.vault_dir),
+                    ignore,
+                )
+            )
             for filename in sorted(filenames):
                 if not filename.lower().endswith('.md'):
                     continue
@@ -1708,6 +1715,7 @@ class OmniClipService:
         interval: float | None = None,
         force_polling: bool = False,
         on_update: Callable[[dict[str, object]], None] | None = None,
+        reindex_runner: Callable[[list[str], list[str], threading.Event], dict[str, object]] | None = None,
     ) -> None:
         if stop_event.is_set():
             return
@@ -1715,14 +1723,28 @@ class OmniClipService:
             self._require_ready_index(action='watch')
             if stop_event.is_set():
                 return
-            self._ensure_vector_runtime_ready()
+            # The desktop watcher delegates semantic work to a disposable child
+            # process. Its monitor process must stay lightweight and must not
+            # import Torch merely to wait for file events.
+            if reindex_runner is None:
+                self._ensure_vector_runtime_ready()
             if stop_event.is_set():
                 return
             interval = interval or self.config.poll_interval_seconds
             if not force_polling and WATCHDOG_AVAILABLE:
-                self._watch_with_watchdog(interval, stop_event, on_update)
+                self._watch_with_watchdog(
+                    interval,
+                    stop_event,
+                    on_update,
+                    reindex_runner=reindex_runner,
+                )
                 return
-            self._watch_with_polling(interval, stop_event, on_update)
+            self._watch_with_polling(
+                interval,
+                stop_event,
+                on_update,
+                reindex_runner=reindex_runner,
+            )
         except BuildCancelledError:
             if stop_event.is_set():
                 return
@@ -1854,14 +1876,24 @@ class OmniClipService:
         interval: float,
         stop_event: threading.Event,
         on_update: Callable[[dict[str, object]], None] | None,
+        *,
+        reindex_runner: Callable[[list[str], list[str], threading.Event], dict[str, object]] | None = None,
     ) -> None:
-        self._watch_loop('polling', interval, stop_event, on_update)
+        self._watch_loop(
+            'polling',
+            interval,
+            stop_event,
+            on_update,
+            reindex_runner=reindex_runner,
+        )
 
     def _watch_with_watchdog(
         self,
         interval: float,
         stop_event: threading.Event,
         on_update: Callable[[dict[str, object]], None] | None,
+        *,
+        reindex_runner: Callable[[list[str], list[str], threading.Event], dict[str, object]] | None = None,
     ) -> None:
         handler = _VaultEventHandler(self.config.vault_dir, set(self.config.ignore_dirs))
         observer = Observer()
@@ -1870,18 +1902,129 @@ class OmniClipService:
         try:
             if stop_event.is_set():
                 return
-            self._watch_loop(
-                'watchdog',
-                interval,
-                stop_event,
-                on_update,
-                event_provider=lambda: handler.pop_due_changes(WATCH_DEBOUNCE_SECONDS),
-            )
+            # One startup reconciliation catches changes made while OmniClip was
+            # closed. After that, watchdog events are the only trigger: an idle
+            # vault does not get recursively rescanned on a timer.
+            current_snapshot, offline_reason = self._snapshot_safe(cancel_event=stop_event)
+            if current_snapshot is None:
+                self._update_watch_state(vault_offline=True, offline_reason=offline_reason or '')
+                _emit_watch_update(
+                    on_update,
+                    'watchdog',
+                    [],
+                    [],
+                    self.store.stats(),
+                    events=[{'kind': 'vault_offline', 'reason': offline_reason or ''}],
+                    note_only=True,
+                )
+            else:
+                self._update_watch_state(vault_offline=False, offline_reason='')
+                changed, deleted = _diff_snapshot(
+                    self.store.fetch_file_manifest(),
+                    current_snapshot,
+                )
+                if changed or deleted or self._watch_state_needs_repair():
+                    stats, events = self._execute_watch_reindex(
+                        changed,
+                        deleted,
+                        stop_event,
+                        reindex_runner=reindex_runner,
+                    )
+                    if not stop_event.is_set():
+                        _emit_watch_update(
+                            on_update,
+                            'watchdog',
+                            changed,
+                            deleted,
+                            stats,
+                            events=events,
+                            note_only=not bool(changed or deleted),
+                        )
+                del current_snapshot
+
+            quiet_seconds = max(float(interval or WATCH_DEBOUNCE_SECONDS), 0.5)
+            check_seconds = min(max(quiet_seconds / 4.0, 0.1), 1.0)
+            while not stop_event.wait(check_seconds):
+                changed, deleted = handler.pop_due_changes(quiet_seconds)
+                if not changed and not deleted:
+                    continue
+                changed, deleted = self._classify_watchdog_paths(changed, deleted)
+                if not changed and not deleted:
+                    continue
+                stats, events = self._execute_watch_reindex(
+                    changed,
+                    deleted,
+                    stop_event,
+                    reindex_runner=reindex_runner,
+                )
+                if stop_event.is_set():
+                    break
+                _emit_watch_update(
+                    on_update,
+                    'watchdog',
+                    changed,
+                    deleted,
+                    stats,
+                    events=events,
+                )
         finally:
             observer.stop()
             observer.join(timeout=5)
             if observer.is_alive():
                 raise RuntimeError('watchdog observer did not stop within 5 seconds')
+
+    def _watch_state_needs_repair(self) -> bool:
+        state = self._read_watch_state() or {}
+        return any(
+            bool(state.get(key))
+            for key in ('dirty_paths', 'dirty_vector_paths', 'dirty_vector_chunk_ids')
+        )
+
+    def _classify_watchdog_paths(
+        self,
+        changed: list[str],
+        deleted: list[str],
+    ) -> tuple[list[str], list[str]]:
+        confirmed_changed: list[str] = []
+        confirmed_deleted = set(deleted)
+        for relative_path in changed:
+            absolute_path = self.config.vault_dir / relative_path
+            try:
+                exists = absolute_path.exists() and absolute_path.is_file()
+            except OSError:
+                exists = False
+            if exists:
+                confirmed_changed.append(relative_path)
+            else:
+                confirmed_deleted.add(relative_path)
+        deleted_set = set(confirmed_deleted)
+        return (
+            sorted(path for path in set(confirmed_changed) if path not in deleted_set),
+            sorted(deleted_set),
+        )
+
+    def _execute_watch_reindex(
+        self,
+        changed: list[str],
+        deleted: list[str],
+        stop_event: threading.Event,
+        *,
+        reindex_runner: Callable[[list[str], list[str], threading.Event], dict[str, object]] | None,
+    ) -> tuple[dict[str, object], list[dict[str, object]]]:
+        if reindex_runner is None:
+            stats = self.reindex_paths(
+                changed,
+                deleted,
+                cancel_event=stop_event,
+            )
+            return stats, []
+        payload = dict(reindex_runner(changed, deleted, stop_event) or {})
+        stats = payload.get('stats')
+        events = payload.get('events')
+        return (
+            dict(stats) if isinstance(stats, dict) else self.store.stats(),
+            [dict(item) for item in events or [] if isinstance(item, dict)],
+        )
 
     def _watch_loop(
         self,
@@ -1890,6 +2033,8 @@ class OmniClipService:
         stop_event: threading.Event,
         on_update: Callable[[dict[str, object]], None] | None,
         event_provider: Callable[[], tuple[list[str], list[str]]] | None = None,
+        *,
+        reindex_runner: Callable[[list[str], list[str], threading.Event], dict[str, object]] | None = None,
     ) -> None:
         previous_snapshot, offline_reason = self._snapshot_safe(cancel_event=stop_event)
         buffer = _LiveWatchBuffer(WATCH_STABLE_FILE_SECONDS, WATCH_DELETE_CONFIRM_SECONDS)
@@ -1914,7 +2059,17 @@ class OmniClipService:
             reconcile_changed, reconcile_deleted = _diff_snapshot(self.store.fetch_file_manifest(), previous_snapshot)
             buffer.record(reconcile_changed, reconcile_deleted, previous_snapshot)
             try:
-                repair_events = self._repair_watch_state(previous_snapshot, cancel_event=stop_event)
+                if reindex_runner is not None and self._watch_state_needs_repair():
+                    _stats, repair_events = self._execute_watch_reindex(
+                        [],
+                        [],
+                        stop_event,
+                        reindex_runner=reindex_runner,
+                    )
+                elif reindex_runner is None:
+                    repair_events = self._repair_watch_state(previous_snapshot, cancel_event=stop_event)
+                else:
+                    repair_events = []
             except BuildCancelledError:
                 raise
             except Exception as exc:
@@ -1957,7 +2112,7 @@ class OmniClipService:
                 now,
             )
 
-            if last_repair_at <= 0.0 or (now - last_repair_at) >= WATCH_REPAIR_INTERVAL_SECONDS:
+            if reindex_runner is None and (last_repair_at <= 0.0 or (now - last_repair_at) >= WATCH_REPAIR_INTERVAL_SECONDS):
                 try:
                     events.extend(self._repair_watch_state(current_snapshot, cancel_event=stop_event))
                 except BuildCancelledError:
@@ -1982,11 +2137,13 @@ class OmniClipService:
                     if deferred_changed or deferred_deleted:
                         buffer.requeue(deferred_changed, deferred_deleted, current_snapshot, now, ready=True)
                 try:
-                    stats = self.reindex_paths(
+                    stats, delegated_events = self._execute_watch_reindex(
                         ready_changed,
                         ready_deleted,
-                        cancel_event=stop_event,
+                        stop_event,
+                        reindex_runner=reindex_runner,
                     )
+                    events.extend(delegated_events)
                 except BuildCancelledError:
                     buffer.requeue(ready_changed, ready_deleted, current_snapshot, now, ready=True)
                     raise
@@ -2051,8 +2208,15 @@ class OmniClipService:
         try:
             for root, dirnames, filenames in os.walk(vault_dir, topdown=True, onerror=onerror):
                 _wait_for_worker_controls(None, cancel_event)
-                dirnames[:] = [name for name in dirnames if name not in ignore]
                 current_root = Path(root)
+                dirnames[:] = [
+                    name
+                    for name in dirnames
+                    if not is_ignored_vault_relative_path(
+                        (current_root / name).relative_to(vault_dir),
+                        ignore,
+                    )
+                ]
                 for filename in filenames:
                     _wait_for_worker_controls(None, cancel_event)
                     if not filename.lower().endswith('.md'):
@@ -2557,7 +2721,7 @@ class _VaultEventHandler(FileSystemEventHandler):
             relative = resolved.relative_to(self.vault_dir).as_posix()
         except ValueError:
             return None
-        if any(part in self.ignore_dirs for part in Path(relative).parts):
+        if is_ignored_vault_relative_path(relative, self.ignore_dirs):
             return None
         return relative
 
