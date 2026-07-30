@@ -1040,6 +1040,13 @@ class QueryWorkspace(QtWidgets.QWidget):
                         scope=scope,
                         error=detail,
                     ))
+                elif reason == 'reranker_system_memory_guard':
+                    messages.append(self._tr(
+                        'query_runtime_requirement_reranker_memory_guard',
+                        scope=scope,
+                    ))
+                    messages.append(self._tr('query_runtime_requirement_reranker_memory_guard_action'))
+                    continue
                 elif reason == 'model_missing':
                     messages.append(self._tr(
                         'query_runtime_requirement_reranker_model_missing',

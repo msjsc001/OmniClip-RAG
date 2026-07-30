@@ -7,12 +7,12 @@
     "url": "https://github.com/EllisMorrow/OmniClip-RAG",
     "source": "github"
   },
-  "version": "0.4.10",
+  "version": "0.4.11",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/EllisMorrow/OmniClip-RAG/releases/download/v0.4.10/omniclip-rag-mcp-win-x64-v0.4.10.mcpb",
-      "fileSha256": "ca77edf039bb04760df15628f5e5eb4e80e2895163f841f2ebea029c31b35ea8",
+      "identifier": "https://github.com/EllisMorrow/OmniClip-RAG/releases/download/v0.4.11/omniclip-rag-mcp-win-x64-v0.4.11.mcpb",
+      "fileSha256": "6eebaa30c1d8d4061f6041ddb48f0c4d591c292ebd6b2a13b70d449de331c2fc",
       "transport": {
         "type": "stdio"
       }

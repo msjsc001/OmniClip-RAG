@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## V0.4.11 - 2026-07-30
+
+### Added
+
+- Added [RELEASE_NOTES_v0.4.11](releases/RELEASE_NOTES_v0.4.11.md) for the Windows Commit-pressure and semantic-query recovery release.
+- Added a CPU semantic-retrieval retry without Reranker before the existing last-resort lexical-only recovery.
+- Added Query Console instructions for resolving low Windows Commit headroom, including closing memory-heavy applications, keeping Auto selected, enabling automatic paging-file management or increasing the paging file, and restarting when needed.
+
+### Changed
+
+- Changed visible app/package/release metadata to `v0.4.11` across the desktop app, MCP line, setup examples, release notes, and packaging metadata.
+- Changed Auto-device Reranker behavior so low Commit headroom skips only second-pass reranking while CUDA vector semantic recall remains active.
+- Changed disposable query workers to leave process-level model reclamation to Windows after the result is safely written.
+- Changed active Reranker release so cached model references are dropped without first migrating large CUDA models back to CPU.
+- Changed the low-Commit Query Console guidance to state that Runtime and model reinstallation are not required.
+
+### Fixed
+
+- Fixed native `c10.dll` access violations caused by moving the Reranker model from CUDA to CPU while a query worker was exiting.
+- Fixed native `torch_cpu.dll` access violations caused by loading the Reranker after the vector model had reduced Windows Commit headroom to an unsafe level.
+- Fixed a semantic-process crash falling directly to lexical-only retrieval even when a clean CPU semantic retry could still complete the query.
+- Fixed low-Commit warnings incorrectly showing generic model repair/reinstallation advice.
+
 ## V0.4.10 - 2026-07-29
 
 ### Added

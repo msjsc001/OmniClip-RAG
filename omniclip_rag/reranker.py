@@ -16,6 +16,7 @@ from .vector_index import (
     _clear_cuda_cache,
     _configure_huggingface_environment,
     _normalize_model_dir_name,
+    _query_memory_pressure_snapshot,
     _runtime_import_environment,
     _torch_cuda_peak_memory,
     _torch_cuda_reset_peak_memory,
@@ -30,6 +31,8 @@ from .vector_index import (
     semantic_query_reranker_failure_message,
     semantic_query_reranker_failure_reason,
 )
+
+RERANKER_MIN_COMMIT_HEADROOM_BYTES = 10 * 1024**3
 
 
 class Reranker(Protocol):
@@ -154,6 +157,28 @@ class CrossEncoderReranker:
                 reranked_count=0,
                 skipped_reason='model_missing',
             )
+        if requested_device in {'auto', 'gpu'} and resolved_device == 'cuda':
+            memory_pressure = _query_memory_pressure_snapshot()
+            commit_headroom = int(memory_pressure.get('commit_headroom_bytes') or 0)
+            if 0 < commit_headroom < RERANKER_MIN_COMMIT_HEADROOM_BYTES:
+                available_gib = commit_headroom / (1024**3)
+                required_gib = RERANKER_MIN_COMMIT_HEADROOM_BYTES / (1024**3)
+                return hits, RerankOutcome(
+                    enabled=True,
+                    applied=False,
+                    model=self.config.reranker_model,
+                    requested_device=requested_device,
+                    resolved_device=resolved_device,
+                    candidate_count=limit,
+                    reranked_count=0,
+                    skipped_reason='system_memory_guard',
+                    fallback_reason='reranker_system_memory_guard',
+                    error_class='LowCommitHeadroom',
+                    error_message=(
+                        f'Windows commit headroom is {available_gib:.2f} GiB; '
+                        f'Auto requires at least {required_gib:.2f} GiB before loading the reranker.'
+                    ),
+                )
 
         started_at = time.perf_counter()
         prefix = list(hits[:limit])
@@ -277,15 +302,9 @@ class CrossEncoderReranker:
         return model
 
     def _release_models(self) -> None:
-        for model in list(self._models.values()):
-            try:
-                inner_model = getattr(model, 'model', None)
-                if callable(getattr(inner_model, 'cpu', None)):
-                    inner_model.cpu()
-                elif callable(getattr(model, 'cpu', None)):
-                    model.cpu()
-            except Exception:
-                continue
+        # Dropping the final references is enough for gc + empty_cache below to
+        # release CUDA memory. Moving a large model to CPU first duplicates its
+        # storage and can terminate the process inside c10.dll under pressure.
         self._models.clear()
 
     def _discard_model(self, device: str) -> None:

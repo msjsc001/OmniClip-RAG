@@ -26,6 +26,7 @@ from omniclip_rag.query_subprocess import (
     query_worker_environment,
     query_result_from_payload,
     query_result_to_payload,
+    run_query_worker,
     write_json_atomic,
 )
 from omniclip_rag.service import OmniClipService
@@ -130,7 +131,7 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
         self.assertEqual(restored.insights.recommendation.preferred, 15)
         self.assertTrue(restored.insights.reranker.applied)
 
-    def test_isolated_worker_recovers_native_crash_with_lexical_process(self) -> None:
+    def test_isolated_worker_recovers_native_crash_with_cpu_semantic_process(self) -> None:
         config = AppConfig(
             vault_path=str(Path('vault').resolve()),
             data_root=str(Path('data-root').resolve()),
@@ -170,12 +171,57 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
         self.assertEqual(len(successes), 1)
         self.assertEqual(failures, [])
         self.assertIn(
+            'semantic_query_process_cpu_recovered',
+            successes[0].result.insights.runtime_warnings,
+        )
+        recovery_request = run_child.call_args_list[1].args[0]
+        self.assertEqual(recovery_request['query_mode'], 'hybrid_no_rerank')
+        self.assertEqual(recovery_request['config']['vector_device'], 'cpu')
+
+    def test_isolated_worker_uses_lexical_process_after_cpu_semantic_crash(self) -> None:
+        config = AppConfig(
+            vault_path=str(Path('vault').resolve()),
+            data_root=str(Path('data-root').resolve()),
+        )
+        worker = QueryWorker(
+            config=config,
+            paths=SimpleNamespace(),
+            query_text='test',
+            copy_result=False,
+            score_threshold=0.0,
+            allowed_families=('markdown',),
+        )
+        result = QueryResult(hits=[], context_text='', insights=QueryInsights())
+        success_payload = {
+            'status': 'ok',
+            'query_text': 'test',
+            'copied': False,
+            'score_threshold': 0.0,
+            'allowed_families': ['markdown'],
+            'result': query_result_to_payload(result),
+            'status_snapshot': {},
+        }
+        successes = []
+        worker.succeeded.connect(successes.append)
+        with patch.object(
+            worker,
+            '_run_child',
+            side_effect=[
+                (None, 'GPU semantic crash'),
+                (None, 'CPU semantic crash'),
+                (success_payload, ''),
+            ],
+        ) as run_child:
+            worker._run()
+
+        self.assertEqual(len(successes), 1)
+        self.assertIn(
             'semantic_query_process_recovered',
             successes[0].result.insights.runtime_warnings,
         )
-        self.assertEqual(run_child.call_args_list[1].args[0]['query_mode'], 'lexical-only')
+        self.assertEqual(run_child.call_args_list[2].args[0]['query_mode'], 'lexical-only')
 
-    def test_multi_vault_query_reuses_reranker_and_releases_models_once(self) -> None:
+    def test_multi_vault_query_worker_keeps_models_until_process_exit(self) -> None:
         vaults = [str(Path('vault-a').resolve()), str(Path('vault-b').resolve())]
         config = AppConfig(
             vault_path=vaults[0],
@@ -234,12 +280,15 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
         with patch('omniclip_rag.query_subprocess.ensure_data_paths', return_value=SimpleNamespace()), \
              patch('omniclip_rag.query_subprocess.OmniClipService', FakeService), \
              patch('omniclip_rag.query_subprocess.release_process_query_resources') as release_mock:
-            result, snapshot = execute_query_request(request)
+            result, snapshot = execute_query_request(
+                request,
+                release_process_resources=False,
+            )
 
         self.assertEqual(len(instances), 2)
         self.assertIs(instances[1].reranker, instances[0].reranker)
         self.assertEqual([service.close_calls for service in instances], [[False], [False]])
-        release_mock.assert_called_once_with()
+        release_mock.assert_not_called()
         self.assertEqual(len(result.hits), 2)
         self.assertEqual(result.insights.runtime_warnings, ('markdown_reranker_unavailable',))
         self.assertEqual(len(result.insights.runtime_requirements), 2)
@@ -248,6 +297,38 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
             {'vault-a', 'vault-b'},
         )
         self.assertEqual(snapshot['mode'], 'multi_vault_fanout')
+
+    def test_query_worker_disables_explicit_process_resource_cleanup(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix='omniclip-query-worker-cleanup-test-'))
+        try:
+            request_path = root / 'request.json'
+            output_path = root / 'result.json'
+            progress_path = root / 'progress.json'
+            write_json_atomic(request_path, {
+                'query_text': 'test',
+                'copy_result': False,
+                'score_threshold': 0.0,
+                'allowed_families': ['markdown'],
+            })
+            result = QueryResult(hits=[], context_text='', insights=QueryInsights())
+            with patch(
+                'omniclip_rag.query_subprocess.execute_query_request',
+                return_value=(result, {}),
+            ) as execute_mock:
+                return_code = run_query_worker(
+                    request_path=str(request_path),
+                    output_path=str(output_path),
+                    progress_path=str(progress_path),
+                )
+
+            self.assertEqual(return_code, 0)
+            self.assertFalse(execute_mock.call_args.kwargs['release_process_resources'])
+            self.assertEqual(
+                json.loads(output_path.read_text(encoding='utf-8'))['status'],
+                'ok',
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == '__main__':

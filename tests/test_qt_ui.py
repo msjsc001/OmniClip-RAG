@@ -411,6 +411,36 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_query_workspace_explains_how_to_resolve_reranker_commit_guard(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._query_runtime_warnings = (
+                'markdown_reranker_unavailable',
+                'markdown_reranker_system_memory_guard',
+            )
+            workspace._query_runtime_requirements = ({
+                'kind': 'reranker',
+                'reason': 'reranker_system_memory_guard',
+                'vault_path': str(SAMPLE_ROOT),
+                'error_class': 'LowCommitHeadroom',
+                'error_message': 'Windows commit headroom is 3.59 GiB.',
+            },)
+            workspace._refresh_query_runtime_hint()
+
+            hint = workspace.query_runtime_hint_label.text()
+            self.assertIn('10 GiB Auto 安全线', hint)
+            self.assertIn('关闭浏览器大量标签页', hint)
+            self.assertIn('自动管理所有驱动器的分页文件大小', hint)
+            self.assertIn('无需重装 Runtime 或模型', hint)
+            self.assertNotIn('修复或重装重排模型', hint)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_query_workspace_update_runtime_clears_stale_runtime_warning_hint(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)

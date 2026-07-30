@@ -149,6 +149,7 @@ def execute_query_request(
     request: dict[str, object],
     *,
     on_progress: Callable[[dict[str, object]], None] | None = None,
+    release_process_resources: bool = True,
 ) -> tuple[QueryResult, dict[str, object]]:
     config = config_from_payload(dict(request.get('config') or {}))
     query_text = str(request.get('query_text') or '').strip()
@@ -282,7 +283,8 @@ def execute_query_request(
             'vault_snapshots': snapshots,
         }
     finally:
-        release_process_query_resources()
+        if release_process_resources:
+            release_process_query_resources()
 
 
 def run_query_worker(*, request_path: str, output_path: str, progress_path: str) -> int:
@@ -295,7 +297,15 @@ def run_query_worker(*, request_path: str, output_path: str, progress_path: str)
 
     try:
         request = json.loads(request_target.read_text(encoding='utf-8'))
-        result, status_snapshot = execute_query_request(request, on_progress=emit_progress)
+        # This worker exits immediately after writing its response. Explicitly
+        # moving or destroying large CUDA models before that write can crash
+        # inside PyTorch native code and discard an otherwise completed query.
+        # Let Windows reclaim the process resources after the response is safe.
+        result, status_snapshot = execute_query_request(
+            request,
+            on_progress=emit_progress,
+            release_process_resources=False,
+        )
         payload = {
             'status': 'ok',
             'query_text': str(request.get('query_text') or ''),

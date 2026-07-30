@@ -97,9 +97,17 @@ class _IsolatedQueryWorker(QtCore.QObject):
             except OSError:
                 pass
 
-    def _request_payload(self, *, query_mode: str = 'hybrid') -> dict[str, object]:
+    def _request_payload(
+        self,
+        *,
+        query_mode: str = 'hybrid',
+        vector_device: str = '',
+    ) -> dict[str, object]:
+        config_payload = config_to_payload(self._config)
+        if str(vector_device or '').strip():
+            config_payload['vector_device'] = str(vector_device).strip()
         return {
-            'config': config_to_payload(self._config),
+            'config': config_payload,
             'query_text': self._query_text,
             'copy_result': self._copy_result,
             'score_threshold': self._score_threshold,
@@ -156,17 +164,27 @@ class _IsolatedQueryWorker(QtCore.QObject):
                     return None, f'查询子进程返回了损坏的结果：{exc}'
             return None, f'查询子进程异常退出（代码 {return_code}）'
 
-    def _emit_success(self, payload: dict[str, object], *, semantic_crash_recovered: bool) -> None:
+    def _emit_success(self, payload: dict[str, object], *, recovery_mode: str = '') -> None:
         result = query_result_from_payload(dict(payload.get('result') or {}))
-        if semantic_crash_recovered:
+        if recovery_mode:
             warnings = tuple(getattr(result.insights, 'runtime_warnings', ()) or ())
+            warning_code = (
+                'semantic_query_process_cpu_recovered'
+                if recovery_mode == 'cpu-semantic'
+                else 'semantic_query_process_recovered'
+            )
+            trace_line = (
+                'GPU 语义查询子进程异常退出，本次已由新的独立进程使用 CPU 语义检索完成。'
+                if recovery_mode == 'cpu-semantic'
+                else '语义查询子进程异常退出，本次已自动使用独立字面检索完成。'
+            )
             result.insights.runtime_warnings = tuple(dict.fromkeys([
                 *warnings,
-                'semantic_query_process_recovered',
+                warning_code,
             ]))
             result.insights.trace_lines = tuple(dict.fromkeys([
                 *tuple(getattr(result.insights, 'trace_lines', ()) or ()),
-                '语义查询子进程异常退出，本次已自动使用独立字面检索完成。',
+                trace_line,
             ]))
         _safe_emit(
             self.succeeded,
@@ -186,7 +204,7 @@ class _IsolatedQueryWorker(QtCore.QObject):
             if self._cancel_event.is_set():
                 return
             if payload is not None and str(payload.get('status') or '').lower() == 'ok':
-                self._emit_success(payload, semantic_crash_recovered=False)
+                self._emit_success(payload)
                 return
             if payload is not None:
                 message = str(payload.get('error_message') or '').strip() or '查询子进程执行失败。'
@@ -194,7 +212,31 @@ class _IsolatedQueryWorker(QtCore.QObject):
                 _safe_emit(self.failed, message, detail)
                 return
 
-            LOGGER.error('%s; retrying in a fresh lexical-only subprocess.', crash_message)
+            LOGGER.error('%s; retrying semantic retrieval on CPU without reranking.', crash_message)
+            _safe_emit(self.progress, {
+                'stage_status': 'semantic_cpu_fallback',
+                'overall_percent': 10.0,
+            })
+            semantic_payload, semantic_crash = self._run_child(
+                self._request_payload(
+                    query_mode='hybrid_no_rerank',
+                    vector_device='cpu',
+                )
+            )
+            if self._cancel_event.is_set():
+                return
+            if (
+                semantic_payload is not None
+                and str(semantic_payload.get('status') or '').lower() == 'ok'
+            ):
+                self._emit_success(semantic_payload, recovery_mode='cpu-semantic')
+                return
+
+            LOGGER.error(
+                '%s; CPU semantic retry also failed (%s); retrying lexical-only.',
+                crash_message,
+                semantic_crash,
+            )
             _safe_emit(self.progress, {
                 'stage_status': 'lexical_fallback',
                 'overall_percent': 10.0,
@@ -208,7 +250,7 @@ class _IsolatedQueryWorker(QtCore.QObject):
                 fallback_payload is not None
                 and str(fallback_payload.get('status') or '').lower() == 'ok'
             ):
-                self._emit_success(fallback_payload, semantic_crash_recovered=True)
+                self._emit_success(fallback_payload, recovery_mode='lexical')
                 return
             if fallback_payload is not None:
                 fallback_message = str(fallback_payload.get('error_message') or '').strip()
@@ -217,7 +259,8 @@ class _IsolatedQueryWorker(QtCore.QObject):
                 fallback_message = fallback_crash
                 fallback_detail = ''
             message = (
-                f'{crash_message}。主程序仍在运行；自动字面检索也未能完成：'
+                f'{crash_message}。CPU 语义重试也未完成（{semantic_crash}）；'
+                '主程序仍在运行；自动字面检索也未能完成：'
                 f'{fallback_message or "未知错误"}'
             )
             _safe_emit(self.failed, message, fallback_detail)
@@ -520,4 +563,3 @@ class WatchWorker(QtCore.QObject):
             service.close()
             _safe_emit(self.stopped, raw_mode)
             _safe_emit(self.finished)
-

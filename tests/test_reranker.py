@@ -152,6 +152,37 @@ class RerankerTests(unittest.TestCase):
         self.assertEqual(second.error_class, 'OSError')
         self.assertEqual(second.error_message, 'model shard cannot be opened')
 
+    def test_auto_skips_reranker_when_commit_headroom_is_below_safe_load_floor(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'memory_guard'))
+        model_dir = paths.cache_dir / 'models' / 'BAAI__bge-reranker-v2-m3'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / 'config.json').write_text('{}', encoding='utf-8')
+        (model_dir / 'pytorch_model.bin').write_text('x', encoding='utf-8')
+        config = AppConfig(
+            vault_path='.',
+            data_root=str(paths.global_root),
+            reranker_enabled=True,
+            vector_device='auto',
+        )
+        loader = Mock()
+        reranker = CrossEncoderReranker(config, paths, loader=loader)
+        hits = [
+            SearchHit(score=40.0, title='A', anchor='A', source_path='a.md', rendered_text='alpha', chunk_id='a'),
+            SearchHit(score=30.0, title='B', anchor='B', source_path='b.md', rendered_text='beta', chunk_id='b'),
+        ]
+        with patch('omniclip_rag.reranker.resolve_vector_device', return_value='cuda'), \
+             patch(
+                 'omniclip_rag.reranker._query_memory_pressure_snapshot',
+                 return_value={'commit_headroom_bytes': 8 * 1024**3},
+             ):
+            reranked, outcome = reranker.rerank('test', hits, 2)
+
+        self.assertEqual(reranked, hits)
+        self.assertFalse(outcome.applied)
+        self.assertEqual(outcome.fallback_reason, 'reranker_system_memory_guard')
+        self.assertEqual(outcome.error_class, 'LowCommitHeadroom')
+        loader.assert_not_called()
+
     def test_reranker_download_guidance_context_builds_commands_and_dirs(self) -> None:
         paths = ensure_data_paths(str(TEST_DATA_ROOT / 'manual_reranker_context'))
         config = AppConfig(vault_path='.', data_root=str(paths.global_root), reranker_enabled=True)
@@ -201,9 +232,11 @@ class RerankerTests(unittest.TestCase):
         paths = ensure_data_paths(str(TEST_DATA_ROOT / 'release_process_reranker'))
         config = AppConfig(vault_path='.', data_root=str(paths.global_root), reranker_enabled=True)
         reranker = CrossEncoderReranker(config, paths, loader=lambda _local_dir, _device: object())
-        reranker._models['cpu'] = object()
+        model = Mock()
+        reranker._models['cuda'] = model
         release_process_reranker_resources(clear_cuda=False)
         self.assertEqual(reranker._models, {})
+        model.cpu.assert_not_called()
 
     def test_default_loader_uses_direct_local_files_only_flag(self) -> None:
         paths = ensure_data_paths(str(TEST_DATA_ROOT))

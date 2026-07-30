@@ -1198,7 +1198,11 @@ class OmniClipService:
 
         reranker_fallback = str(getattr(reranker_outcome, 'fallback_reason', '') or '')
         reranker_skip = str(getattr(reranker_outcome, 'skipped_reason', '') or '')
-        if reranker_fallback in {'reranker_execution_failed', 'reranker_query_circuit_open'} or reranker_skip == 'model_missing':
+        if reranker_fallback in {
+            'reranker_execution_failed',
+            'reranker_query_circuit_open',
+            'reranker_system_memory_guard',
+        } or reranker_skip == 'model_missing':
             requirements.append({
                 'kind': 'reranker',
                 'reason': reranker_fallback or reranker_skip,
@@ -1416,8 +1420,14 @@ class OmniClipService:
             runtime_warnings.append('markdown_reranker_cuda_ready')
         reranker_fallback_reason = str(getattr(rerank_outcome, 'fallback_reason', '') or '')
         reranker_skip_reason = str(getattr(rerank_outcome, 'skipped_reason', '') or '')
-        if reranker_fallback_reason in {'reranker_execution_failed', 'reranker_query_circuit_open'} or reranker_skip_reason == 'model_missing':
+        if reranker_fallback_reason in {
+            'reranker_execution_failed',
+            'reranker_query_circuit_open',
+            'reranker_system_memory_guard',
+        } or reranker_skip_reason == 'model_missing':
             runtime_warnings.append('markdown_reranker_unavailable')
+        if reranker_fallback_reason == 'reranker_system_memory_guard':
+            runtime_warnings.append('markdown_reranker_system_memory_guard')
         if normalized_device_policy == 'require-cuda':
             vector_actual_device = str(vector_execution.get('actual_device') or '')
             reranker_actual_device = str(getattr(rerank_outcome, 'actual_device', '') or '')
