@@ -119,17 +119,24 @@ def render_query_limit_hint(recommendation: dict[str, object] | None, *, current
     )
 
 
-def _query_stage_label(payload: dict[str, object] | None, *, translate: Callable[..., str]) -> str:
+def query_progress_stage_label(
+    payload: dict[str, object] | None,
+    *,
+    translate: Callable[..., str],
+    compact: bool = False,
+) -> str:
     stage_code = str((payload or {}).get('stage_status') or 'prepare').strip().lower() or 'prepare'
-    key = f'query_stage_{stage_code}'
+    key = f"query_stage_{'chip_' if compact else ''}{stage_code}"
     try:
         return translate(key)
     except KeyError:
+        if compact:
+            return query_progress_stage_label(payload, translate=translate)
         return stage_code
 
 
 def query_progress_detail(payload: dict[str, object] | None, *, translate: Callable[..., str]) -> str:
-    stage = _query_stage_label(payload, translate=translate)
+    stage = query_progress_stage_label(payload, translate=translate)
     data = payload or {}
     current = max(0, int(data.get('candidates') or data.get('hits') or 0))
     total = max(0, int(data.get('limit') or 0))

@@ -35,6 +35,15 @@ class _FakeModel:
         return [0.9 - index * 0.1 for index, _pair in enumerate(pairs)]
 
 
+class _SuccessfulFakeModel:
+    def __init__(self, device: str) -> None:
+        self.device = device
+
+    def predict(self, pairs, batch_size=4, show_progress_bar=False):
+        del batch_size, show_progress_bar
+        return [0.9 - index * 0.1 for index, _pair in enumerate(pairs)]
+
+
 class RerankerTests(unittest.TestCase):
     def tearDown(self) -> None:
         if TEST_DATA_ROOT.exists():
@@ -152,8 +161,52 @@ class RerankerTests(unittest.TestCase):
         self.assertEqual(second.error_class, 'OSError')
         self.assertEqual(second.error_message, 'model shard cannot be opened')
 
-    def test_auto_skips_reranker_when_commit_headroom_is_below_safe_load_floor(self) -> None:
-        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'memory_guard'))
+    def test_auto_uses_model_specific_resource_budget_instead_of_fixed_ten_gib(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'adaptive_resource_allow'))
+        model_dir = paths.cache_dir / 'models' / 'BAAI__bge-reranker-v2-m3'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / 'config.json').write_text('{}', encoding='utf-8')
+        (model_dir / 'pytorch_model.bin').write_text('x', encoding='utf-8')
+        config = AppConfig(
+            vault_path='.',
+            data_root=str(paths.global_root),
+            reranker_enabled=True,
+            vector_device='auto',
+        )
+        loader = Mock(side_effect=lambda _local_dir, device: _SuccessfulFakeModel(device))
+        reranker = CrossEncoderReranker(config, paths, loader=loader)
+        hits = [
+            SearchHit(score=40.0, title='A', anchor='A', source_path='a.md', rendered_text='alpha', chunk_id='a'),
+            SearchHit(score=30.0, title='B', anchor='B', source_path='b.md', rendered_text='beta', chunk_id='b'),
+        ]
+        with patch('omniclip_rag.reranker.resolve_vector_device', return_value='cuda'), \
+             patch('omniclip_rag.reranker._reranker_weight_bytes', return_value=2 * 1024**3), \
+             patch(
+                 'omniclip_rag.reranker._query_memory_pressure_snapshot',
+                 return_value={
+                     'commit_headroom_bytes': 6 * 1024**3,
+                     'available_physical_bytes': 10 * 1024**3,
+                 },
+             ), \
+             patch(
+                 'omniclip_rag.reranker._query_cuda_memory_snapshot',
+                 return_value={
+                     'cuda_free_bytes': 6 * 1024**3,
+                     'cuda_total_bytes': 12 * 1024**3,
+                 },
+             ):
+            reranked, outcome = reranker.rerank('test', hits, 2)
+
+        self.assertTrue(outcome.applied)
+        self.assertEqual(len(reranked), 2)
+        self.assertLess(
+            int(outcome.resource_requirements['min_commit_headroom_bytes']),
+            6 * 1024**3,
+        )
+        loader.assert_called_once_with(model_dir, 'cuda')
+
+    def test_auto_skips_reranker_below_model_specific_commit_budget(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'adaptive_resource_guard'))
         model_dir = paths.cache_dir / 'models' / 'BAAI__bge-reranker-v2-m3'
         model_dir.mkdir(parents=True, exist_ok=True)
         (model_dir / 'config.json').write_text('{}', encoding='utf-8')
@@ -171,17 +224,65 @@ class RerankerTests(unittest.TestCase):
             SearchHit(score=30.0, title='B', anchor='B', source_path='b.md', rendered_text='beta', chunk_id='b'),
         ]
         with patch('omniclip_rag.reranker.resolve_vector_device', return_value='cuda'), \
+             patch('omniclip_rag.reranker._reranker_weight_bytes', return_value=2 * 1024**3), \
              patch(
                  'omniclip_rag.reranker._query_memory_pressure_snapshot',
-                 return_value={'commit_headroom_bytes': 8 * 1024**3},
+                 return_value={
+                     'commit_headroom_bytes': 3 * 1024**3,
+                     'available_physical_bytes': 10 * 1024**3,
+                 },
+             ), \
+             patch(
+                 'omniclip_rag.reranker._query_cuda_memory_snapshot',
+                 return_value={
+                     'cuda_free_bytes': 6 * 1024**3,
+                     'cuda_total_bytes': 12 * 1024**3,
+                 },
              ):
             reranked, outcome = reranker.rerank('test', hits, 2)
 
         self.assertEqual(reranked, hits)
         self.assertFalse(outcome.applied)
-        self.assertEqual(outcome.fallback_reason, 'reranker_system_memory_guard')
+        self.assertEqual(outcome.fallback_reason, 'reranker_resource_guard')
         self.assertEqual(outcome.error_class, 'LowCommitHeadroom')
+        self.assertEqual(
+            outcome.resource_snapshot['commit_headroom_bytes'],
+            3 * 1024**3,
+        )
         loader.assert_not_called()
+
+    def test_explicit_cuda_remains_a_user_override_of_auto_resource_guard(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'explicit_cuda_override'))
+        model_dir = paths.cache_dir / 'models' / 'BAAI__bge-reranker-v2-m3'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / 'config.json').write_text('{}', encoding='utf-8')
+        (model_dir / 'pytorch_model.bin').write_text('x', encoding='utf-8')
+        config = AppConfig(
+            vault_path='.',
+            data_root=str(paths.global_root),
+            reranker_enabled=True,
+            vector_device='cuda',
+        )
+        loader = Mock(side_effect=lambda _local_dir, device: _SuccessfulFakeModel(device))
+        reranker = CrossEncoderReranker(config, paths, loader=loader)
+        hits = [
+            SearchHit(score=40.0, title='A', anchor='A', source_path='a.md', rendered_text='alpha', chunk_id='a'),
+            SearchHit(score=30.0, title='B', anchor='B', source_path='b.md', rendered_text='beta', chunk_id='b'),
+        ]
+        with patch('omniclip_rag.reranker.resolve_vector_device', return_value='cuda'), \
+             patch(
+                 'omniclip_rag.reranker._evaluate_reranker_resources',
+                 return_value=Mock(
+                     allowed=False,
+                     current={'commit_headroom_bytes': 1},
+                     required={'min_commit_headroom_bytes': 2},
+                 ),
+             ):
+            reranked, outcome = reranker.rerank('test', hits, 2)
+
+        self.assertTrue(outcome.applied)
+        self.assertEqual(len(reranked), 2)
+        loader.assert_called_once_with(model_dir, 'cuda')
 
     def test_reranker_download_guidance_context_builds_commands_and_dirs(self) -> None:
         paths = ensure_data_paths(str(TEST_DATA_ROOT / 'manual_reranker_context'))

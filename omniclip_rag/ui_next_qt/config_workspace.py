@@ -197,6 +197,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._md_status_worker: FunctionWorker | None = None
         self._md_watch_workers: dict[str, WatchWorker] = {}
         self._md_watch_modes: dict[str, str] = {}
+        self._md_watch_stopping: set[str] = set()
         self._md_batch_queue: list[dict[str, object]] = []
         self._md_batch_results: list[dict[str, object]] = []
         self._md_batch_snapshot: tuple[str, ...] = ()
@@ -229,6 +230,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._extension_active_source_key: tuple[str, str] | None = None
         self._extension_cancel_event: threading.Event | None = None
         self._extension_summary_worker: FunctionWorker | None = None
+        self._extension_summary_active_reload_state = False
+        self._extension_summary_refresh_pending = False
+        self._extension_summary_pending_context: tuple[AppConfig, Any, bool] | None = None
+        self._extension_summary_request_id = 0
         self._extension_resume_prompted: set[str] = set()
         self._extension_global_progress: dict[str, object] | None = None
         self._extension_source_progress: dict[tuple[str, str], str] = {}
@@ -1618,6 +1623,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         return ready
 
     def _md_vault_status_text(self, vault: str, snapshot: dict[str, object] | None) -> str:
+        if normalize_vault_path(vault) in self._md_watch_stopping:
+            return self._tr('md_vault_state_watch_stopping')
         if normalize_vault_path(vault) == normalize_vault_path(self.vault_edit.text().strip()):
             if self._watch_active and vault in self._md_watch_workers:
                 return self._tr('md_vault_state_watching')
@@ -1651,18 +1658,27 @@ class ConfigWorkspace(QtWidgets.QWidget):
         layout.setSpacing(6)
         normalized = normalize_vault_path(vault)
 
-        def _add_button(text_key: str, variant: str, handler) -> None:
+        def _add_button(text_key: str, variant: str, handler, *, enabled: bool = True) -> None:
             button = QtWidgets.QPushButton(self._tr(text_key), container)
             self._set_button_variant(button, variant)
             button.setMinimumHeight(scaled(self._theme, 28, minimum=26))
             button.clicked.connect(handler)
-            button.setEnabled(not self._busy)
+            button.setEnabled(not self._busy and enabled)
             layout.addWidget(button)
 
         _add_button('md_vault_row_preflight', 'secondary', lambda _checked=False, v=normalized: self._run_markdown_preflight_for_vault(v))
         _add_button('md_vault_row_rebuild', 'primary', lambda _checked=False, v=normalized: self._run_markdown_rebuild_for_vault(v))
-        watch_key = 'md_vault_row_watch_stop' if normalized in self._md_watch_workers else 'md_vault_row_watch_start'
-        _add_button(watch_key, 'secondary', lambda _checked=False, v=normalized: self._toggle_watch_for_vault(v))
+        watch_stopping = normalized in self._md_watch_stopping
+        if watch_stopping:
+            watch_key = 'md_vault_row_watch_stopping'
+        else:
+            watch_key = 'md_vault_row_watch_stop' if normalized in self._md_watch_workers else 'md_vault_row_watch_start'
+        _add_button(
+            watch_key,
+            'secondary',
+            lambda _checked=False, v=normalized: self._toggle_watch_for_vault(v),
+            enabled=not watch_stopping,
+        )
         _add_button('remove_saved_vault', 'danger', lambda _checked=False, v=normalized: self._remove_vault_path(v))
         layout.addStretch(1)
         return container
@@ -1741,10 +1757,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         current_active = normalize_vault_path(self.vault_edit.text().strip())
         removed_current = normalized.lower() == current_active.lower()
         if normalized in self._md_watch_workers:
-            worker = self._md_watch_workers.pop(normalized)
-            worker.stop()
-            self._md_watch_modes.pop(normalized, None)
-            self._refresh_markdown_watch_state()
+            self._stop_watch_for_vault(normalized)
         remaining = [item for item in self._saved_vaults if normalize_vault_path(item).lower() != normalized.lower()]
         next_active = current_active
         if removed_current:
@@ -3293,11 +3306,29 @@ class ConfigWorkspace(QtWidgets.QWidget):
             tika_paths=tika_paths,
         )
 
-    def _request_extension_source_summaries_refresh(self, config: AppConfig | None = None, paths=None) -> None:
-        if self._extension_summary_worker is not None:
-            return
+    def _request_extension_source_summaries_refresh(
+        self,
+        config: AppConfig | None = None,
+        paths=None,
+        *,
+        reload_state: bool = False,
+    ) -> None:
         config_value = config or self._config
         paths_value = paths or self._paths
+        self._extension_summary_request_id += 1
+        request_id = self._extension_summary_request_id
+        if self._extension_summary_worker is not None:
+            self._extension_summary_refresh_pending = True
+            pending_reload_state = bool(
+                reload_state
+                or self._extension_summary_active_reload_state
+                or (
+                    self._extension_summary_pending_context is not None
+                    and self._extension_summary_pending_context[2]
+                )
+            )
+            self._extension_summary_pending_context = (config_value, paths_value, pending_reload_state)
+            return
         pdf_paths = [
             normalize_vault_path(source.path)
             for source in self._extension_state.pdf_config.source_directories
@@ -3308,30 +3339,108 @@ class ConfigWorkspace(QtWidgets.QWidget):
             for source in self._extension_state.tika_config.source_directories
             if normalize_vault_path(source.path)
         ]
+
+        def build_payload() -> dict[str, object]:
+            state = None
+            if reload_state:
+                registry = ExtensionRegistry()
+                state = registry.load(paths_value)
+                state = self._normalize_extension_registry_state(
+                    state,
+                    paths_value,
+                    getattr(config_value, 'vault_path', ''),
+                )
+                registry.save(paths_value, state)
+                active_pdf_paths = [
+                    normalize_vault_path(source.path)
+                    for source in state.pdf_config.source_directories
+                    if normalize_vault_path(source.path)
+                ]
+                active_tika_paths = [
+                    normalize_vault_path(source.path)
+                    for source in state.tika_config.source_directories
+                    if normalize_vault_path(source.path)
+                ]
+            else:
+                active_pdf_paths = pdf_paths
+                active_tika_paths = tika_paths
+            return {
+                'request_id': request_id,
+                'state': state,
+                'summaries': _build_extension_source_summaries_payload(
+                    config_value,
+                    paths_value,
+                    pdf_paths=active_pdf_paths,
+                    tika_paths=active_tika_paths,
+                ),
+            }
+
         worker = FunctionWorker(
-            fn=lambda: _build_extension_source_summaries_payload(
-                config_value,
-                paths_value,
-                pdf_paths=pdf_paths,
-                tika_paths=tika_paths,
-            )
+            fn=build_payload
         )
         self._extension_summary_worker = worker
+        self._extension_summary_active_reload_state = reload_state
         worker.succeeded.connect(self._handle_extension_source_summaries_success)
-        worker.failed.connect(self._handle_extension_source_summaries_failure)
-        worker.finished.connect(self._on_extension_source_summaries_finished)
+        worker.failed.connect(
+            lambda message, traceback_text, active_request_id=request_id:
+                self._handle_extension_source_summaries_failure(active_request_id, message, traceback_text)
+        )
+        worker.finished.connect(
+            lambda active_request_id=request_id:
+                self._on_extension_source_summaries_finished(active_request_id)
+        )
         worker.start()
 
     def _handle_extension_source_summaries_success(self, payload: object) -> None:
-        self._extension_source_summaries = dict(payload or {}) if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return
+        request_id = int(payload.get('request_id') or 0)
+        if request_id and request_id != self._extension_summary_request_id:
+            return
+        state = payload.get('state')
+        if isinstance(state, ExtensionRegistryState):
+            self._extension_state = state
+            self._extension_state_loaded = True
+        summaries = payload.get('summaries') if 'summaries' in payload else payload
+        self._extension_source_summaries = dict(summaries or {}) if isinstance(summaries, dict) else {}
         if self._extension_controls_alive() and self._extension_state_loaded:
             self._apply_extension_state_to_controls()
+            if isinstance(state, ExtensionRegistryState):
+                self._schedule_tika_runtime_refresh()
 
-    def _handle_extension_source_summaries_failure(self, message: str, _traceback_text: str) -> None:
+    def _handle_extension_source_summaries_failure(
+        self,
+        request_id: int,
+        message: str,
+        _traceback_text: str,
+    ) -> None:
+        if request_id != self._extension_summary_request_id:
+            return
         LOGGER.warning('Background extension source summary refresh failed: %s', message)
 
-    def _on_extension_source_summaries_finished(self) -> None:
+    def _on_extension_source_summaries_finished(self, _request_id: int = 0) -> None:
         self._extension_summary_worker = None
+        self._extension_summary_active_reload_state = False
+        if not self._extension_summary_refresh_pending:
+            return
+        context = self._extension_summary_pending_context
+        self._extension_summary_refresh_pending = False
+        self._extension_summary_pending_context = None
+        if context is None:
+            return
+        config, paths, reload_state = context
+        self._request_extension_source_summaries_refresh(
+            config,
+            paths,
+            reload_state=reload_state,
+        )
+
+    def _request_extension_state_reload(self) -> None:
+        self._request_extension_source_summaries_refresh(
+            self._config,
+            self._paths,
+            reload_state=True,
+        )
 
     def _extension_source_stage_text(self, pipeline: str, stage_status: str) -> str:
         normalized = str(stage_status or '').strip().lower()
@@ -3483,13 +3592,13 @@ class ConfigWorkspace(QtWidgets.QWidget):
         remote_busy = bool(self._extension_state.snapshot.pdf.build_in_progress or self._extension_state.snapshot.tika.build_in_progress)
         runtime = self._extension_state.snapshot.tika.runtime
         current_pipeline = self._current_extension_pipeline()
-        current_build_state = read_extension_build_state(self._extension_paths_for_pipeline(current_pipeline))
+        current_status = self._extension_status_for_pipeline(current_pipeline)
         self.ext_preflight_button.setEnabled(not busy and not remote_busy)
         self.ext_rebuild_button.setEnabled(not busy and not remote_busy)
         self.ext_stop_button.setEnabled(busy or runtime.running or runtime.starting)
         self.ext_open_logs_button.setEnabled(True)
         self.ext_open_diagnostics_button.setEnabled(True)
-        self.ext_clear_resume_button.setEnabled(not busy and isinstance(current_build_state, dict))
+        self.ext_clear_resume_button.setEnabled(not busy and bool(getattr(current_status, 'resume_available', False)))
         for buttons in self._extension_source_buttons.values():
             for button in buttons:
                 button.setEnabled(not busy and not remote_busy and bool(button.property('row_enabled')))
@@ -3598,7 +3707,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             key for key in self._extension_resume_prompted
             if f':{pipeline}:' not in key
         }
-        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        self._request_extension_state_reload()
         self.statusMessageChanged.emit(self._tr('extensions_build_state_cleared', pipeline=self._extension_pipeline_label(pipeline)))
         self._append_log(self._tr('extensions_build_state_cleared', pipeline=self._extension_pipeline_label(pipeline)))
 
@@ -3644,7 +3753,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             'close_safe': True,
         }
         self._refresh_extension_global_progress_ui()
-        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        self._request_extension_state_reload()
         self.statusMessageChanged.emit(message or self._tr('extensions_task_failed_generic'))
         self._append_log(traceback_text.strip() or message, focus_log=True)
 
@@ -3686,7 +3795,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             'close_safe': True,
         }
         self._refresh_extension_global_progress_ui()
-        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        self._request_extension_state_reload()
         if pipeline == 'tika':
             message = self._tr(
                 'extensions_tika_preflight_done',
@@ -3761,12 +3870,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 'recent_issue': self._tr('extensions_status_resumable'),
             }
             self._refresh_extension_global_progress_ui()
-            self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+            self._request_extension_state_reload()
             message = self._tr('extensions_task_cancelled_resume_available' if bool(getattr(report, 'resume_available', False)) else 'extensions_task_cancelled')
             self.statusMessageChanged.emit(message)
             self._append_log(message)
             return
-        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        self._request_extension_state_reload()
         if pipeline == 'tika':
             indexed_files = int(getattr(report, 'indexed_files', 0) or 0)
             skipped_files = int(getattr(report, 'skipped_files', 0) or 0)
@@ -4022,7 +4131,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         source_path = normalize_vault_path(str(payload.get('source_path') or ''))
         action = str(payload.get('action') or 'rebuild')
         report = payload.get('report')
-        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        self._request_extension_state_reload()
         if bool(getattr(report, 'cancelled', False)):
             message = self._tr('extensions_task_cancelled_resume_available' if bool(getattr(report, 'resume_available', False)) else 'extensions_task_cancelled')
             self._set_extension_source_progress(pipeline, source_path, message)
@@ -4264,7 +4373,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         release_extension_build_lease(build_paths, build_id=build_id)
         self.statusMessageChanged.emit(self._tr('extensions_resume_discarded', pipeline=self._extension_pipeline_label(pipeline)))
         self._append_log(self._tr('extensions_resume_discarded', pipeline=self._extension_pipeline_label(pipeline)))
-        self._load_extension_state(self._paths, getattr(self._config, 'vault_path', ''))
+        self._request_extension_state_reload()
 
     def _extension_resume_phase_label(self, pipeline: str, phase: str) -> str:
         normalized = str(phase or '').strip().lower()
@@ -4778,13 +4887,23 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.statusMessageChanged.emit(self._tr('extensions_stop_noop'))
 
     def shutdown_extension_runtimes(self) -> None:
-        for worker in list(self._md_watch_workers.values()):
+        workers = list(self._md_watch_workers.values())
+        for worker in workers:
             try:
                 worker.stop()
             except Exception:
                 pass
+        deadline = time.monotonic() + 8.0
+        for worker in workers:
+            try:
+                remaining = max(deadline - time.monotonic(), 0.0)
+                if not worker.wait(timeout=remaining):
+                    LOGGER.warning('Live-watch worker did not exit during application shutdown.')
+            except Exception:
+                LOGGER.debug('Unable to wait for live-watch worker during shutdown.', exc_info=True)
         self._md_watch_workers.clear()
         self._md_watch_modes.clear()
+        self._md_watch_stopping.clear()
         self._refresh_markdown_watch_state()
         try:
             self._tika_runtime_manager.shutdown()
@@ -4900,17 +5019,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
 
     def _persist_extension_state(self, *, announce_key: str | None = None, sync_tika_sidecar: bool = True) -> None:
         try:
-            self._extension_state = self._normalize_extension_registry_state(
-                self._extension_state,
-                self._paths,
-                getattr(self._config, 'vault_path', ''),
-            )
             self._extension_registry.save(self._paths, self._extension_state)
         except OSError as exc:
             QtWidgets.QMessageBox.critical(self, self._tr('save_failed_title'), str(exc))
             return
-        self._refresh_extension_source_summaries(self._config, self._paths)
         self._apply_extension_state_to_controls()
+        self._request_extension_source_summaries_refresh(self._config, self._paths)
         if announce_key:
             self.statusMessageChanged.emit(self._tr(announce_key))
         if sync_tika_sidecar:
@@ -5720,7 +5834,9 @@ class ConfigWorkspace(QtWidgets.QWidget):
             except ValueError:
                 seconds = 2.0
             active_watchers = max(len(self._md_watch_workers), 1)
-            if active_watchers > 1:
+            if self._md_watch_stopping:
+                self.watch_summary_label.setText(self._tr('md_watch_stopping_multi', count=len(self._md_watch_stopping)))
+            elif active_watchers > 1:
                 self.watch_summary_label.setText(self._tr('md_watch_running_multi', count=active_watchers, seconds=seconds))
             else:
                 self.watch_summary_label.setText(self._tr('watch_running', mode=self._watch_mode_label(self._watch_mode), seconds=seconds))
@@ -5787,7 +5903,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _on_preflight_notice_link(self, _target: str) -> None:
         self.showQueryLogRequested.emit()
     def _refresh_watch_button(self) -> None:
-        self.watch_button.setText(self._tr('watch_stop') if self._watch_active else self._tr('watch_start'))
+        if self._watch_stopping:
+            self.watch_button.setText(self._tr('status_watch_stopping'))
+        else:
+            self.watch_button.setText(self._tr('watch_stop') if self._watch_active else self._tr('watch_start'))
         self._set_button_variant(self.watch_button, 'danger' if self._watch_active else 'primary')
         ready_vaults = self._selected_markdown_ready_vaults()
         index_state = self._current_index_state()
@@ -7608,10 +7727,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
             return service.status_snapshot()
         self._start_service_task('clear_button', runner, self._after_clear, require_vault=True)
     def _refresh_markdown_watch_state(self) -> None:
+        self._md_watch_stopping.intersection_update(self._md_watch_workers)
         self._watch_active = bool(self._md_watch_workers)
         self._watch_worker = next(iter(self._md_watch_workers.values()), None)
-        if not self._watch_active:
-            self._watch_stopping = False
+        self._watch_stopping = bool(self._md_watch_stopping)
         self._refresh_watch_button()
         self._emit_query_block_state()
 
@@ -7640,25 +7759,31 @@ class ConfigWorkspace(QtWidgets.QWidget):
         worker.stopped.connect(lambda raw_mode, v=normalized: self._on_watch_stopped_for_vault(v, raw_mode))
         worker.finished.connect(lambda v=normalized: self._on_watch_finished_for_vault(v))
         self._md_watch_modes[normalized] = 'polling' if self.polling_check.isChecked() or not WATCHDOG_AVAILABLE else 'watchdog'
+        self._md_watch_stopping.discard(normalized)
         self._md_watch_workers[normalized] = worker
         worker.start()
         self._refresh_markdown_watch_state()
+        self._refresh_md_vault_table()
         self._append_log(self._tr('md_watch_started_for_vault', vault=Path(normalized).name or normalized, mode=self._watch_mode_label(self._md_watch_modes.get(normalized, 'watchdog'))))
         return True
 
     def _stop_watch_for_vault(self, vault: str) -> bool:
         normalized = normalize_vault_path(vault)
         worker = self._md_watch_workers.get(normalized)
-        if worker is None:
+        if worker is None or normalized in self._md_watch_stopping:
             return False
+        self._md_watch_stopping.add(normalized)
         worker.stop()
-        self._watch_stopping = True
         self._append_log(self._tr('md_watch_stop_requested_for_vault', vault=Path(normalized).name or normalized))
         self._refresh_markdown_watch_state()
+        self._refresh_md_vault_table()
         return True
 
     def _toggle_watch_for_vault(self, vault: str) -> None:
-        if normalize_vault_path(vault) in self._md_watch_workers:
+        normalized = normalize_vault_path(vault)
+        if normalized in self._md_watch_stopping:
+            return
+        if normalized in self._md_watch_workers:
             self._stop_watch_for_vault(vault)
             return
         if self._busy:
@@ -7667,16 +7792,18 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self._start_watch_for_vault(vault)
 
     def _toggle_watch(self) -> None:
-        selected_vaults = self._selected_markdown_vaults()
-        if not selected_vaults:
-            QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), self._tr('md_vault_query_empty'))
-            return
-        if all(vault in self._md_watch_workers for vault in selected_vaults):
+        # The global button represents all actual listeners, regardless of any
+        # selection changes made after those listeners were started.
+        if self._md_watch_workers:
             stopped_any = False
-            for vault in selected_vaults:
+            for vault in list(self._md_watch_workers):
                 stopped_any = self._stop_watch_for_vault(vault) or stopped_any
             if stopped_any:
                 self.statusMessageChanged.emit(self._tr('status_watch_stopping'))
+            return
+        selected_vaults = self._selected_markdown_vaults()
+        if not selected_vaults:
+            QtWidgets.QMessageBox.information(self, self._tr('not_ready_title'), self._tr('md_vault_query_empty'))
             return
         if not self._guard_pending_data_root_switch(title_key='watch_start_failed_title'):
             return
@@ -7695,8 +7822,13 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _on_watch_updated_for_vault(self, vault: str, payload: object) -> None:
         if not isinstance(payload, dict):
             return
-        stats = payload.get('stats', {})
         normalized = normalize_vault_path(vault)
+        # Queued Qt signals can arrive after the user requested a stop. The
+        # underlying batch is either cancelled or journaled for later repair,
+        # so do not present that stale signal as continued live watching.
+        if normalized in self._md_watch_stopping:
+            return
+        stats = payload.get('stats', {})
         source_snapshot = dict(self._md_vault_snapshots.get(normalized) or {})
         source_snapshot['stats'] = stats
         self._md_vault_snapshots[normalized] = source_snapshot
@@ -7731,15 +7863,22 @@ class ConfigWorkspace(QtWidgets.QWidget):
         normalized = normalize_vault_path(vault)
         self._md_watch_workers.pop(normalized, None)
         self._md_watch_modes.pop(normalized, None)
+        self._md_watch_stopping.discard(normalized)
         self._refresh_markdown_watch_state()
-        self.watch_summary_label.setText(self._tr('watch_stopped', mode=self._watch_mode_label(raw_mode)))
-        self.statusMessageChanged.emit(self._tr('status_watch_stopped'))
         self._append_log(self._tr('md_watch_stopped_for_vault', vault=Path(normalized).name or normalized))
         self._refresh_status_summary(self._status_snapshot)
+        if self._watch_active:
+            self.statusMessageChanged.emit(self._tr('status_watch_stopping') if self._watch_stopping else self._tr('status_watch_running'))
+        else:
+            self.watch_summary_label.setText(self._tr('watch_stopped', mode=self._watch_mode_label(raw_mode)))
+            self.statusMessageChanged.emit(self._tr('status_watch_stopped'))
+
     def _on_watch_finished_for_vault(self, vault: str) -> None:
         normalized = normalize_vault_path(vault)
-        if normalized not in self._md_watch_workers:
-            self._refresh_markdown_watch_state()
+        self._md_watch_workers.pop(normalized, None)
+        self._md_watch_modes.pop(normalized, None)
+        self._md_watch_stopping.discard(normalized)
+        self._refresh_markdown_watch_state()
         self._refresh_status_summary(self._status_snapshot)
     def _after_preflight(self, payload) -> None:
         report = payload['report']

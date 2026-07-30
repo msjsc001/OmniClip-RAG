@@ -97,6 +97,27 @@ class _IsolatedQueryWorker(QtCore.QObject):
             except OSError:
                 pass
 
+    @staticmethod
+    def _reap_child_process(process: subprocess.Popen, *, terminate: bool) -> None:
+        if terminate and process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                LOGGER.warning('Query child process could not be reaped after termination.')
+        except OSError:
+            pass
+
     def _request_payload(
         self,
         *,
@@ -136,33 +157,39 @@ class _IsolatedQueryWorker(QtCore.QObject):
             creationflags = query_worker_creationflags()
             if creationflags:
                 kwargs['creationflags'] = creationflags
-            self._process = subprocess.Popen(command, **kwargs)
-            last_progress_text = ''
-            while self._process.poll() is None:
-                if self._cancel_event.is_set():
-                    self.cancel()
+            process: subprocess.Popen | None = None
+            try:
+                process = subprocess.Popen(command, **kwargs)
+                self._process = process
+                last_progress_text = ''
+                while process.poll() is None:
+                    if self._cancel_event.is_set():
+                        self.cancel()
+                        return None, '查询已取消'
+                    if progress_path.exists():
+                        try:
+                            progress_text = progress_path.read_text(encoding='utf-8')
+                            if progress_text and progress_text != last_progress_text:
+                                last_progress_text = progress_text
+                                _safe_emit(self.progress, dict(json.loads(progress_text)))
+                        except (OSError, json.JSONDecodeError):
+                            pass
+                    time.sleep(0.1)
+                return_code = int(process.wait() or 0)
+                if output_path.exists():
                     try:
-                        self._process.wait(timeout=5)
-                    except (OSError, subprocess.TimeoutExpired):
-                        pass
-                    return None, '查询已取消'
-                if progress_path.exists():
-                    try:
-                        progress_text = progress_path.read_text(encoding='utf-8')
-                        if progress_text and progress_text != last_progress_text:
-                            last_progress_text = progress_text
-                            _safe_emit(self.progress, dict(json.loads(progress_text)))
-                    except (OSError, json.JSONDecodeError):
-                        pass
-                time.sleep(0.1)
-            return_code = int(self._process.returncode or 0)
-            self._process = None
-            if output_path.exists():
-                try:
-                    return dict(json.loads(output_path.read_text(encoding='utf-8'))), ''
-                except (OSError, json.JSONDecodeError) as exc:
-                    return None, f'查询子进程返回了损坏的结果：{exc}'
-            return None, f'查询子进程异常退出（代码 {return_code}）'
+                        return dict(json.loads(output_path.read_text(encoding='utf-8'))), ''
+                    except (OSError, json.JSONDecodeError) as exc:
+                        return None, f'查询子进程返回了损坏的结果：{exc}'
+                return None, f'查询子进程异常退出（代码 {return_code}）'
+            finally:
+                if process is not None:
+                    self._reap_child_process(
+                        process,
+                        terminate=process.poll() is None,
+                    )
+                if self._process is process:
+                    self._process = None
 
     def _emit_success(self, payload: dict[str, object], *, recovery_mode: str = '') -> None:
         result = query_result_from_payload(dict(payload.get('result') or {}))
@@ -543,8 +570,25 @@ class WatchWorker(QtCore.QObject):
         self._stop_event.set()
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        if self._thread is not None and self._thread.is_alive():
+            return
+        vault_name = Path(str(getattr(self._config, 'vault_path', '') or '')).name or 'vault'
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f'omniclip-watch-{vault_name}',
+        )
         self._thread.start()
+
+    def is_running(self) -> bool:
+        return bool(self._thread is not None and self._thread.is_alive())
+
+    def wait(self, timeout: float | None = None) -> bool:
+        thread = self._thread
+        if thread is None or thread is threading.current_thread():
+            return True
+        thread.join(timeout=timeout)
+        return not thread.is_alive()
 
     def _run(self) -> None:
         service = OmniClipService(self._config, self._paths)
@@ -560,6 +604,8 @@ class WatchWorker(QtCore.QObject):
             LOGGER.exception('Watch worker crashed unexpectedly.')
             _safe_emit(self.failed, str(exc).strip() or exc.__class__.__name__, traceback.format_exc())
         finally:
-            service.close()
+            # Watchers share process-level model caches with sibling vaults and
+            # queries. Stopping one vault must not release another vault's model.
+            service.close(release_process_resources=False)
             _safe_emit(self.stopped, raw_mode)
             _safe_emit(self.finished)

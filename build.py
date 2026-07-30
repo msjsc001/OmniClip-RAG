@@ -76,7 +76,7 @@ GUI_TARGET = BuildTarget(
     spec_path=ROOT / 'OmniClipRAG.spec',
     output_name=f'OmniClipRAG-v{APP_VERSION}',
     output_dir=DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}',
-    release_zip_path=DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}-win64.zip',
+    release_zip_path=DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}-WIN-EXE.zip',
     support_files={
         ROOT / 'scripts' / 'install_runtime.ps1': DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'InstallRuntime.ps1',
         ROOT / 'RUNTIME_SETUP.md': DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'RUNTIME_SETUP.md',

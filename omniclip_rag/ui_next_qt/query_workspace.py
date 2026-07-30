@@ -13,7 +13,13 @@ from ..clipboard import copy_text
 from ..config import ensure_data_paths, normalize_vault_path
 from ..service import OmniClipService
 from ..ui_i18n import text, tooltip
-from ..ui_shared import collect_context_sections, count_enabled_page_filter_rules, query_progress_detail, render_query_limit_hint
+from ..ui_shared import (
+    collect_context_sections,
+    count_enabled_page_filter_rules,
+    query_progress_detail,
+    query_progress_stage_label,
+    render_query_limit_hint,
+)
 from ..vector_index import get_local_model_dir, is_local_model_ready
 from .query_table_model import QueryResultsTableModel
 from .searchable_text_panel import SearchableTextPanel
@@ -60,6 +66,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._query_last_completed_at = 0.0
         self._query_last_result_count = 0
         self._query_last_copied = False
+        self._query_last_error = ''
         self._query_runtime_warnings: tuple[str, ...] = ()
         self._query_runtime_requirements: tuple[dict[str, object], ...] = ()
         self._query_progress_payload: dict[str, object] | None = None
@@ -205,36 +212,38 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.search_card_layout.addWidget(self.search_details_widget)
 
         self.meta_widget = QtWidgets.QWidget(self.search_details_widget)
-        meta_row = QtWidgets.QGridLayout(self.meta_widget)
+        meta_row = QtWidgets.QHBoxLayout(self.meta_widget)
+        self.meta_row_layout = meta_row
         meta_row.setContentsMargins(0, 0, 0, 0)
-        meta_row.setHorizontalSpacing(10)
-        meta_row.setVerticalSpacing(8)
+        meta_row.setSpacing(6)
         search_details_layout.addWidget(self.meta_widget)
 
-        threshold_label = QtWidgets.QLabel(self._tr('score_threshold_label'), self.search_card)
-        threshold_label.setProperty('role', 'muted')
-        meta_row.addWidget(threshold_label, 0, 0)
+        self.threshold_label = QtWidgets.QLabel(self._tr('score_threshold_label'), self.search_card)
+        self.threshold_label.setProperty('role', 'muted')
+        meta_row.addWidget(self.threshold_label)
         self.threshold_edit = QtWidgets.QLineEdit(self.search_card)
         self.threshold_edit.setToolTip(self._tip('score_threshold'))
-        self.threshold_edit.setMaximumWidth(120)
-        meta_row.addWidget(self.threshold_edit, 0, 1)
+        self.threshold_edit.setFixedWidth(scaled(self._theme, 96, minimum=84))
+        meta_row.addWidget(self.threshold_edit)
 
-        limit_label = QtWidgets.QLabel(self._tr('limit_label'), self.search_card)
-        limit_label.setProperty('role', 'muted')
-        meta_row.addWidget(limit_label, 0, 2)
+        meta_row.addSpacing(scaled(self._theme, 14, minimum=10))
+        self.limit_label = QtWidgets.QLabel(self._tr('limit_label'), self.search_card)
+        self.limit_label.setProperty('role', 'muted')
+        meta_row.addWidget(self.limit_label)
         self.limit_edit = QtWidgets.QLineEdit(self.search_card)
         self.limit_edit.setToolTip(self._tip('limit'))
-        self.limit_edit.setMaximumWidth(120)
-        meta_row.addWidget(self.limit_edit, 0, 3)
+        self.limit_edit.setFixedWidth(scaled(self._theme, 96, minimum=84))
+        meta_row.addWidget(self.limit_edit)
+        meta_row.addStretch(1)
 
         self.query_limit_hint_label = QtWidgets.QLabel(self.search_card)
         self.query_limit_hint_label.setProperty('role', 'muted')
         self.query_limit_hint_label.setWordWrap(True)
-        meta_row.addWidget(self.query_limit_hint_label, 1, 0, 1, 4)
+        search_details_layout.addWidget(self.query_limit_hint_label)
         self.query_scope_label = QtWidgets.QLabel(self.search_card)
         self.query_scope_label.setProperty('role', 'muted')
         self.query_scope_label.setWordWrap(True)
-        meta_row.addWidget(self.query_scope_label, 2, 0, 1, 4)
+        search_details_layout.addWidget(self.query_scope_label)
 
         self.source_widget = QtWidgets.QWidget(self.search_details_widget)
         source_row = QtWidgets.QHBoxLayout(self.source_widget)
@@ -927,9 +936,16 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.query_status_button.setToolTip(f'{title}\n{detail}'.strip())
         if mode == 'running':
             percent = float((self._query_progress_payload or {}).get('overall_percent') or 0.0)
-            chip_text = self._tr('query_status_chip_running', percent=percent)
+            stage = query_progress_stage_label(
+                self._query_progress_payload,
+                translate=self._tr,
+                compact=True,
+            )
+            chip_text = self._tr('query_status_chip_running', stage=stage, percent=percent)
         elif mode == 'blocked':
             chip_text = self._tr('query_status_chip_blocked')
+        elif mode == 'error':
+            chip_text = self._tr('query_status_chip_failed')
         elif mode == 'done':
             chip_text = self._tr('query_status_chip_done', count=self._query_last_result_count)
         else:
@@ -953,6 +969,13 @@ class QueryWorkspace(QtWidgets.QWidget):
                 mode='blocked',
                 title=self._external_block_title or self._tr('query_status_blocked_title'),
                 detail=self._external_block_detail or self._tr('query_status_blocked_detail'),
+            )
+            return
+        if self._query_last_error:
+            self._set_query_status(
+                mode='error',
+                title=self._tr('query_status_failed_title'),
+                detail=self._tr('query_status_failed_detail', error=self._query_last_error),
             )
             return
         if self._query_last_completed_at > 0:
@@ -1040,10 +1063,21 @@ class QueryWorkspace(QtWidgets.QWidget):
                         scope=scope,
                         error=detail,
                     ))
-                elif reason == 'reranker_system_memory_guard':
+                elif reason in {
+                    'reranker_system_memory_guard',
+                    'reranker_resource_guard',
+                }:
+                    current = dict(requirement.get('current') or {})
+                    required = dict(requirement.get('required') or {})
                     messages.append(self._tr(
                         'query_runtime_requirement_reranker_memory_guard',
                         scope=scope,
+                        commit_headroom=self._format_gib(current.get('commit_headroom_bytes')),
+                        physical_available=self._format_gib(current.get('available_physical_bytes')),
+                        cuda_free=self._format_gib(current.get('cuda_free_bytes')),
+                        required_commit=self._format_gib(required.get('min_commit_headroom_bytes')),
+                        required_physical=self._format_gib(required.get('min_physical_available_bytes')),
+                        required_cuda=self._format_gib(required.get('min_cuda_free_bytes')),
                     ))
                     messages.append(self._tr('query_runtime_requirement_reranker_memory_guard_action'))
                     continue
@@ -1148,6 +1182,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         query_text, score_threshold, config, paths, copy_result, allowed_families = prepared
         selected_vaults = self._selected_markdown_vaults_from_config(config)
         self._busy = True
+        self._query_last_error = ''
         self._query_progress_payload = {'overall_percent': 0.0, 'stage_status': 'prepare'}
         self.search_button.setEnabled(False)
         self.search_copy_button.setEnabled(False)
@@ -1196,6 +1231,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._query_last_completed_at = time.time()
         self._query_last_result_count = len(hits)
         self._query_last_copied = payload.copied
+        self._query_last_error = ''
         insights = getattr(result, 'insights', None)
         self._query_runtime_warnings = tuple(getattr(insights, 'runtime_warnings', ()) or ())
         self._query_runtime_requirements = tuple(
@@ -1237,6 +1273,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._query_runtime_requirements = ()
         self._refresh_query_runtime_hint()
         error_body = message.strip() or traceback_text.strip() or self._tr('cannot_start_title')
+        self._query_last_error = error_body
         self.statusMessageChanged.emit(f"{self._tr('search_button')}：{error_body}")
         if traceback_text.strip():
             self._append_log(traceback_text.strip())

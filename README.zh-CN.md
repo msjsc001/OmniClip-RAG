@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Version](https://img.shields.io/badge/version-v0.4.11-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/EllisMorrow/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.EllisMorrow/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-v0.4.12-1d7467?style=flat-square)](CHANGELOG.md) [![Platform](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](#-快速上手与工作流) [![Python](https://img.shields.io/badge/python-3.13-3a7bd5?style=flat-square)](pyproject.toml) [![Local-first](https://img.shields.io/badge/local--first-yes-c37d2b?style=flat-square)](#-核心理念与无价边界) [![Downloads](https://img.shields.io/github/downloads/EllisMorrow/OmniClip-RAG/total?label=Downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/OmniClip-RAG/releases) [![MCP Registry](https://img.shields.io/badge/MCP_Registry-Official-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.EllisMorrow/omniclip-rag-mcp) [![English Docs](https://img.shields.io/badge/docs-English-f0a500?style=flat-square)](README.md) [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [English README](README.md) | [更新日志](CHANGELOG.md) | [架构说明](ARCHITECTURE.md) | [MCP 接入说明](MCP_SETUP.md) | [第三方许可与声明](THIRD_PARTY_NOTICES.md) | [官网](https://msjsc001.github.io/OmniClip-RAG/)
 
@@ -39,6 +39,7 @@
 > [!TIP]
 > **MCP 快速入口**
 >
+> 普通 Windows 桌面用户请下载文件名带有 `WIN-EXE` 的发行包，例如 `OmniClipRAG-v0.4.12-WIN-EXE.zip`。
 > 如果你想把方寸引接到 Jan.ai、OpenClaw、Claude Desktop、Cursor 或其他支持 MCP 的客户端，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
 > 从 `v0.4.8` 起，MCP 线在继续提供手动 ZIP 的同时，也已经把共享环境根、诚实降级提示、标准 MCPB 发布物和仓库内可复现构建链全部收紧到同一版发布面。
 
@@ -179,8 +180,8 @@
 - `OmniClipRAG-MCP.exe` 负责安静地在后台给 AI 提供“只读搜索接口”
 
 从 `v0.4.8` 开始，MCP 这条线会同时提供两种分发形态：
-- `OmniClipRAG-MCP-v0.4.11-win64.zip`：给手动配置 `stdio` 的用户
-- `omniclip-rag-mcp-win-x64-v0.4.11.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
+- `OmniClipRAG-MCP-v0.4.12-win64.zip`：给手动配置 `stdio` 的用户
+- `omniclip-rag-mcp-win-x64-v0.4.12.mcpb`：给官方 MCP Registry 与支持 MCPB 的客户端
 
 > [!CAUTION]
 > **使用前要先做什么？**
@@ -200,7 +201,7 @@
   - `io.github.EllisMorrow/omniclip-rag-mcp`
 - MCPB 会继续保留旧的内部包身份，因此 GitHub 账号改名后，已安装客户端仍能把新版本识别为同一个扩展的升级。
 - 如果客户端支持官方 MCPB 安装流，请优先使用 Release 中的：
-  - `omniclip-rag-mcp-win-x64-v0.4.11.mcpb`
+  - `omniclip-rag-mcp-win-x64-v0.4.12.mcpb`
 - 更详细的官方发布线、MCPB 与 ZIP 的区别、以及不同客户端的接入说明，请直接看 [MCP_SETUP.md](MCP_SETUP.md)。
 
 ### 传统手动路线（Jan.ai / OpenClaw）
@@ -222,7 +223,7 @@
   "mcpServers": {
     "omniclip-rag": {
       "transport": "stdio",
-      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.11\\OmniClipRAG-MCP.exe",
+      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.12\\OmniClipRAG-MCP.exe",
       "args": []
     }
   }
@@ -402,6 +403,16 @@ python launcher_mcp.py --mcp-selfcheck
 <summary><b>📦 展开查看 V0.4+ 系列的核心演进（数据底座升级与 MCP 接入）</b></summary>
 
 <br/>
+
+### V0.4.12 重点更新
+`v0.4.12` 用按模型和实时资源计算的判断替换统一的 Reranker 内存门槛，并把查询阶段直接显示到“查询”按钮右侧。
+- 🧠 **Auto 不再使用统一的 10 GiB 门槛**：判断会结合本地模型权重、批量设置、Windows Commit 余量、物理可用内存和 CUDA 可用显存。
+- 🎯 **紧凑状态按钮会显示当前阶段**：准备、字面召回、语义召回、融合排序、重排、结果整理、上下文组装和故障回退阶段都会随进度更新。
+- 🧭 **查询失败会保留明确状态**：失败后不再错误显示上一次查询的“完成”状态。
+- 📐 **数值输入框紧跟各自标签**：最低分数和返回条数不会在宽窗口中与说明文字拉开很大空隙。
+- 🧹 **一次性查询子进程会被明确回收**：正常完成、取消和失败路径都会等待进程退出，避免遗留查询进程。
+- 🛑 **多库热监听可以可靠停止**：批量停止会覆盖所有实际运行中的监听器，单库会显示“停止中”，扫描和向量增量写入也会在安全检查点响应停止。
+- 🧵 **PDF/Tika 目录操作不会拖慢界面**：任务完成后的状态重载和索引摘要统计改为可合并的后台刷新，过期结果也不会覆盖较新的目录设置。
 
 ### V0.4.11 重点更新
 `v0.4.11` 在 Windows Commit 余量偏低时继续保留 CUDA 语义召回，同时避免 Reranker 加载和查询退出阶段触发 PyTorch 原生崩溃。

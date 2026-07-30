@@ -86,6 +86,8 @@ class RerankOutcome:
     cuda_peak_mem_before: int = 0
     cuda_peak_mem_after: int = 0
     cuda_peak_mem_delta: int = 0
+    resource_snapshot: dict[str, object] = field(default_factory=dict)
+    resource_requirements: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

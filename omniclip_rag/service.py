@@ -745,15 +745,23 @@ class OmniClipService:
             watchdog_stop.set()
             if watchdog_thread.is_alive():
                 watchdog_thread.join(timeout=0.3)
-    def reindex_paths(self, changed_relative_paths: list[str], deleted_relative_paths: list[str]) -> dict[str, object]:
+    def reindex_paths(
+        self,
+        changed_relative_paths: list[str],
+        deleted_relative_paths: list[str],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, object]:
         from .parser import parse_markdown_file
 
+        _wait_for_worker_controls(None, cancel_event)
         self._ensure_vector_runtime_ready()
         changed_paths = sorted({item for item in changed_relative_paths if item})
         deleted_paths = sorted({item for item in deleted_relative_paths if item})
         parsed_by_path = {}
         skipped_changed_paths: list[str] = []
         for relative_path in changed_paths:
+            _wait_for_worker_controls(None, cancel_event)
             absolute_path = self.config.vault_dir / relative_path
             if not absolute_path.exists():
                 continue
@@ -768,6 +776,9 @@ class OmniClipService:
         previous_chunk_ids = self.store.get_chunk_ids_for_paths(mutated_paths)
         dependent_paths = self.store.get_transitive_dependent_paths(previous_block_ids) if previous_block_ids else set()
 
+        # Do not begin mutating the index after a stop request. Once mutations
+        # start, the watch-state journal below keeps unfinished work repairable.
+        _wait_for_worker_controls(None, cancel_event)
         if deleted_paths:
             self.store.delete_files(deleted_paths)
 
@@ -784,10 +795,14 @@ class OmniClipService:
         affected_list = sorted(affected_paths)
         if affected_list:
             self._update_watch_state(add_paths=affected_list)
-            self._refresh_rendered(affected_list)
+            self._refresh_rendered(affected_list, cancel_event=cancel_event)
             self._update_watch_state(remove_paths=affected_list)
 
-        vector_error = self._sync_vector_documents(affected_paths=affected_list, deleted_chunk_ids=previous_chunk_ids)
+        vector_error = self._sync_vector_documents(
+            affected_paths=affected_list,
+            deleted_chunk_ids=previous_chunk_ids,
+            cancel_event=cancel_event,
+        )
         stats: dict[str, object] = {**self.store.stats(), 'duplicate_block_ids': duplicate_block_ids}
         if skipped_changed_paths:
             stats['skipped_changed_paths'] = skipped_changed_paths
@@ -813,23 +828,37 @@ class OmniClipService:
         if chunk_ids:
             self.vector_index.delete(chunk_ids)
 
-    def _sync_vector_documents(self, *, affected_paths: list[str], deleted_chunk_ids: list[str]) -> str | None:
+    def _sync_vector_documents(
+        self,
+        *,
+        affected_paths: list[str],
+        deleted_chunk_ids: list[str],
+        cancel_event: threading.Event | None = None,
+    ) -> str | None:
         vector_paths = sorted({item for item in affected_paths if item})
         vector_chunk_ids = sorted({item for item in deleted_chunk_ids if item})
         if not vector_paths and not vector_chunk_ids:
             return None
         self._update_watch_state(add_vector_paths=vector_paths, add_vector_chunk_ids=vector_chunk_ids)
         try:
+            _wait_for_worker_controls(None, cancel_event)
             if vector_chunk_ids:
                 self.vector_index.delete(vector_chunk_ids)
             if vector_paths:
-                self._upsert_vector_documents_for_paths(vector_paths)
+                self._upsert_vector_documents_for_paths(vector_paths, cancel_event=cancel_event)
+        except BuildCancelledError:
+            raise
         except Exception as exc:
             return str(exc)
         self._update_watch_state(remove_vector_paths=vector_paths, remove_vector_chunk_ids=vector_chunk_ids)
         return None
 
-    def _repair_watch_state(self, current_snapshot: dict[str, tuple[float, int]]) -> list[dict[str, object]]:
+    def _repair_watch_state(
+        self,
+        current_snapshot: dict[str, tuple[float, int]],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> list[dict[str, object]]:
         state = self._read_watch_state()
         if state is None:
             return []
@@ -838,13 +867,14 @@ class OmniClipService:
         repaired_vector_paths = sorted(path for path in state.get('dirty_vector_paths', []) if path in current_snapshot)
         repaired_vector_chunk_ids = sorted({item for item in state.get('dirty_vector_chunk_ids', []) if item})
         if repaired_paths:
-            self._refresh_rendered(repaired_paths)
+            self._refresh_rendered(repaired_paths, cancel_event=cancel_event)
             self._update_watch_state(remove_paths=repaired_paths)
         if repaired_vector_chunk_ids or repaired_vector_paths:
+            _wait_for_worker_controls(None, cancel_event)
             if repaired_vector_chunk_ids:
                 self.vector_index.delete(repaired_vector_chunk_ids)
             if repaired_vector_paths:
-                self._upsert_vector_documents_for_paths(repaired_vector_paths)
+                self._upsert_vector_documents_for_paths(repaired_vector_paths, cancel_event=cancel_event)
             self._update_watch_state(
                 remove_vector_paths=repaired_vector_paths,
                 remove_vector_chunk_ids=repaired_vector_chunk_ids,
@@ -860,18 +890,24 @@ class OmniClipService:
             }
         ]
 
-    def _upsert_vector_documents_for_paths(self, source_paths: list[str]) -> None:
+    def _upsert_vector_documents_for_paths(
+        self,
+        source_paths: list[str],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         if not source_paths:
             return
         batch_size = max(int(self.config.vector_batch_size or 16) * 8, VECTOR_UPSERT_BATCH_SIZE)
         buffer: list[dict[str, str]] = []
         for document in self.store.iter_vector_documents(source_paths):
+            _wait_for_worker_controls(None, cancel_event)
             buffer.append(document)
             if len(buffer) >= batch_size:
-                self.vector_index.upsert(buffer)
+                self.vector_index.upsert(buffer, cancel_event=cancel_event)
                 buffer = []
         if buffer:
-            self.vector_index.upsert(buffer)
+            self.vector_index.upsert(buffer, cancel_event=cancel_event)
 
     def _normalize_query_families(self, allowed_families) -> set[str]:
         supported = {'markdown', 'pdf', 'tika'}
@@ -1163,6 +1199,12 @@ class OmniClipService:
             'reranker_cuda_peak_mem_before': int(getattr(reranker_outcome, 'cuda_peak_mem_before', 0) or 0),
             'reranker_cuda_peak_mem_after': int(getattr(reranker_outcome, 'cuda_peak_mem_after', 0) or 0),
             'reranker_cuda_peak_mem_delta': int(getattr(reranker_outcome, 'cuda_peak_mem_delta', 0) or 0),
+            'reranker_resource_snapshot': dict(
+                getattr(reranker_outcome, 'resource_snapshot', {}) or {}
+            ),
+            'reranker_resource_requirements': dict(
+                getattr(reranker_outcome, 'resource_requirements', {}) or {}
+            ),
             'final_candidates_raw': int(final_candidates_raw),
             'final_after_filters': int(final_after_filters),
             'postfilter_drop_count': int(postfilter_drop_count),
@@ -1202,6 +1244,7 @@ class OmniClipService:
             'reranker_execution_failed',
             'reranker_query_circuit_open',
             'reranker_system_memory_guard',
+            'reranker_resource_guard',
         } or reranker_skip == 'model_missing':
             requirements.append({
                 'kind': 'reranker',
@@ -1219,6 +1262,12 @@ class OmniClipService:
                 ),
                 'error_message': self._compact_query_diagnostic_message(
                     getattr(reranker_outcome, 'error_message', '')
+                ),
+                'current': dict(
+                    getattr(reranker_outcome, 'resource_snapshot', {}) or {}
+                ),
+                'required': dict(
+                    getattr(reranker_outcome, 'resource_requirements', {}) or {}
                 ),
             })
         return tuple(requirements)
@@ -1303,6 +1352,13 @@ class OmniClipService:
                 storage_candidates = []
                 lexical_started_at = time.perf_counter()
                 if lexical_enabled:
+                    _emit_query_progress(
+                        on_progress,
+                        'candidate',
+                        percent=12,
+                        candidates=0,
+                        limit=candidate_limit,
+                    )
                     storage_candidates = _filter_candidate_rows_by_page_blocklist(self.store.search_candidates(query_text, candidate_limit), page_block_patterns)
                     trace_storage_candidates = len(storage_candidates)
                     _emit_query_progress(on_progress, 'candidate', percent=22, candidates=len(storage_candidates), limit=candidate_limit)
@@ -1311,6 +1367,14 @@ class OmniClipService:
                 vector_candidates: dict[str, float] = {}
                 vector_runtime_ready = True
                 if vector_query_planned:
+                    vector_limit = max(self.config.vector_candidate_limit, candidate_limit)
+                    _emit_query_progress(
+                        on_progress,
+                        'vector',
+                        percent=28,
+                        candidates=0,
+                        limit=vector_limit,
+                    )
                     vector_started_at = time.perf_counter()
                     try:
                         self._ensure_vector_runtime_ready()
@@ -1329,7 +1393,6 @@ class OmniClipService:
                             runtime_warnings.append('markdown_vector_index_missing')
                             fallback_reason = 'vector_index_missing'
                         else:
-                            vector_limit = max(self.config.vector_candidate_limit, candidate_limit)
                             try:
                                 trace_vector_query_executed = True
                                 vector_candidates = {item.chunk_id: item.score for item in self.vector_index.search(query_text, vector_limit)}
@@ -1380,6 +1443,14 @@ class OmniClipService:
             else:
                 fallback_reason = 'markdown_index_not_ready'
 
+        _emit_query_progress(
+            on_progress,
+            'rank',
+            percent=45,
+            candidates=sum(len(items) for items in family_hits.values()),
+            limit=limit,
+            families=sorted(family_hits),
+        )
         fusion_started_at = time.perf_counter()
         extension_hits = self.extension_query_broker.collect_extension_hits(
             query_text,
@@ -1424,10 +1495,14 @@ class OmniClipService:
             'reranker_execution_failed',
             'reranker_query_circuit_open',
             'reranker_system_memory_guard',
+            'reranker_resource_guard',
         } or reranker_skip_reason == 'model_missing':
             runtime_warnings.append('markdown_reranker_unavailable')
-        if reranker_fallback_reason == 'reranker_system_memory_guard':
-            runtime_warnings.append('markdown_reranker_system_memory_guard')
+        if reranker_fallback_reason in {
+            'reranker_system_memory_guard',
+            'reranker_resource_guard',
+        }:
+            runtime_warnings.append('markdown_reranker_resource_guard')
         if normalized_device_policy == 'require-cuda':
             vector_actual_device = str(vector_execution.get('actual_device') or '')
             reranker_actual_device = str(getattr(rerank_outcome, 'actual_device', '') or '')
@@ -1634,13 +1709,24 @@ class OmniClipService:
         force_polling: bool = False,
         on_update: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
-        self._require_ready_index(action='watch')
-        self._ensure_vector_runtime_ready()
-        interval = interval or self.config.poll_interval_seconds
-        if not force_polling and WATCHDOG_AVAILABLE:
-            self._watch_with_watchdog(interval, stop_event, on_update)
+        if stop_event.is_set():
             return
-        self._watch_with_polling(interval, stop_event, on_update)
+        try:
+            self._require_ready_index(action='watch')
+            if stop_event.is_set():
+                return
+            self._ensure_vector_runtime_ready()
+            if stop_event.is_set():
+                return
+            interval = interval or self.config.poll_interval_seconds
+            if not force_polling and WATCHDOG_AVAILABLE:
+                self._watch_with_watchdog(interval, stop_event, on_update)
+                return
+            self._watch_with_polling(interval, stop_event, on_update)
+        except BuildCancelledError:
+            if stop_event.is_set():
+                return
+            raise
 
     def status_snapshot(self) -> dict[str, object]:
         latest = self.store.fetch_latest_preflight()
@@ -1782,6 +1868,8 @@ class OmniClipService:
         observer.schedule(handler, str(self.config.vault_dir), recursive=True)
         observer.start()
         try:
+            if stop_event.is_set():
+                return
             self._watch_loop(
                 'watchdog',
                 interval,
@@ -1792,6 +1880,8 @@ class OmniClipService:
         finally:
             observer.stop()
             observer.join(timeout=5)
+            if observer.is_alive():
+                raise RuntimeError('watchdog observer did not stop within 5 seconds')
 
     def _watch_loop(
         self,
@@ -1801,7 +1891,7 @@ class OmniClipService:
         on_update: Callable[[dict[str, object]], None] | None,
         event_provider: Callable[[], tuple[list[str], list[str]]] | None = None,
     ) -> None:
-        previous_snapshot, offline_reason = self._snapshot_safe()
+        previous_snapshot, offline_reason = self._snapshot_safe(cancel_event=stop_event)
         buffer = _LiveWatchBuffer(WATCH_STABLE_FILE_SECONDS, WATCH_DELETE_CONFIRM_SECONDS)
         last_repair_at = 0.0
         batch_limit = max(self._watch_batch_limit(), 1)
@@ -1824,7 +1914,9 @@ class OmniClipService:
             reconcile_changed, reconcile_deleted = _diff_snapshot(self.store.fetch_file_manifest(), previous_snapshot)
             buffer.record(reconcile_changed, reconcile_deleted, previous_snapshot)
             try:
-                repair_events = self._repair_watch_state(previous_snapshot)
+                repair_events = self._repair_watch_state(previous_snapshot, cancel_event=stop_event)
+            except BuildCancelledError:
+                raise
             except Exception as exc:
                 repair_events = [{'kind': 'batch_retry', 'changed': [], 'deleted': [], 'error': str(exc)}]
             if repair_events:
@@ -1833,7 +1925,7 @@ class OmniClipService:
 
         while not stop_event.wait(interval):
             now = time.time()
-            current_snapshot, offline_reason = self._snapshot_safe()
+            current_snapshot, offline_reason = self._snapshot_safe(cancel_event=stop_event)
             if current_snapshot is None:
                 watch_state = self._read_watch_state() or {}
                 if not watch_state.get('vault_offline'):
@@ -1867,7 +1959,9 @@ class OmniClipService:
 
             if last_repair_at <= 0.0 or (now - last_repair_at) >= WATCH_REPAIR_INTERVAL_SECONDS:
                 try:
-                    events.extend(self._repair_watch_state(current_snapshot))
+                    events.extend(self._repair_watch_state(current_snapshot, cancel_event=stop_event))
+                except BuildCancelledError:
+                    raise
                 except Exception as exc:
                     events.append({'kind': 'batch_retry', 'changed': [], 'deleted': [], 'error': str(exc)})
                 last_repair_at = now
@@ -1888,7 +1982,14 @@ class OmniClipService:
                     if deferred_changed or deferred_deleted:
                         buffer.requeue(deferred_changed, deferred_deleted, current_snapshot, now, ready=True)
                 try:
-                    stats = self.reindex_paths(ready_changed, ready_deleted)
+                    stats = self.reindex_paths(
+                        ready_changed,
+                        ready_deleted,
+                        cancel_event=stop_event,
+                    )
+                except BuildCancelledError:
+                    buffer.requeue(ready_changed, ready_deleted, current_snapshot, now, ready=True)
+                    raise
                 except Exception as exc:
                     buffer.requeue(ready_changed, ready_deleted, current_snapshot, now)
                     events.append(
@@ -1908,6 +2009,8 @@ class OmniClipService:
                     ]
                     if skipped_changed:
                         buffer.requeue(skipped_changed, [], current_snapshot, now)
+                    if stop_event.is_set():
+                        break
                     _emit_watch_update(on_update, mode, ready_changed, ready_deleted, stats, events=events)
             elif events:
                 _emit_watch_update(on_update, mode, [], [], self.store.stats(), events=events, note_only=True)
@@ -1921,7 +2024,12 @@ class OmniClipService:
         snapshot, _ = self._snapshot_safe()
         return snapshot or {}
 
-    def _snapshot_safe(self) -> tuple[dict[str, tuple[float, int]] | None, str | None]:
+    def _snapshot_safe(
+        self,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[dict[str, tuple[float, int]] | None, str | None]:
+        _wait_for_worker_controls(None, cancel_event)
         if not self.config.vault_path:
             return {}, None
         vault_dir = self.config.vault_dir
@@ -1942,9 +2050,11 @@ class OmniClipService:
 
         try:
             for root, dirnames, filenames in os.walk(vault_dir, topdown=True, onerror=onerror):
+                _wait_for_worker_controls(None, cancel_event)
                 dirnames[:] = [name for name in dirnames if name not in ignore]
                 current_root = Path(root)
                 for filename in filenames:
+                    _wait_for_worker_controls(None, cancel_event)
                     if not filename.lower().endswith('.md'):
                         continue
                     absolute_path = (current_root / filename).resolve()

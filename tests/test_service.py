@@ -22,7 +22,7 @@ class _StubVectorIndex:
         self.reset_called = False
     def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None, progress_offset=0, reset_index=True):
         return None
-    def upsert(self, documents):
+    def upsert(self, documents, *, on_progress=None, pause_event=None, cancel_event=None):
         return None
     def delete(self, chunk_ids):
         return None
@@ -57,7 +57,7 @@ class _FailingVectorIndex(_StubVectorIndex):
         self.fail_upsert_once = True
         self.deleted_batches: list[list[str]] = []
         self.upsert_batches: list[list[str]] = []
-    def upsert(self, documents):
+    def upsert(self, documents, *, on_progress=None, pause_event=None, cancel_event=None):
         self.upsert_batches.append([item.get('chunk_id', '') for item in documents])
         if self.fail_upsert_once:
             self.fail_upsert_once = False
@@ -66,6 +66,20 @@ class _FailingVectorIndex(_StubVectorIndex):
     def delete(self, chunk_ids):
         self.deleted_batches.append(list(chunk_ids))
         return None
+
+
+class _CancellableVectorIndex(_StubVectorIndex):
+    def __init__(self) -> None:
+        super().__init__()
+        self.upsert_started = threading.Event()
+
+    def upsert(self, documents, *, on_progress=None, pause_event=None, cancel_event=None):
+        self.upsert_started.set()
+        while cancel_event is None or not cancel_event.wait(0.01):
+            pass
+        raise BuildCancelledError('cancelled')
+
+
 class _ProfilingVectorIndex(_StubVectorIndex):
     def rebuild(self, documents, *, total=None, on_progress=None, pause_event=None, cancel_event=None, progress_offset=0, reset_index=True):
         count = int(total or 0)
@@ -341,6 +355,18 @@ class ServiceTests(unittest.TestCase):
         service = OmniClipService(config, data_paths)
         service.vector_index = _GpuVectorIndex()
         service.reranker = _CudaReranker()
+        progress: list[dict[str, object]] = []
+        vector_started_after_stage: list[bool] = []
+
+        original_search = service.vector_index.search
+
+        def observed_search(query_text, limit):
+            vector_started_after_stage.append(
+                bool(progress) and progress[-1].get('stage_status') == 'vector'
+            )
+            return original_search(query_text, limit)
+
+        service.vector_index.search = observed_search
         try:
             with patch.object(service, '_ensure_vector_runtime_ready', return_value=None), \
                  patch('omniclip_rag.service.resolve_vector_device', return_value='cuda'):
@@ -350,8 +376,19 @@ class ServiceTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(chunk_row)
                 service.vector_index.injected = [SimpleNamespace(chunk_id=chunk_row['chunk_id'], score=0.95)]
-                result = service.query('块嵌入', limit=5, score_threshold=0, allowed_families={'markdown'})
+                result = service.query(
+                    '块嵌入',
+                    limit=5,
+                    score_threshold=0,
+                    allowed_families={'markdown'},
+                    on_progress=progress.append,
+                )
             self.assertTrue(result.hits)
+            self.assertEqual(vector_started_after_stage, [True])
+            stages = [str(item.get('stage_status') or '') for item in progress]
+            self.assertLess(stages.index('candidate'), stages.index('vector'))
+            self.assertLess(stages.index('vector'), stages.index('rank'))
+            self.assertLess(stages.index('rank'), stages.index('rerank'))
             self.assertIn('markdown_vector_cuda_ready', result.insights.runtime_warnings)
             self.assertIn('markdown_reranker_cuda_ready', result.insights.runtime_warnings)
             self.assertNotIn('markdown_vector_system_memory_to_cpu', result.insights.runtime_warnings)
@@ -1076,6 +1113,53 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(snapshot['stats'], {'files': 0, 'chunks': 0, 'refs': 0})
         finally:
             service.close()
+
+    def test_reindex_cancellation_interrupts_vector_upsert_and_leaves_repair_state(self) -> None:
+        vault_copy = ROOT / '.tmp' / 'watch_cancel_vault_test'
+        data_root = ROOT / '.tmp' / 'watch_cancel_data_test'
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        target = vault_copy / 'page_a.md'
+        target.write_text('- 初始内容\n  id:: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root))
+        config = AppConfig(vault_path=str(vault_copy), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        service.vector_index = _StubVectorIndex()
+        try:
+            service.rebuild_index()
+            cancellable_vector = _CancellableVectorIndex()
+            service.vector_index = cancellable_vector
+            target.write_text('- 更新内容\n  id:: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n', encoding='utf-8')
+            cancel_event = threading.Event()
+
+            def request_cancel() -> None:
+                if cancellable_vector.upsert_started.wait(2.0):
+                    cancel_event.set()
+
+            canceller = threading.Thread(target=request_cancel)
+            canceller.start()
+            with self.assertRaises(BuildCancelledError):
+                service.reindex_paths(['page_a.md'], [], cancel_event=cancel_event)
+            canceller.join(timeout=2.0)
+
+            self.assertFalse(canceller.is_alive())
+            self.assertTrue(cancel_event.is_set())
+            self.assertIn('page_a.md', (service._read_watch_state() or {}).get('dirty_vector_paths', []))
+        finally:
+            service.close()
+
+    def test_watch_with_pre_requested_stop_returns_without_starting_scan(self) -> None:
+        data_paths = ensure_data_paths(str(ROOT / '.tmp' / 'watch_pre_stopped_data_test'))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root))
+        service = OmniClipService(config, data_paths)
+        stop_event = threading.Event()
+        stop_event.set()
+        try:
+            with patch.object(service, '_snapshot_safe', wraps=service._snapshot_safe) as snapshot_mock:
+                service.watch_until_stopped(stop_event, interval=0.01, force_polling=True)
+            snapshot_mock.assert_not_called()
+        finally:
+            service.close()
+
     def test_estimate_space_records_preflight(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT))
         config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(data_paths.global_root), vector_backend="lancedb")

@@ -6,6 +6,7 @@ import logging
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -30,10 +31,40 @@ from omniclip_rag.query_subprocess import (
     write_json_atomic,
 )
 from omniclip_rag.service import OmniClipService
-from omniclip_rag.ui_next_qt.workers import QueryWorker
+from omniclip_rag.ui_next_qt.workers import QueryWorker, WatchWorker
 
 
 class MultiVaultQueryWorkerTests(unittest.TestCase):
+    def test_watch_worker_stop_waits_for_thread_and_preserves_shared_models(self) -> None:
+        entered = threading.Event()
+        close_release_values: list[bool] = []
+
+        class FakeService:
+            def __init__(self, config, paths) -> None:
+                pass
+
+            def watch_until_stopped(self, stop_event, **kwargs) -> None:
+                entered.set()
+                stop_event.wait(2.0)
+
+            def close(self, *, release_process_resources: bool = True) -> None:
+                close_release_values.append(release_process_resources)
+
+        worker = WatchWorker(
+            config=SimpleNamespace(vault_path='C:/vault'),
+            paths=SimpleNamespace(),
+            interval=0.01,
+            force_polling=True,
+        )
+        with patch('omniclip_rag.ui_next_qt.workers.OmniClipService', FakeService):
+            worker.start()
+            self.assertTrue(entered.wait(1.0))
+            self.assertTrue(worker.is_running())
+            worker.stop()
+            self.assertTrue(worker.wait(timeout=2.0))
+        self.assertFalse(worker.is_running())
+        self.assertEqual(close_release_values, [False])
+
     def test_query_worker_subprocess_round_trip_uses_synthetic_vault(self) -> None:
         root = Path(tempfile.mkdtemp(prefix='omniclip-query-worker-test-'))
         try:
@@ -120,7 +151,12 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
                     maximum=30,
                     reason_code='stable',
                 ),
-                reranker=RerankOutcome(enabled=True, applied=True),
+                reranker=RerankOutcome(
+                    enabled=True,
+                    applied=True,
+                    resource_snapshot={'commit_headroom_bytes': 6 * 1024**3},
+                    resource_requirements={'min_commit_headroom_bytes': 4 * 1024**3},
+                ),
             ),
         )
         restored = query_result_from_payload(query_result_to_payload(original))
@@ -130,6 +166,104 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
         self.assertEqual(restored.insights.runtime_requirements[0]['error_class'], 'OSError')
         self.assertEqual(restored.insights.recommendation.preferred, 15)
         self.assertTrue(restored.insights.reranker.applied)
+        self.assertEqual(
+            restored.insights.reranker.resource_snapshot['commit_headroom_bytes'],
+            6 * 1024**3,
+        )
+        self.assertEqual(
+            restored.insights.reranker.resource_requirements['min_commit_headroom_bytes'],
+            4 * 1024**3,
+        )
+
+    def test_isolated_worker_reaps_completed_child_process(self) -> None:
+        config = AppConfig(
+            vault_path=str(Path('vault').resolve()),
+            data_root=str(Path('data-root').resolve()),
+        )
+        worker = QueryWorker(
+            config=config,
+            paths=SimpleNamespace(),
+            query_text='test',
+            copy_result=False,
+            score_threshold=0.0,
+            allowed_families=('markdown',),
+        )
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.returncode = 0
+                self.wait_calls = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                del timeout
+                self.wait_calls += 1
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        process = FakeProcess()
+        with patch(
+            'omniclip_rag.ui_next_qt.workers.subprocess.Popen',
+            return_value=process,
+        ):
+            payload, message = worker._run_child(worker._request_payload())
+
+        self.assertIsNone(payload)
+        self.assertIn('异常退出', message)
+        self.assertGreaterEqual(process.wait_calls, 2)
+        self.assertIsNone(worker._process)
+
+    def test_isolated_worker_reaps_cancelled_child_process(self) -> None:
+        config = AppConfig(
+            vault_path=str(Path('vault').resolve()),
+            data_root=str(Path('data-root').resolve()),
+        )
+        worker = QueryWorker(
+            config=config,
+            paths=SimpleNamespace(),
+            query_text='test',
+            copy_result=False,
+            score_threshold=0.0,
+            allowed_families=('markdown',),
+        )
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.returncode = None
+                self.killed = False
+                self.wait_calls = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                del timeout
+                self.wait_calls += 1
+                if self.returncode is None:
+                    self.returncode = -9
+                return self.returncode
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+        process = FakeProcess()
+        worker._cancel_event.set()
+        with patch(
+            'omniclip_rag.ui_next_qt.workers.subprocess.Popen',
+            return_value=process,
+        ):
+            payload, message = worker._run_child(worker._request_payload())
+
+        self.assertIsNone(payload)
+        self.assertEqual(message, '查询已取消')
+        self.assertTrue(process.killed)
+        self.assertGreaterEqual(process.wait_calls, 1)
+        self.assertIsNone(worker._process)
 
     def test_isolated_worker_recovers_native_crash_with_cpu_semantic_process(self) -> None:
         config = AppConfig(

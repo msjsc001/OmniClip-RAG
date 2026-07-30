@@ -5,6 +5,7 @@ import sys
 import time
 import weakref
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -32,7 +33,165 @@ from .vector_index import (
     semantic_query_reranker_failure_reason,
 )
 
-RERANKER_MIN_COMMIT_HEADROOM_BYTES = 10 * 1024**3
+GIB = 1024**3
+MIB = 1024**2
+_RERANKER_FALLBACK_WEIGHT_BYTES = 2 * GIB
+_RERANKER_COMMIT_WEIGHT_FACTOR = 1.5
+_RERANKER_PHYSICAL_WEIGHT_FACTOR = 1.1
+_RERANKER_CUDA_WEIGHT_FACTOR = 1.15
+_RERANKER_COMMIT_RESERVE_BYTES = 768 * MIB
+_RERANKER_PHYSICAL_RESERVE_BYTES = 512 * MIB
+_RERANKER_CUDA_RESERVE_BYTES = 512 * MIB
+_RERANKER_MIN_ACTIVATION_BYTES = 256 * MIB
+_RERANKER_MAX_ACTIVATION_BYTES = 1 * GIB
+
+
+@dataclass(frozen=True, slots=True)
+class RerankerResourceDecision:
+    allowed: bool
+    reason: str
+    error_class: str
+    error_message: str
+    current: dict[str, object]
+    required: dict[str, object]
+
+
+def _reranker_weight_bytes(local_dir: Path) -> int:
+    """Measure model weights without counting duplicate formats twice."""
+    try:
+        safetensors = [
+            path
+            for path in local_dir.rglob('*.safetensors')
+            if path.is_file()
+        ]
+        candidates = safetensors or [
+            path
+            for path in local_dir.rglob('*.bin')
+            if path.is_file() and (
+                path.name == 'pytorch_model.bin'
+                or path.name.startswith('pytorch_model-')
+            )
+        ]
+        return sum(max(int(path.stat().st_size), 0) for path in candidates)
+    except OSError:
+        return 0
+
+
+def _query_cuda_memory_snapshot(device: str) -> dict[str, object]:
+    if not str(device or '').startswith('cuda'):
+        return {}
+    try:
+        with _runtime_import_environment(component_id='semantic-core'):
+            import torch
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        return {
+            'cuda_free_bytes': max(int(free_bytes), 0),
+            'cuda_total_bytes': max(int(total_bytes), 0),
+        }
+    except Exception:
+        return {}
+
+
+def _estimate_reranker_resource_requirements(
+    local_dir: Path,
+    *,
+    batch_size: int,
+    max_chars: int,
+) -> dict[str, object]:
+    measured_weight_bytes = _reranker_weight_bytes(local_dir)
+    weight_bytes = measured_weight_bytes or _RERANKER_FALLBACK_WEIGHT_BYTES
+    activation_bytes = max(
+        _RERANKER_MIN_ACTIVATION_BYTES,
+        min(
+            max(int(batch_size), 1)
+            * max(int(max_chars), 256)
+            * 64
+            * 1024,
+            _RERANKER_MAX_ACTIVATION_BYTES,
+        ),
+    )
+    return {
+        'model_weight_bytes': int(weight_bytes),
+        'model_weight_measured': bool(measured_weight_bytes),
+        'min_commit_headroom_bytes': int(
+            weight_bytes * _RERANKER_COMMIT_WEIGHT_FACTOR
+            + _RERANKER_COMMIT_RESERVE_BYTES
+            + activation_bytes * 0.5
+        ),
+        'min_physical_available_bytes': int(
+            weight_bytes * _RERANKER_PHYSICAL_WEIGHT_FACTOR
+            + _RERANKER_PHYSICAL_RESERVE_BYTES
+            + activation_bytes * 0.5
+        ),
+        'min_cuda_free_bytes': int(
+            weight_bytes * _RERANKER_CUDA_WEIGHT_FACTOR
+            + _RERANKER_CUDA_RESERVE_BYTES
+            + activation_bytes
+        ),
+        'estimated_activation_bytes': int(activation_bytes),
+    }
+
+
+def _evaluate_reranker_resources(
+    local_dir: Path,
+    *,
+    device: str,
+    batch_size: int,
+    max_chars: int,
+) -> RerankerResourceDecision:
+    current = dict(_query_memory_pressure_snapshot())
+    current.update(_query_cuda_memory_snapshot(device))
+    required = _estimate_reranker_resource_requirements(
+        local_dir,
+        batch_size=batch_size,
+        max_chars=max_chars,
+    )
+    checks = (
+        (
+            'commit_headroom_bytes',
+            'min_commit_headroom_bytes',
+            'low-commit-headroom',
+            'LowCommitHeadroom',
+            'Windows commit headroom',
+        ),
+        (
+            'available_physical_bytes',
+            'min_physical_available_bytes',
+            'low-physical-memory',
+            'LowPhysicalMemory',
+            'available physical memory',
+        ),
+        (
+            'cuda_free_bytes',
+            'min_cuda_free_bytes',
+            'low-cuda-memory',
+            'LowCudaMemory',
+            'free CUDA memory',
+        ),
+    )
+    for current_key, required_key, reason, error_class, label in checks:
+        current_bytes = int(current.get(current_key) or 0)
+        required_bytes = int(required.get(required_key) or 0)
+        if current_bytes > 0 and required_bytes > 0 and current_bytes < required_bytes:
+            return RerankerResourceDecision(
+                allowed=False,
+                reason=reason,
+                error_class=error_class,
+                error_message=(
+                    f'{label} is {current_bytes / GIB:.2f} GiB; '
+                    f'this model is estimated to need {required_bytes / GIB:.2f} GiB.'
+                ),
+                current=current,
+                required=required,
+            )
+    return RerankerResourceDecision(
+        allowed=True,
+        reason='allowed',
+        error_class='',
+        error_message='',
+        current=current,
+        required=required,
+    )
 
 
 class Reranker(Protocol):
@@ -157,12 +316,20 @@ class CrossEncoderReranker:
                 reranked_count=0,
                 skipped_reason='model_missing',
             )
-        if requested_device in {'auto', 'gpu'} and resolved_device == 'cuda':
-            memory_pressure = _query_memory_pressure_snapshot()
-            commit_headroom = int(memory_pressure.get('commit_headroom_bytes') or 0)
-            if 0 < commit_headroom < RERANKER_MIN_COMMIT_HEADROOM_BYTES:
-                available_gib = commit_headroom / (1024**3)
-                required_gib = RERANKER_MIN_COMMIT_HEADROOM_BYTES / (1024**3)
+        batch_size = self._initial_batch_size(resolved_device)
+        resource_decision: RerankerResourceDecision | None = None
+        if resolved_device == 'cuda':
+            resource_decision = _evaluate_reranker_resources(
+                get_local_reranker_dir(self.config, self.paths),
+                device=resolved_device,
+                batch_size=batch_size,
+                max_chars=self.config.reranker_max_chars,
+            )
+            # Auto is allowed to make a conservative resource choice, but an
+            # explicit GPU selection must remain an actual user override. GUI
+            # queries run in a disposable child process, so native failures
+            # cannot take down the interactive application.
+            if requested_device == 'auto' and not resource_decision.allowed:
                 return hits, RerankOutcome(
                     enabled=True,
                     applied=False,
@@ -171,13 +338,12 @@ class CrossEncoderReranker:
                     resolved_device=resolved_device,
                     candidate_count=limit,
                     reranked_count=0,
-                    skipped_reason='system_memory_guard',
-                    fallback_reason='reranker_system_memory_guard',
-                    error_class='LowCommitHeadroom',
-                    error_message=(
-                        f'Windows commit headroom is {available_gib:.2f} GiB; '
-                        f'Auto requires at least {required_gib:.2f} GiB before loading the reranker.'
-                    ),
+                    skipped_reason='resource_guard',
+                    fallback_reason='reranker_resource_guard',
+                    error_class=resource_decision.error_class,
+                    error_message=resource_decision.error_message,
+                    resource_snapshot=resource_decision.current,
+                    resource_requirements=resource_decision.required,
                 )
 
         started_at = time.perf_counter()
@@ -185,7 +351,6 @@ class CrossEncoderReranker:
         suffix = list(hits[limit:])
         pairs = [(query_text, _compact_hit_text(hit, self.config.reranker_max_chars)) for hit in prefix]
         used_device = resolved_device
-        batch_size = self._initial_batch_size(resolved_device)
         degraded_to_cpu = False
         oom_recovered = False
         scores: list[float] | None = None
@@ -229,6 +394,8 @@ class CrossEncoderReranker:
                     fallback_reason='reranker_execution_failed',
                     error_class=exc.__class__.__name__,
                     error_message=error_message,
+                    resource_snapshot=resource_decision.current if resource_decision else {},
+                    resource_requirements=resource_decision.required if resource_decision else {},
                 )
 
         normalized_scores = _normalize_rerank_scores(scores or [])
@@ -267,6 +434,8 @@ class CrossEncoderReranker:
             cuda_peak_mem_before=cuda_before,
             cuda_peak_mem_after=cuda_after,
             cuda_peak_mem_delta=cuda_delta,
+            resource_snapshot=resource_decision.current if resource_decision else {},
+            resource_requirements=resource_decision.required if resource_decision else {},
         )
         return rescored + suffix, outcome
 

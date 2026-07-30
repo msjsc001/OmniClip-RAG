@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import shutil
+import tomllib
 import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from build import BuildTarget, _prepare_bundled_python
+from build import GUI_TARGET, BuildTarget, _prepare_bundled_python
+from omniclip_rag import __version__
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +61,26 @@ class BuildReleaseSupportTests(unittest.TestCase):
             _prepare_bundled_python(target)
 
         self.assertTrue((output_dir / 'runtime_support' / 'python' / 'tools' / 'python.exe').exists())
+
+    def test_current_release_metadata_uses_package_version(self) -> None:
+        project = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))
+        server = json.loads((ROOT / 'server.json').read_text(encoding='utf-8'))
+        self.assertEqual(project['project']['version'], __version__)
+        self.assertEqual(server['version'], __version__)
+        self.assertEqual(
+            GUI_TARGET.release_zip_path.name,
+            f'OmniClipRAG-v{__version__}-WIN-EXE.zip',
+        )
+        self.assertIn(f'/v{__version__}/', server['packages'][0]['identifier'])
+        self.assertIn(f'-v{__version__}.mcpb', server['packages'][0]['identifier'])
+        self.assertIn(
+            f'version-v{__version__}-',
+            (ROOT / 'README.md').read_text(encoding='utf-8'),
+        )
+        self.assertIn(
+            f'version-v{__version__}-',
+            (ROOT / 'README.zh-CN.md').read_text(encoding='utf-8'),
+        )
 
 
 if __name__ == '__main__':

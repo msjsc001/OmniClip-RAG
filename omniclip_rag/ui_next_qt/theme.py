@@ -617,6 +617,11 @@ def build_stylesheet(theme: ThemeState) -> str:
         border: 1px solid {colors['query_blocked_border']};
         border-radius: {radius}px;
     }}
+    QFrame#QueryStatusBanner[mode='error'] {{
+        background: {colors['query_blocked_bg']};
+        border: 1px solid {colors['query_blocked_border']};
+        border-radius: {radius}px;
+    }}
     QFrame#QueryStatusBanner[mode='done'] {{
         background: {colors['query_done_bg']};
         border: 1px solid {colors['query_done_border']};
@@ -629,6 +634,9 @@ def build_stylesheet(theme: ThemeState) -> str:
         color: {colors['query_running_fg']};
     }}
     QLabel#QueryStatusTitle[mode='blocked'], QLabel#QueryStatusDetail[mode='blocked'] {{
+        color: {colors['query_blocked_fg']};
+    }}
+    QLabel#QueryStatusTitle[mode='error'], QLabel#QueryStatusDetail[mode='error'] {{
         color: {colors['query_blocked_fg']};
     }}
     QLabel#QueryStatusTitle[mode='done'], QLabel#QueryStatusDetail[mode='done'] {{

@@ -330,6 +330,16 @@ class QtUiTests(unittest.TestCase):
                 workspace.query_row_layout.itemAt(search_index + 1).widget(),
                 workspace.query_status_button,
             )
+            threshold_index = workspace.meta_row_layout.indexOf(workspace.threshold_label)
+            self.assertIs(
+                workspace.meta_row_layout.itemAt(threshold_index + 1).widget(),
+                workspace.threshold_edit,
+            )
+            limit_index = workspace.meta_row_layout.indexOf(workspace.limit_label)
+            self.assertIs(
+                workspace.meta_row_layout.itemAt(limit_index + 1).widget(),
+                workspace.limit_edit,
+            )
             self.assertEqual(workspace.query_status_button.text(), '待查询')
 
             workspace.set_external_block_state(blocked=True, title='Runtime 检测中', detail='请稍候')
@@ -340,13 +350,22 @@ class QtUiTests(unittest.TestCase):
             workspace._busy = True
             workspace._query_progress_payload = {'overall_percent': 42.0, 'stage_status': 'vector'}
             workspace._refresh_query_status_banner()
-            self.assertEqual(workspace.query_status_button.text(), '查询中 42%')
+            self.assertEqual(workspace.query_status_button.text(), '语义召回 · 42%')
+
+            workspace._query_progress_payload = {'overall_percent': 68.0, 'stage_status': 'rerank'}
+            workspace._refresh_query_status_banner()
+            self.assertEqual(workspace.query_status_button.text(), '重排 · 68%')
 
             workspace._busy = False
             workspace._query_last_completed_at = time.time()
             workspace._query_last_result_count = 15
             workspace._refresh_query_status_banner()
             self.assertEqual(workspace.query_status_button.text(), '完成 · 15')
+
+            workspace._query_last_error = '子进程异常退出'
+            workspace._refresh_query_status_banner()
+            self.assertEqual(workspace.query_status_button.text(), '查询失败')
+            self.assertIn('子进程异常退出', workspace.query_status_button.toolTip())
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -420,21 +439,33 @@ class QtUiTests(unittest.TestCase):
         try:
             workspace._query_runtime_warnings = (
                 'markdown_reranker_unavailable',
-                'markdown_reranker_system_memory_guard',
+                'markdown_reranker_resource_guard',
             )
             workspace._query_runtime_requirements = ({
                 'kind': 'reranker',
-                'reason': 'reranker_system_memory_guard',
+                'reason': 'reranker_resource_guard',
                 'vault_path': str(SAMPLE_ROOT),
                 'error_class': 'LowCommitHeadroom',
-                'error_message': 'Windows commit headroom is 3.59 GiB.',
+                'error_message': 'Windows commit headroom is 3.59 GiB; this model is estimated to need 4.25 GiB.',
+                'current': {
+                    'commit_headroom_bytes': 3.59 * 1024**3,
+                    'available_physical_bytes': 11.25 * 1024**3,
+                    'cuda_free_bytes': 7.50 * 1024**3,
+                },
+                'required': {
+                    'min_commit_headroom_bytes': 4.25 * 1024**3,
+                    'min_physical_available_bytes': 3.10 * 1024**3,
+                    'min_cuda_free_bytes': 3.55 * 1024**3,
+                },
             },)
             workspace._refresh_query_runtime_hint()
 
             hint = workspace.query_runtime_hint_label.text()
-            self.assertIn('10 GiB Auto 安全线', hint)
-            self.assertIn('关闭浏览器大量标签页', hint)
-            self.assertIn('自动管理所有驱动器的分页文件大小', hint)
+            self.assertIn('Commit 余量 3.59 GiB', hint)
+            self.assertIn('CUDA 可用显存 7.50 GiB', hint)
+            self.assertIn('4.25 / 3.10 / 3.55 GiB', hint)
+            self.assertIn('查询已完成，只跳过二次排序', hint)
+            self.assertIn('不再使用统一的 10 GiB 门槛', hint)
             self.assertIn('无需重装 Runtime 或模型', hint)
             self.assertNotIn('修复或重装重排模型', hint)
         finally:
@@ -879,6 +910,121 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_extension_config_persist_never_scans_source_directories_on_ui_thread(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'extension_persist_async_summary'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._extension_state.pdf_config.enabled = True
+            with patch.object(
+                workspace,
+                '_normalize_extension_registry_state',
+                side_effect=AssertionError('directory normalization must not run in the button callback'),
+            ), patch.object(
+                workspace,
+                '_refresh_extension_source_summaries',
+                side_effect=AssertionError('source summaries must not run in the button callback'),
+            ), patch.object(workspace, '_request_extension_source_summaries_refresh') as request_refresh:
+                workspace._persist_extension_state(sync_tika_sidecar=False)
+            request_refresh.assert_called_once_with(workspace._config, workspace._paths)
+            self.assertTrue(workspace._extension_registry.load(paths).pdf_config.enabled)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_source_summary_refresh_runs_outside_ui_thread(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'extension_summary_background'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        caller_thread_id = threading.get_ident()
+        worker_thread_ids: list[int] = []
+        try:
+            def build_summaries(*_args, **_kwargs):
+                worker_thread_ids.append(threading.get_ident())
+                return {}
+
+            with patch(
+                'omniclip_rag.ui_next_qt.config_workspace._build_extension_source_summaries_payload',
+                side_effect=build_summaries,
+            ):
+                workspace._request_extension_source_summaries_refresh(config, paths)
+                deadline = time.monotonic() + 3.0
+                while workspace._extension_summary_worker is not None and time.monotonic() < deadline:
+                    app.processEvents()
+                    time.sleep(0.01)
+            self.assertTrue(worker_thread_ids)
+            self.assertTrue(all(thread_id != caller_thread_id for thread_id in worker_thread_ids))
+            self.assertIsNone(workspace._extension_summary_worker)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_source_summary_refresh_discards_stale_results(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'extension_summary_stale'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        existing = {('pdf', 'current'): {'has_indexed_data': True}}
+        try:
+            workspace._extension_summary_request_id = 2
+            workspace._extension_source_summaries = existing
+            workspace._handle_extension_source_summaries_success({
+                'request_id': 1,
+                'state': None,
+                'summaries': {('pdf', 'stale'): {'has_indexed_data': False}},
+            })
+            self.assertEqual(workspace._extension_source_summaries, existing)
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_source_summary_refresh_preserves_pending_state_reload(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'extension_summary_pending_reload'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            workspace._extension_summary_worker = object()
+            workspace._extension_summary_active_reload_state = True
+            workspace._request_extension_source_summaries_refresh(config, paths, reload_state=False)
+            self.assertTrue(workspace._extension_summary_refresh_pending)
+            self.assertIsNotNone(workspace._extension_summary_pending_context)
+            assert workspace._extension_summary_pending_context is not None
+            self.assertTrue(workspace._extension_summary_pending_context[2])
+        finally:
+            workspace._extension_summary_worker = None
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_extension_task_completion_requests_background_state_reload(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT / 'extension_task_reload'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='disabled')
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            with patch.object(
+                workspace,
+                '_load_extension_state',
+                side_effect=AssertionError('task completion must not reload extension state on the UI thread'),
+            ), patch.object(workspace, '_request_extension_state_reload') as request_reload:
+                workspace._after_extension_source_task({
+                    'pipeline': 'pdf',
+                    'source_path': str(SAMPLE_ROOT),
+                    'action': 'preflight',
+                    'report': SimpleNamespace(cancelled=False, total_files=1, total_pages=1, recent_issues=()),
+                })
+            request_reload.assert_called_once_with()
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_config_workspace_saves_filters_and_ui_preferences(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -1168,6 +1314,68 @@ class QtUiTests(unittest.TestCase):
                 text('zh-CN', 'md_watch_skip_not_ready', vault=Path(config.vault_path).name or config.vault_path)
             )
         finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_global_watch_stop_targets_every_actual_worker_and_is_idempotent(self) -> None:
+        class FakeWatchWorker:
+            def __init__(self) -> None:
+                self.stop_calls = 0
+
+            def stop(self) -> None:
+                self.stop_calls += 1
+
+        app = get_app()
+        theme = build_theme('light', 100)
+        vault_a = TEST_ROOT / 'watch_vault_a'
+        vault_b = TEST_ROOT / 'watch_vault_b'
+        vault_a.mkdir(parents=True, exist_ok=True)
+        vault_b.mkdir(parents=True, exist_ok=True)
+        paths = ensure_data_paths(str(TEST_ROOT / 'watch_data'), str(vault_a))
+        config = AppConfig(
+            vault_path=str(vault_a),
+            vault_paths=[str(vault_a), str(vault_b)],
+            md_selected_vault_paths=[str(vault_a)],
+            data_root=str(paths.global_root),
+        )
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        normalized_a = str(vault_a.resolve())
+        normalized_b = str(vault_b.resolve())
+        worker_a = FakeWatchWorker()
+        worker_b = FakeWatchWorker()
+        try:
+            workspace._md_watch_workers = {
+                normalized_a: worker_a,
+                normalized_b: worker_b,
+            }
+            workspace._refresh_markdown_watch_state()
+
+            workspace._toggle_watch()
+            workspace._toggle_watch()
+
+            self.assertEqual(worker_a.stop_calls, 1)
+            self.assertEqual(worker_b.stop_calls, 1)
+            self.assertEqual(workspace._md_watch_stopping, {normalized_a, normalized_b})
+            self.assertFalse(workspace.watch_button.isEnabled())
+            self.assertEqual(workspace.watch_button.text(), text('zh-CN', 'status_watch_stopping'))
+            with patch.object(workspace, '_append_log') as append_log:
+                workspace._on_watch_updated_for_vault(
+                    normalized_b,
+                    {'stats': {}, 'changed': ['late.md'], 'deleted': []},
+                )
+            append_log.assert_not_called()
+
+            actions = workspace._build_md_vault_actions_widget(normalized_b, workspace)
+            stopping_buttons = [
+                button
+                for button in actions.findChildren(QtWidgets.QPushButton)
+                if button.text() == text('zh-CN', 'md_vault_row_watch_stopping')
+            ]
+            self.assertEqual(len(stopping_buttons), 1)
+            self.assertFalse(stopping_buttons[0].isEnabled())
+        finally:
+            workspace._md_watch_workers.clear()
+            workspace._md_watch_stopping.clear()
             workspace.deleteLater()
             app.processEvents()
 

@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## V0.4.12 - 2026-07-30
+
+### Added
+
+- Added [RELEASE_NOTES_v0.4.12](releases/RELEASE_NOTES_v0.4.12.md) for the adaptive Reranker-resource and visible query-stage release.
+- Added model-aware Reranker resource diagnostics containing the measured model weight, estimated activation budget, and live Commit, physical-memory, and CUDA-memory values.
+- Added concise query-stage labels to the status button beside Search, including lexical recall, semantic recall, fusion, reranking, finalization, context packing, and fallback stages.
+- Added a persistent failed-query state so a failure cannot be mistaken for the previous successful query.
+- Added per-vault live-watch stopping states and authoritative worker-exit tracking.
+
+### Changed
+
+- Changed visible app/package metadata and MCP setup examples to `v0.4.12`.
+- Changed the Windows desktop release archive name to include the explicit `WIN-EXE` label so end users can distinguish it from MCP packages.
+- Changed Auto Reranker admission from a universal 10 GiB Commit floor to an adaptive estimate based on the active model and live machine resources.
+- Changed the score-threshold and result-limit controls to keep each numeric field immediately beside its label.
+- Changed isolated query-worker cleanup so completed, cancelled, and failed children are explicitly waited on and reaped.
+- Changed the global live-watch stop action to target every actual running watcher, independent of later vault-selection changes.
+- Changed live-watch scanning, rendering, and vector updates to honor cooperative stop requests at safe repairable checkpoints.
+- Changed PDF/Tika directory status reloads and indexed-source summaries to run in a coalesced background refresh instead of the Qt UI thread.
+
+### Fixed
+
+- Fixed healthy machines being prevented from running the Reranker despite having enough Commit, physical memory, and CUDA memory for the actual model.
+- Fixed the compact query-state button showing only a percentage instead of the stage doing the work.
+- Fixed a failed query reverting to the prior completed-state chip.
+- Fixed wide Query Console layouts stretching large empty gaps between numeric labels and their input fields.
+- Fixed multi-vault live-watch stop omitting listeners when the selected-vault set no longer matched the running-vault set.
+- Fixed per-vault stop buttons accepting duplicate stop requests and continuing to display queued updates after entering the stopping state.
+- Fixed application shutdown clearing live-watch bookkeeping before worker threads had been given time to exit.
+- Fixed PDF/Tika directory actions completing their background work and then freezing the interface during synchronous state and source-summary refreshes.
+
 ## V0.4.11 - 2026-07-30
 
 ### Added
