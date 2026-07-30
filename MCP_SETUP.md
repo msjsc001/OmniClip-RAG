@@ -142,6 +142,12 @@ The Registry metadata lives in the repository root as:
 
 - `server.json`
 
+The current public discovery identity is:
+
+- `io.github.EllisMorrow/omniclip-rag-mcp`
+
+The MCPB manifest intentionally retains the legacy pre-rename package identity so existing installations remain upgrade-compatible.
+
 The standard publishable artifact is:
 
 - `omniclip-rag-mcp-win-x64-vX.Y.Z.mcpb`

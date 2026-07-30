@@ -28,6 +28,7 @@
 - Fixed lexical-only recovery paths importing the semantic runtime solely to populate diagnostic metadata.
 - Fixed multi-vault queries discarding the first Reranker exception and showing only a non-actionable circuit-open skip for later vaults.
 - Fixed healthy Windows memory snapshots being mislabeled as `system_memory_to_cpu`, and fixed CPU-hosted NumPy result arrays being mistaken for CPU model execution after successful CUDA inference.
+- Migrated the official MCP Registry discovery identity to `io.github.EllisMorrow/omniclip-rag-mcp` after the GitHub account rename, while retaining the legacy MCPB manifest identity for installed-client upgrade compatibility.
 
 ## V0.4.9 - 2026-07-29
 

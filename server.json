@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.msjsc001/omniclip-rag-mcp",
+  "name": "io.github.EllisMorrow/omniclip-rag-mcp",
   "title": "OmniClip RAG",
   "description": "Read-only local-first MCP server for private Markdown, PDF, and Tika-backed search on Windows.",
   "repository": {

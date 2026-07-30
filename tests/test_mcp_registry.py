@@ -3,6 +3,7 @@ import unittest
 from omniclip_rag.mcp.registry import (
     MCPB_ENTRY_POINT,
     MCPB_ICON_NAME,
+    MCPB_MANIFEST_NAME,
     REGISTRY_DESCRIPTION,
     REGISTRY_REPOSITORY_URL,
     REGISTRY_SERVER_NAME,
@@ -18,7 +19,7 @@ class McpRegistryTests(unittest.TestCase):
     def test_manifest_uses_binary_bundle_entrypoint(self) -> None:
         manifest = build_mcpb_manifest('0.4.1')
         self.assertEqual(manifest['manifest_version'], '0.4')
-        self.assertEqual(manifest['name'], REGISTRY_SERVER_NAME)
+        self.assertEqual(manifest['name'], MCPB_MANIFEST_NAME)
         self.assertEqual(manifest['display_name'], REGISTRY_TITLE)
         self.assertEqual(manifest['icon'], MCPB_ICON_NAME)
         self.assertEqual(manifest['server']['type'], 'binary')
@@ -40,8 +41,9 @@ class McpRegistryTests(unittest.TestCase):
         self.assertEqual(payload['packages'][0]['identifier'], mcpb_download_url('0.4.1'))
         self.assertEqual(payload['packages'][0]['fileSha256'], 'abc123')
 
-    def test_registry_identity_is_stable_while_repository_uses_canonical_owner(self) -> None:
-        self.assertEqual(REGISTRY_SERVER_NAME, 'io.github.msjsc001/omniclip-rag-mcp')
+    def test_registry_identity_follows_owner_while_mcpb_identity_stays_compatible(self) -> None:
+        self.assertEqual(REGISTRY_SERVER_NAME, 'io.github.EllisMorrow/omniclip-rag-mcp')
+        self.assertEqual(MCPB_MANIFEST_NAME, 'io.github.msjsc001/omniclip-rag-mcp')
         self.assertEqual(REGISTRY_REPOSITORY_URL, 'https://github.com/EllisMorrow/OmniClip-RAG')
         self.assertIn('github.com/EllisMorrow/OmniClip-RAG/releases/', mcpb_download_url('0.4.9'))
 

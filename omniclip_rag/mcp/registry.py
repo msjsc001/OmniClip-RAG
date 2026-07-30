@@ -6,7 +6,11 @@ from .. import __version__
 
 
 REGISTRY_SCHEMA_URL = 'https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json'
-REGISTRY_SERVER_NAME = 'io.github.msjsc001/omniclip-rag-mcp'
+REGISTRY_SERVER_NAME = 'io.github.EllisMorrow/omniclip-rag-mcp'
+# Keep the installed MCPB identity stable across the GitHub account rename.
+# Registry discovery follows the current owner namespace, while existing MCPB
+# clients continue to recognize upgrades as the same installed extension.
+MCPB_MANIFEST_NAME = 'io.github.msjsc001/omniclip-rag-mcp'
 REGISTRY_TITLE = 'OmniClip RAG'
 REGISTRY_DESCRIPTION = 'Read-only local-first MCP server for private Markdown, PDF, and Tika-backed search on Windows.'
 REGISTRY_REPOSITORY_URL = 'https://github.com/EllisMorrow/OmniClip-RAG'
@@ -35,7 +39,7 @@ def mcpb_download_url(version: str = __version__) -> str:
 def build_mcpb_manifest(version: str = __version__) -> dict[str, Any]:
     return {
         'manifest_version': MCPB_MANIFEST_VERSION,
-        'name': REGISTRY_SERVER_NAME,
+        'name': MCPB_MANIFEST_NAME,
         'display_name': REGISTRY_TITLE,
         'version': version,
         'description': REGISTRY_DESCRIPTION,

@@ -28,6 +28,7 @@ Queries now run in a disposable child process. A native Windows access violation
 - Healthy memory snapshots no longer generate a false CPU-fallback warning, and CUDA execution is identified from the model/inference device rather than the CPU location of the returned NumPy array.
 - Query Console, Results & Details, Config, and Activity Log now occupy independent top-level tabs; existing diagnostic jumps open the new Activity Log location.
 - The header can be hidden completely while its Expand/Collapse action remains at the far right of the tab row, and a compact state button beside Query shows whether a query is ready, blocked, running, or complete.
+- Official MCP Registry discovery now follows the current `io.github.EllisMorrow/omniclip-rag-mcp` namespace; the MCPB keeps its legacy internal identity so existing installations remain upgrade-compatible.
 
 ## Release Assets
 
