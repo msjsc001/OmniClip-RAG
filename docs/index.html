@@ -3,272 +3,360 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OmniClip RAG | Local-first Private Knowledge Retrieval</title>
-  <meta name="description" content="OmniClip RAG is a local-first desktop knowledge retrieval app and read-only MCP server for private Markdown, PDF, and Tika-backed search on Windows.">
-  <meta name="theme-color" content="#FCFCFA">
-  <meta property="og:title" content="OmniClip RAG | Local-first Private Knowledge Retrieval">
-  <meta property="og:description" content="Search private Markdown, PDF, and Tika-backed documents locally. Use the desktop app yourself or connect the read-only MCP server to MCP-capable AI clients.">
+  <title>OmniClip RAG | Private Knowledge, Local Retrieval</title>
+  <meta name="description" content="Search private Markdown, PDF, and Tika-backed documents locally on Windows. Use hybrid retrieval in the desktop app or connect AI clients through a read-only MCP server.">
+  <meta name="robots" content="index,follow">
+  <meta name="theme-color" content="#123B4A">
+  <meta name="color-scheme" content="light">
+
+  <meta property="og:title" content="OmniClip RAG | Private Knowledge, Local Retrieval">
+  <meta property="og:description" content="A local-first Windows search engine for private Markdown, PDF, and office documents, with a read-only MCP bridge for AI clients.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://msjsc001.github.io/OmniClip-RAG/">
-  <meta property="og:image" content="https://msjsc001.github.io/OmniClip-RAG/assets/social-preview.webp">
-  <meta property="og:image:alt" content="OmniClip RAG social preview showing a local knowledge core and local-first positioning">
+  <meta property="og:url" content="https://ellismorrow.github.io/OmniClip-RAG/">
+  <meta property="og:image" content="https://ellismorrow.github.io/OmniClip-RAG/assets/social-preview.png">
+  <meta property="og:image:width" content="1536">
+  <meta property="og:image:height" content="768">
+  <meta property="og:image:alt" content="OmniClip RAG app icon with the words Private knowledge. Local retrieval.">
+
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="OmniClip RAG | Local-first Private Knowledge Retrieval">
-  <meta name="twitter:description" content="A Windows desktop app and read-only MCP server for private Markdown, PDF, and Tika-backed search.">
-  <meta name="twitter:image" content="https://msjsc001.github.io/OmniClip-RAG/assets/social-preview.webp">
-  <link rel="canonical" href="https://msjsc001.github.io/OmniClip-RAG/">
+  <meta name="twitter:title" content="OmniClip RAG | Private Knowledge, Local Retrieval">
+  <meta name="twitter:description" content="Local-first hybrid retrieval for private notes and documents on Windows.">
+  <meta name="twitter:image" content="https://ellismorrow.github.io/OmniClip-RAG/assets/social-preview.png">
+
+  <link rel="canonical" href="https://ellismorrow.github.io/OmniClip-RAG/">
   <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./styles.css">
+
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "OmniClip RAG",
+      "applicationCategory": "UtilitiesApplication",
+      "operatingSystem": "Windows 10, Windows 11",
+      "description": "A local-first desktop knowledge retrieval app and read-only MCP server for private Markdown, PDF, and Tika-backed search.",
+      "url": "https://ellismorrow.github.io/OmniClip-RAG/",
+      "downloadUrl": "https://github.com/EllisMorrow/OmniClip-RAG/releases/latest",
+      "softwareHelp": "https://github.com/EllisMorrow/OmniClip-RAG",
+      "license": "https://opensource.org/license/mit"
+    }
+  </script>
 </head>
 <body>
-  <a class="skip-link" href="#main-content" data-zh="跳到主要内容">Skip to main content</a>
+  <a class="skip-link" href="#main-content" data-i18n="skip">Skip to main content</a>
 
   <header class="site-header">
     <div class="container header-inner">
-      <a class="brand" href="#top" aria-label="OmniClip RAG home">
-        <span class="brand-mark">◎</span>
-        <span class="brand-text">OmniClip RAG</span>
+      <a class="brand" href="#top" aria-label="OmniClip RAG home" data-aria-zh="OmniClip RAG 首页">
+        <img src="./assets/favicon.svg" alt="" width="38" height="38">
+        <span>OmniClip RAG</span>
       </a>
-      <nav class="site-nav" aria-label="Primary">
-        <a href="#features" data-zh="系统架构">Architecture</a>
-        <a href="#workflow" data-zh="工作流">Workflow</a>
-        <a href="#mcp" data-zh="MCP 协议">MCP</a>
-        <a href="#screens" data-zh="控制终端">Screens</a>
+
+      <nav class="site-nav" aria-label="Primary navigation" data-aria-zh="主要导航">
+        <a href="#features" data-i18n="nav_features">Features</a>
+        <a href="#workflow" data-i18n="nav_workflow">Workflow</a>
+        <a href="#mcp">MCP</a>
+        <a href="#interface" data-i18n="nav_interface">Interface</a>
+        <a href="#download" data-i18n="nav_download">Download</a>
       </nav>
-      <div class="lang-switch" role="group" aria-label="Language switch">
-        <button type="button" class="lang-button is-active" data-lang-switch="en" aria-pressed="true">EN</button>
-        <button type="button" class="lang-button" data-lang-switch="zh" aria-pressed="false">中文</button>
+
+      <div class="language-switch" role="group" aria-label="Language switch" data-aria-zh="语言切换">
+        <button type="button" data-language="en" aria-pressed="true">EN</button>
+        <button type="button" data-language="zh" aria-pressed="false">中文</button>
       </div>
     </div>
   </header>
 
   <main id="main-content">
-    <section id="top" class="hero-section">
+    <section class="hero" id="top">
       <div class="container hero-grid">
         <div class="hero-copy">
-          <p class="eyebrow" data-zh="本地优先 · 物理隔离 · 只读协议">Air-gapped by design · Read-only</p>
-          <h1 data-zh="绝对的知识主权。">Knowledge sovereignty, absolute.</h1>
-          <p class="hero-subtitle" data-zh="只递交切片，不交出大脑。">
-            Release the fragment. Retain the mind.
+          <p class="eyebrow">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span data-i18n="hero_eyebrow">Windows · Local-first · Read-only MCP</span>
           </p>
-          <p class="hero-description" data-zh="让私有语料沉淀于本地沙盒。仅在必要时，经由只读通道向外输送精确的上下文锚点。">
-            The corpus stays anchored. When context must travel, only precise evidence leaves via read-only channels.
+          <h1 data-i18n="hero_title">Private knowledge.<br>Local retrieval.</h1>
+          <p class="hero-lead" data-i18n="hero_lead">
+            Search Markdown, PDF, and office documents with hybrid lexical and semantic retrieval—without uploading your knowledge base.
           </p>
           <div class="hero-actions">
-            <a class="button button-primary" href="https://github.com/EllisMorrow/OmniClip-RAG/releases/latest" target="_blank" rel="noreferrer" data-zh="下载最新版">Download</a>
-            <a class="button button-secondary" href="https://github.com/EllisMorrow/OmniClip-RAG" target="_blank" rel="noreferrer" data-zh="访问 GitHub">GitHub</a>
-            <a class="button button-link" href="https://github.com/EllisMorrow/OmniClip-RAG/blob/main/MCP_SETUP.md" target="_blank" rel="noreferrer" data-zh="MCP 接入指南">MCP Setup</a>
+            <a class="button button-primary" href="https://github.com/EllisMorrow/OmniClip-RAG/releases/latest" target="_blank" rel="noopener noreferrer">
+              <span data-i18n="download_windows">Download Windows EXE</span>
+              <span aria-hidden="true">↗</span>
+            </a>
+            <a class="button button-secondary" href="https://github.com/EllisMorrow/OmniClip-RAG" target="_blank" rel="noopener noreferrer">
+              <span data-i18n="view_source">View source</span>
+            </a>
           </div>
-          <ul class="hero-meta" aria-label="Project highlights">
-            <li data-zh="桌面 GUI 与只读 MCP 共用同一绝对内核">Desktop GUI and read-only MCP sharing one absolute core</li>
+          <ul class="hero-facts" aria-label="Product highlights" data-aria-zh="产品特点">
+            <li data-i18n="fact_local">Indexing and queries stay on this device</li>
+            <li data-i18n="fact_models">CPU and NVIDIA CUDA supported</li>
+            <li data-i18n="fact_license">Open source under the MIT License</li>
           </ul>
         </div>
-        <div class="hero-visual">
-          <div class="art-stage art-stage-hero">
-            <img class="illustration-blend" src="./assets/hero-illustration.png" alt="Conceptual illustration showing scattered knowledge being stabilized into a local knowledge core">
-          </div>
-        </div>
-      </div>
-    </section>
 
-    <section class="summary-section">
-      <div class="container">
-        <div class="summary-grid">
-          <article class="summary-card">
-            <p class="summary-label" data-zh="核心形态">Law I</p>
-            <p data-zh="孤立的知识核心，单向的只读轨道。">
-              An isolated core. A one-way orbit.
-            </p>
-          </article>
-          <article class="summary-card">
-            <p class="summary-label" data-zh="安全边界">Law II</p>
-            <p data-zh="母库永远驻守，越过高墙的仅是切片。">
-              The vault remains closed. Only fragments cross the line.
-            </p>
-          </article>
-          <article class="summary-card">
-            <p class="summary-label" data-zh="为谁设计">Law III</p>
-            <p data-zh="为游弋于多模型间的严肃思考者构筑。">
-              Forged for serious minds navigating the multi-model era.
-            </p>
-          </article>
-        </div>
-      </div>
-    </section>
-
-    <section id="features" class="content-section">
-      <div class="container">
-        <div class="section-head section-head-split">
-          <div class="section-intro">
-            <p class="section-kicker" data-zh="系统哲学">The Philosophy</p>
-            <h2 data-zh="拒绝聊天外壳，构筑纯粹引擎。">Not a chat shell. A knowledge engine.</h2>
-            <p data-zh="检索。引证。以极致的克制向外输送。">
-              Retrieve. Cite. Transport outward with extreme restraint.
-            </p>
-          </div>
-          <figure class="section-art section-art-logic">
-            <div class="art-stage art-stage-diagram art-stage-logic">
-              <img class="illustration-blend" src="./assets/core-logic-illustration.png" alt="Abstract illustration for OmniClip RAG core logic">
+        <div class="hero-product" aria-label="Illustration of the OmniClip RAG query workflow" data-aria-zh="OmniClip RAG 查询流程示意">
+          <div class="app-window app-window-hero">
+            <div class="window-bar">
+              <div class="window-brand">
+                <img src="./assets/favicon.svg" alt="" width="28" height="28">
+                <strong>OmniClip RAG</strong>
+              </div>
+              <span class="window-runtime"><i aria-hidden="true"></i><span data-i18n="runtime_ready">Runtime ready</span></span>
             </div>
-          </figure>
+            <div class="window-tabs" aria-hidden="true">
+              <span class="is-active" data-i18n="tab_query">Query</span>
+              <span data-i18n="tab_results">Results</span>
+              <span data-i18n="tab_config">Config</span>
+              <span data-i18n="tab_log">Activity log</span>
+            </div>
+            <div class="query-shell">
+              <div class="query-heading">
+                <div>
+                  <small data-i18n="query_label">QUERY DESK</small>
+                  <strong data-i18n="query_question">What matters most in these notes?</strong>
+                </div>
+                <span class="stage-badge"><i aria-hidden="true"></i><span data-i18n="stage_rerank">Reranking · 4/6</span></span>
+              </div>
+              <div class="search-field">
+                <span data-i18n="query_placeholder">Search your local knowledge base</span>
+                <b data-i18n="search_button">Search</b>
+              </div>
+              <div class="source-row">
+                <span>Markdown</span>
+                <span>PDF</span>
+                <span>Tika</span>
+                <em data-i18n="hybrid_cuda">Hybrid · CUDA</em>
+              </div>
+              <div class="result-preview">
+                <div class="result-score">92</div>
+                <div>
+                  <strong data-i18n="result_title">Decision principles</strong>
+                  <p data-i18n="result_excerpt">The best match is grounded in the original note and keeps its source path.</p>
+                </div>
+                <span class="result-source">Markdown</span>
+              </div>
+            </div>
+          </div>
+          <div class="hero-orbit hero-orbit-one" aria-hidden="true"></div>
+          <div class="hero-orbit hero-orbit-two" aria-hidden="true"></div>
         </div>
+      </div>
+    </section>
+
+    <section class="signal-strip" aria-label="Core capabilities" data-aria-zh="核心能力">
+      <div class="container signal-grid">
+        <div><strong>Markdown · PDF · Tika</strong><span data-i18n="signal_formats">One search surface</span></div>
+        <div><strong>FTS5 + LanceDB</strong><span data-i18n="signal_hybrid">Hybrid retrieval</span></div>
+        <div><strong>BGE-M3</strong><span data-i18n="signal_models">Local embedding and reranking</span></div>
+        <div><strong>Zero telemetry</strong><span data-i18n="signal_privacy">No usage tracking</span></div>
+      </div>
+    </section>
+
+    <section class="section" id="features">
+      <div class="container">
+        <div class="section-heading">
+          <p class="section-kicker" data-i18n="features_kicker">BUILT FOR PRIVATE KNOWLEDGE</p>
+          <h2 data-i18n="features_title">A retrieval engine, not another chat shell.</h2>
+          <p data-i18n="features_intro">OmniClip prepares precise, traceable context. You decide where that context goes next.</p>
+        </div>
+
         <div class="feature-grid">
-          <article class="feature-card">
-            <h3 data-zh="本地数据自治">Local Data Autonomy</h3>
-            <p data-zh="算力与索引完全本地锁死；离境的，唯有选定的事实。">
-              Compute and indexing stay local. Only chosen facts breach the perimeter.
-            </p>
-          </article>
-          <article class="feature-card">
-            <h3 data-zh="内核绝对复用">Absolute Core Reuse</h3>
-            <p data-zh="桌面终端与外联 MCP 协议，无缝共用同一只读枢纽。">
-              One read-only hub, powering both local desktop and external MCP.
-            </p>
-          </article>
-          <article class="feature-card">
-            <h3 data-zh="跨模型认知套利">Cross-Model Arbitrage</h3>
-            <p data-zh="锚定恒定的私有语料，无损套利全网大模型的推理潮汐。">
-              One anchored corpus. Infinite LLM reasoning possibilities.
-            </p>
-          </article>
-        </div>
-      </div>
-    </section>
-
-    <section id="workflow" class="content-section alt-surface">
-      <div class="container">
-        <div class="section-head section-head-split">
-          <div class="section-intro">
-            <p class="section-kicker" data-zh="工作流">Workflow</p>
-            <h2 data-zh="先取证，再推演。">Retrieve first. Reason after.</h2>
-            <p data-zh="在本地夯实事实上下文，再将推演权渡让给大模型。">
-              Ground the context locally before ceding reasoning power to LLMs.
-            </p>
-          </div>
-          <figure class="section-art section-art-workflow">
-            <div class="art-stage art-stage-diagram art-stage-workflow">
-              <img class="illustration-blend" src="./assets/mcp-diagram.png" alt="Abstract illustration for the OmniClip RAG workflow">
+          <article class="feature-card feature-card-primary">
+            <span class="feature-index">01</span>
+            <h3 data-i18n="feature_hybrid_title">Hybrid retrieval</h3>
+            <p data-i18n="feature_hybrid_body">Exact FTS5 matches and LanceDB semantic candidates are fused, filtered, and optionally reranked.</p>
+            <div class="mini-pipeline" aria-hidden="true">
+              <span>FTS5</span><i>+</i><span>Vector</span><i>→</i><span>Rerank</span>
             </div>
-          </figure>
-        </div>
-        <div class="workflow-grid">
-          <article class="workflow-step">
-            <span class="step-index">01</span>
-            <h3 data-zh="静默结网">Silent Indexing</h3>
-            <p data-zh="锚定目录，引力场于暗处静默成型。">
-              Point the vault. The gravity field forms in silence.
-            </p>
           </article>
-          <article class="workflow-step">
-            <span class="step-index">02</span>
-            <h3 data-zh="精准剥离">Precision Extraction</h3>
-            <p data-zh="一次极速下探，剥离带有绝对坐标的证据切片。">
-              Query once. Extract heavily cited fragments.
-            </p>
+
+          <article class="feature-card">
+            <span class="feature-index">02</span>
+            <h3 data-i18n="feature_watch_title">Calm incremental watch</h3>
+            <p data-i18n="feature_watch_body">File changes are collected and updated in batches. When nothing changes, the watcher stays light.</p>
           </article>
-          <article class="workflow-step">
-            <span class="step-index">03</span>
-            <h3 data-zh="上下文投递">Context Delivery</h3>
-            <p data-zh="将切片送入轨道，确保本地母库绝对纯净。">
-              Dispatch the context. Keep the archive untainted.
-            </p>
+
+          <article class="feature-card">
+            <span class="feature-index">03</span>
+            <h3 data-i18n="feature_control_title">You control the context</h3>
+            <p data-i18n="feature_control_body">Inspect sources, select results, filter sensitive pages, and copy only the evidence you want.</p>
           </article>
-        </div>
-      </div>
-    </section>
 
-    <section id="mcp" class="content-section">
-      <div class="container mcp-layout">
-        <div class="mcp-copy">
-          <div class="section-intro section-intro-left">
-            <p class="section-kicker" data-zh="MCP 外围轨道">MCP Orbit</p>
-            <h2 data-zh="化作任意智能体的外挂海马体。">The external hippocampus for any intelligence.</h2>
-          </div>
-          <p data-zh="开启纯只读标准流。让上下文飞跃边界，知识母体岿然不动。">
-            A read-only stdio pipeline. Context travels, the archive stays.
-          </p>
-          <div class="path-grid">
-            <article class="path-card">
-              <h3>Registry / MCPB</h3>
-              <p data-zh="面向 Registry 生态的标准化引力接入。">
-                Standardized gravity access for the Registry ecosystem.
-              </p>
-            </article>
-            <article class="path-card">
-              <h3>Manual ZIP</h3>
-              <p data-zh="为独立物理环境保留的绝对向下兼容。">
-                Absolute backward compatibility for standalone physical environments.
-              </p>
-            </article>
-          </div>
-          <p class="mcp-inline-note" data-zh="先确认防线，再提取真相。">
-            Verify the state. Then extract the truth.
-          </p>
-          <a class="button button-secondary" href="https://github.com/EllisMorrow/OmniClip-RAG/blob/main/MCP_SETUP.md" target="_blank" rel="noreferrer" data-zh="研读完整接入协议">Read the MCP Spec</a>
-        </div>
-        <div class="diagram-frame">
-          <div class="art-stage art-stage-diagram art-stage-orbit">
-            <img class="illustration-blend" src="./assets/mcp-protocol-illustration.png" alt="Abstract illustration for OmniClip RAG MCP protocol delivery">
-          </div>
-        </div>
-      </div>
-    </section>
+          <article class="feature-card">
+            <span class="feature-index">04</span>
+            <h3 data-i18n="feature_formats_title">Beyond Markdown</h3>
+            <p data-i18n="feature_formats_body">PDF and Apache Tika-backed formats use isolated indexes and background tasks that do not block the interface.</p>
+          </article>
 
-    <section id="screens" class="content-section alt-surface">
-      <div class="container">
-        <div class="section-intro">
-          <p class="section-kicker" data-zh="控制终端">Control Plates</p>
-          <h2 data-zh="静默引力场的具象映射。">The quiet field, visualized.</h2>
-          <p data-zh="摒除视觉冗余，唯留透明、极简的证据调度中枢。">
-            Zero visual noise. Just the evidentiary command center.
-          </p>
-        </div>
-        <div class="screen-grid">
-          <figure class="screen-card screen-card-primary">
-            <span class="plate-label" data-zh="图版 I">Plate I</span>
-            <img src="./assets/gui-shot.png" alt="OmniClip RAG desktop search interface">
-            <figcaption>
-              <strong data-zh="查询总线">Query Desk</strong>
-              <span data-zh="统摄全局的最高证据调度中枢。">The absolute evidentiary command center.</span>
-            </figcaption>
-          </figure>
-          <figure class="screen-card screen-card-secondary">
-            <span class="plate-label" data-zh="图版 II">Plate II</span>
-            <img src="./assets/mcp-shot.png" alt="OmniClip RAG configuration and indexing interface">
-            <figcaption>
-              <strong data-zh="启动矩阵">Start Console</strong>
-              <span data-zh="升空前的防线观测与状态对齐。">State alignment before orbit.</span>
-            </figcaption>
-          </figure>
-          <figure class="screen-card screen-card-tertiary">
-            <span class="plate-label" data-zh="图版 III">Plate III</span>
-            <img src="./assets/format-selection.png" alt="OmniClip RAG extension format selection interface">
-            <figcaption>
-              <strong data-zh="格式域">Format Surface</strong>
-              <span data-zh="扩展边界与解析风险的绝对透明化展示。">Extension boundaries and risks, completely exposed.</span>
-            </figcaption>
-          </figure>
-        </div>
-      </div>
-    </section>
+          <article class="feature-card">
+            <span class="feature-index">05</span>
+            <h3 data-i18n="feature_runtime_title">Resource-aware runtime</h3>
+            <p data-i18n="feature_runtime_body">Auto mode can use NVIDIA CUDA, recover safely, and explain when a stage falls back or needs attention.</p>
+          </article>
 
-    <section class="content-section">
-      <div class="container">
-        <div class="section-head section-head-stack">
-          <figure class="section-art section-art-trust">
-            <div class="art-stage art-stage-seal">
-              <img class="illustration-blend" src="./assets/trust-illustration.png" alt="Abstract illustration representing trust boundaries">
+          <article class="feature-card feature-card-accent">
+            <span class="feature-index">06</span>
+            <h3 data-i18n="feature_mcp_title">Read-only MCP</h3>
+            <p data-i18n="feature_mcp_body">Let compatible AI clients search the same local index through two focused, read-only tools.</p>
+            <div class="tool-pills" aria-hidden="true">
+              <code>omniclip.status</code>
+              <code>omniclip.search</code>
             </div>
-          </figure>
-          <div class="section-intro section-intro-centered">
-            <p class="section-kicker" data-zh="信任边界">Trust Boundaries</p>
-            <h2 data-zh="物理隔离，不容干涉。">Physical isolation. No compromises.</h2>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-soft" id="workflow">
+      <div class="container">
+        <div class="section-heading section-heading-centered">
+          <p class="section-kicker" data-i18n="workflow_kicker">THREE STEPS</p>
+          <h2 data-i18n="workflow_title">Point. Index. Retrieve.</h2>
+          <p data-i18n="workflow_intro">The archive remains yours from setup to query.</p>
+        </div>
+
+        <ol class="workflow-grid">
+          <li>
+            <span>1</span>
+            <div>
+              <h3 data-i18n="workflow_one_title">Choose your folders</h3>
+              <p data-i18n="workflow_one_body">Add a Markdown vault and optional PDF or Tika directories. Each workspace stays isolated.</p>
+            </div>
+          </li>
+          <li>
+            <span>2</span>
+            <div>
+              <h3 data-i18n="workflow_two_title">Build the local index</h3>
+              <p data-i18n="workflow_two_body">Create lexical and semantic indexes locally, with visible progress and resumable work.</p>
+            </div>
+          </li>
+          <li>
+            <span>3</span>
+            <div>
+              <h3 data-i18n="workflow_three_title">Retrieve grounded context</h3>
+              <p data-i18n="workflow_three_body">Search in the desktop app, copy selected context, or expose results through read-only MCP.</p>
+            </div>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section boundary-section">
+      <div class="container boundary-grid">
+        <div class="boundary-copy">
+          <p class="section-kicker" data-i18n="boundary_kicker">CLEAR PRIVACY BOUNDARY</p>
+          <h2 data-i18n="boundary_title">Local by default, explicit when data moves.</h2>
+          <p data-i18n="boundary_body">
+            Indexing and search run on your machine. Model and Runtime downloads occur only when you start installation. Context leaves only when you copy it or an MCP client requests a result.
+          </p>
+        </div>
+        <dl class="boundary-list">
+          <div>
+            <dt data-i18n="boundary_stays">Stays local</dt>
+            <dd data-i18n="boundary_stays_body">Source files, indexes, embeddings, configuration, and query execution.</dd>
+          </div>
+          <div>
+            <dt data-i18n="boundary_moves">Moves only by action</dt>
+            <dd data-i18n="boundary_moves_body">Selected clipboard context or read-only MCP search results.</dd>
+          </div>
+          <div>
+            <dt data-i18n="boundary_network">Network is optional</dt>
+            <dd data-i18n="boundary_network_body">Used for user-initiated downloads of the app, Runtime, or models—not for telemetry.</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="section section-dark" id="mcp">
+      <div class="container mcp-grid">
+        <div>
+          <p class="section-kicker section-kicker-light" data-i18n="mcp_kicker">READ-ONLY MCP BRIDGE</p>
+          <h2 data-i18n="mcp_title">One local index, available to compatible AI clients.</h2>
+          <p class="mcp-lead" data-i18n="mcp_body">
+            OmniClip exposes status and search through a narrow stdio surface. It does not provide write, delete, or file-editing tools.
+          </p>
+          <div class="mcp-actions">
+            <a class="button button-light" href="https://github.com/EllisMorrow/OmniClip-RAG/blob/main/MCP_SETUP.md" target="_blank" rel="noopener noreferrer" data-i18n="mcp_setup">Read MCP setup</a>
+            <a class="button button-ghost" href="https://registry.modelcontextprotocol.io/v0/servers?search=io.github.EllisMorrow/omniclip-rag-mcp" target="_blank" rel="noopener noreferrer" data-i18n="mcp_registry">Open MCP Registry</a>
           </div>
         </div>
-        <div class="trust-grid">
-          <div class="trust-chip" data-zh="MIT 许可">MIT License</div>
-          <div class="trust-chip" data-zh="只读通道">Read-only Pipeline</div>
-          <div class="trust-chip" data-zh="绝对零遥测">Zero Telemetry</div>
+        <div class="mcp-terminal" aria-label="Example MCP tool flow" data-aria-zh="MCP 工具调用示例">
+          <div class="terminal-bar"><span></span><span></span><span></span><b>stdio · read-only</b></div>
+          <div class="terminal-line"><em>01</em><code>omniclip.status</code><strong data-i18n="mcp_ready">ready · hybrid</strong></div>
+          <div class="terminal-line"><em>02</em><code>omniclip.search</code><strong data-i18n="mcp_results">15 sourced results</strong></div>
+          <div class="terminal-rule"></div>
+          <p data-i18n="mcp_note">Your client receives selected evidence. Your archive remains local.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="interface">
+      <div class="container">
+        <div class="section-heading">
+          <p class="section-kicker" data-i18n="interface_kicker">DESKTOP INTERFACE</p>
+          <h2 data-i18n="interface_title">Every stage stays visible.</h2>
+          <p data-i18n="interface_intro">These privacy-safe product views are built from the current interface structure and contain no local paths or personal knowledge.</p>
+        </div>
+
+        <div class="interface-grid">
+          <article class="interface-card interface-card-wide">
+            <div class="interface-card-heading">
+              <div><span data-i18n="interface_query_label">QUERY</span><h3 data-i18n="interface_query_title">Know what the search is doing</h3></div>
+              <span class="stage-badge"><i aria-hidden="true"></i><span data-i18n="stage_semantic">Semantic recall · 3/6</span></span>
+            </div>
+            <div class="demo-query">
+              <div class="demo-search" data-i18n="demo_query">How did I define opportunity cost?</div>
+              <div class="demo-results">
+                <span class="demo-rank">01</span>
+                <div><strong data-i18n="demo_result_one">Decision journal / Opportunity cost</strong><p data-i18n="demo_result_one_body">Matched by semantic meaning and source structure.</p></div>
+                <b>94</b>
+              </div>
+              <div class="demo-results">
+                <span class="demo-rank">02</span>
+                <div><strong data-i18n="demo_result_two">Notes / Trade-offs</strong><p data-i18n="demo_result_two_body">Related context from a different source.</p></div>
+                <b>87</b>
+              </div>
+            </div>
+          </article>
+
+          <article class="interface-card">
+            <div class="interface-card-heading">
+              <div><span data-i18n="interface_start_label">START</span><h3 data-i18n="interface_start_title">Runtime and index status</h3></div>
+            </div>
+            <div class="status-stack">
+              <div><i class="status-ok"></i><span data-i18n="status_runtime">Runtime ready</span><b data-i18n="status_detected">Detected</b></div>
+              <div><i class="status-ok"></i><span data-i18n="status_index">Semantic index</span><b data-i18n="status_ready">Ready</b></div>
+              <div><i class="status-idle"></i><span data-i18n="status_watch">Incremental watch</span><b data-i18n="status_waiting">Waiting for changes</b></div>
+            </div>
+          </article>
+
+          <article class="interface-card">
+            <div class="interface-card-heading">
+              <div><span data-i18n="interface_formats_label">EXTENSIONS</span><h3 data-i18n="interface_formats_title">Isolated format pipelines</h3></div>
+            </div>
+            <div class="format-stack">
+              <div><strong>PDF</strong><span data-i18n="format_background">Background indexing</span><b>Ready</b></div>
+              <div><strong>Tika</strong><span data-i18n="format_documents">Office and document formats</span><b>Ready</b></div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="download-section" id="download">
+      <div class="container download-panel">
+        <div>
+          <p class="section-kicker" data-i18n="download_kicker">GET STARTED</p>
+          <h2 data-i18n="download_title">Your knowledge base stays yours.</h2>
+          <p data-i18n="download_body">Download the Windows build, choose a folder, install the local Runtime, and build your first index.</p>
+        </div>
+        <div class="download-actions">
+          <a class="button button-primary" href="https://github.com/EllisMorrow/OmniClip-RAG/releases/latest" target="_blank" rel="noopener noreferrer">
+            <span data-i18n="download_windows">Download Windows EXE</span>
+            <span aria-hidden="true">↗</span>
+          </a>
+          <a class="text-link" href="https://github.com/EllisMorrow/OmniClip-RAG#readme" target="_blank" rel="noopener noreferrer" data-i18n="read_docs">Read installation guide</a>
         </div>
       </div>
     </section>
@@ -276,17 +364,19 @@
 
   <footer class="site-footer">
     <div class="container footer-inner">
-      <div>
-        <p class="footer-title">OmniClip RAG</p>
+      <div class="footer-brand">
+        <img src="./assets/favicon.svg" alt="" width="32" height="32">
+        <div><strong>OmniClip RAG</strong><span data-i18n="footer_tagline">Private knowledge. Local retrieval.</span></div>
       </div>
-      <div class="footer-links">
-        <a href="https://github.com/EllisMorrow/OmniClip-RAG" target="_blank" rel="noreferrer">GitHub</a>
-        <a href="https://github.com/EllisMorrow/OmniClip-RAG/releases/latest" target="_blank" rel="noreferrer" data-zh="版本下载">Releases</a>
-        <a href="https://github.com/EllisMorrow/OmniClip-RAG/blob/main/MCP_SETUP.md" target="_blank" rel="noreferrer" data-zh="协议接入">MCP Setup</a>
-      </div>
+      <nav aria-label="Footer navigation" data-aria-zh="页脚导航">
+        <a href="https://github.com/EllisMorrow/OmniClip-RAG" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/EllisMorrow/OmniClip-RAG/releases/latest" target="_blank" rel="noopener noreferrer" data-i18n="footer_releases">Releases</a>
+        <a href="https://github.com/EllisMorrow/OmniClip-RAG/blob/main/MCP_SETUP.md" target="_blank" rel="noopener noreferrer">MCP</a>
+        <a href="https://opensource.org/license/mit" target="_blank" rel="noopener noreferrer">MIT</a>
+      </nav>
     </div>
   </footer>
 
-  <script src="./app.js"></script>
+  <script src="./app.js" defer></script>
 </body>
 </html>
