@@ -1529,7 +1529,7 @@ Why: repeated console flashes during rebuilds are user-visible regressions, can 
 
 ## 2026-03-16 GPU Runtime 与扩展建库 UX 新阶段
 - 当前主战线已经从“CPU 主查询是否真的执行高级搜索”进入第二阶段：`GPU Runtime 真实生效 + 扩展来源目录建库 UX 收尾`。Why：CPU 语义主链已明显收口，但 GPU Runtime 仍把“组件安装、能力探测、执行验证”混成一个派生灯，扩展来源目录建库也仍偏数值化，用户无法稳定判断系统到底是否在工作。
-- 新阶段主计划固定为 [plans/GPU Runtime与扩展建库UX收尾计划.md](/D:/软件编写/OmniClip%20RAG/plans/GPU%20Runtime%E4%B8%8E%E6%89%A9%E5%B1%95%E5%BB%BA%E5%BA%93UX%E6%94%B6%E5%B0%BE%E8%AE%A1%E5%88%92.md)。后续任何窗口或新 AI 接手时，必须先读这份计划，再决定是否继续改 GPU Runtime、Runtime 刷新检测或扩展建库 UX。
+- 新阶段主计划固定为 [plans/GPU Runtime与扩展建库UX收尾计划.md](plans/GPU%20Runtime%E4%B8%8E%E6%89%A9%E5%B1%95%E5%BB%BA%E5%BA%93UX%E6%94%B6%E5%B0%BE%E8%AE%A1%E5%88%92.md)。后续任何窗口或新 AI 接手时，必须先读这份计划，再决定是否继续改 GPU Runtime、Runtime 刷新检测或扩展建库 UX。
 - 当前已确认三条关键事实：
   1. `详细查询排错日志写入活动日志` 仍走 `RotatingFileHandler(maxBytes, backupCount)`，受同一套单文件大小与轮转上限限制，不会无限膨胀。
   2. `gpu-acceleration` 当前在 UI 中是派生能力行，不是真正独立组件；安装目标映射到 `semantic-core + cuda`，但 ready 判定又额外依赖 `detect_acceleration().cuda_available`，导致“下载成功”与“UI 转绿”之间没有稳定一一对应。

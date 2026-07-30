@@ -187,6 +187,20 @@ class _LoweringReranker:
                 )
             )
         return reranked, SimpleNamespace(enabled=True, applied=True, resolved_device='cpu', reranked_count=min(candidate_limit, len(hits)), degraded_to_cpu=False, oom_recovered=False)
+class _FailingReranker:
+    def rerank(self, query_text, hits, limit):
+        return list(hits), RerankOutcome(
+            enabled=True,
+            applied=False,
+            model='BAAI/bge-reranker-v2-m3',
+            requested_device='auto',
+            resolved_device='cpu',
+            candidate_count=min(limit, len(hits)),
+            skipped_reason='OSError',
+            fallback_reason='reranker_execution_failed',
+            error_class='OSError',
+            error_message='model shard cannot be opened',
+        )
 class ServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         for path in (
@@ -340,8 +354,40 @@ class ServiceTests(unittest.TestCase):
             self.assertTrue(result.hits)
             self.assertIn('markdown_vector_cuda_ready', result.insights.runtime_warnings)
             self.assertIn('markdown_reranker_cuda_ready', result.insights.runtime_warnings)
+            self.assertNotIn('markdown_vector_system_memory_to_cpu', result.insights.runtime_warnings)
             self.assertEqual(result.insights.query_stage['vector_actual_device'], 'cuda:0')
             self.assertEqual(result.insights.query_stage['reranker_actual_device'], 'cuda:0')
+        finally:
+            service.close()
+
+    def test_query_reports_actionable_reranker_failure_details(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_reranker_failure'))
+        config = AppConfig(
+            vault_path=str(SAMPLE_ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='disabled',
+            reranker_enabled=True,
+        )
+        service = OmniClipService(config, data_paths)
+        service.reranker = _FailingReranker()
+        try:
+            service.rebuild_index()
+            result = service.query(
+                '块嵌入',
+                limit=5,
+                score_threshold=0,
+                allowed_families={'markdown'},
+            )
+            self.assertTrue(result.hits)
+            self.assertIn('markdown_reranker_unavailable', result.insights.runtime_warnings)
+            self.assertEqual(result.insights.query_stage['reranker_error_class'], 'OSError')
+            self.assertEqual(
+                result.insights.query_stage['reranker_error_message'],
+                'model shard cannot be opened',
+            )
+            requirement = result.insights.runtime_requirements[0]
+            self.assertEqual(requirement['kind'], 'reranker')
+            self.assertEqual(requirement['error_message'], 'model shard cannot be opened')
         finally:
             service.close()
 

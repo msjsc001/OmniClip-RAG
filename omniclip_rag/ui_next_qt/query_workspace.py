@@ -34,6 +34,8 @@ class QueryWorkspace(QtWidgets.QWidget):
     pageBlocklistRequested = QtCore.Signal()
     sensitiveFilterRequested = QtCore.Signal()
     runtimeRepairRequested = QtCore.Signal()
+    resultsRequested = QtCore.Signal()
+    activityLogRequested = QtCore.Signal()
 
     def __init__(
         self,
@@ -59,6 +61,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._query_last_result_count = 0
         self._query_last_copied = False
         self._query_runtime_warnings: tuple[str, ...] = ()
+        self._query_runtime_requirements: tuple[dict[str, object], ...] = ()
         self._query_progress_payload: dict[str, object] | None = None
         self._current_query_text = ''
         self._current_context = ''
@@ -82,20 +85,26 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.query_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical, self)
         self.query_splitter.setChildrenCollapsible(True)
         self.query_splitter.setOpaqueResize(False)
-        root_layout.addWidget(self.query_splitter, 1)
+        query_splitter_policy = self.query_splitter.sizePolicy()
+        query_splitter_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Policy.Expanding)
+        query_splitter_policy.setVerticalPolicy(QtWidgets.QSizePolicy.Policy.Maximum)
+        self.query_splitter.setSizePolicy(query_splitter_policy)
+        root_layout.addWidget(self.query_splitter, 0, QtCore.Qt.AlignmentFlag.AlignTop)
 
         self._build_search_card()
         self._build_results_card()
 
         self.query_splitter.addWidget(self.search_card)
-        self.query_splitter.addWidget(self.results_card)
         self.query_splitter.setCollapsible(0, True)
-        self.query_splitter.setCollapsible(1, True)
-        self.query_splitter.setStretchFactor(0, 0)
-        self.query_splitter.setStretchFactor(1, 1)
+        self.query_splitter.setStretchFactor(0, 1)
         self._configure_splitter_child(self.search_card)
-        self._configure_splitter_child(self.results_card)
+        search_policy = self.search_card.sizePolicy()
+        search_policy.setVerticalPolicy(QtWidgets.QSizePolicy.Policy.Preferred)
+        self.search_card.setSizePolicy(search_policy)
+        self.results_card.setVisible(False)
+        self.activity_log_page.setVisible(False)
         self._refresh_splitter_handles()
+        root_layout.addStretch(1)
 
         self._apply_initial_values()
         self._refresh_page_blocklist_summary()
@@ -147,6 +156,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.query_row_host = QtWidgets.QWidget(self.search_card)
         self.query_row_host.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         query_row = QtWidgets.QHBoxLayout(self.query_row_host)
+        self.query_row_layout = query_row
         query_row.setContentsMargins(0, 0, 0, 0)
         query_row.setSpacing(10)
         self.search_card_layout.addWidget(self.query_row_host)
@@ -161,6 +171,13 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._set_button_variant(self.search_button, 'secondary')
         self.search_button.clicked.connect(self.search)
         query_row.addWidget(self.search_button)
+
+        self.query_status_button = QtWidgets.QPushButton(self._tr('query_status_chip_idle'), self.search_card)
+        self.query_status_button.setEnabled(False)
+        self.query_status_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.query_status_button.setMinimumWidth(scaled(self._theme, 92, minimum=84))
+        self._set_button_variant(self.query_status_button, 'secondary')
+        query_row.addWidget(self.query_status_button)
 
         self.search_controls_toggle_button = QtWidgets.QPushButton(self._tr('search_controls_collapse'), self.search_card)
         self.search_controls_toggle_button.setToolTip(self._tip('search'))
@@ -334,10 +351,20 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.context_panel.search_edit.setToolTip(self._tip('text_search_entry'))
         self.context_panel.search_button.setToolTip(self._tip('text_search_button'))
         self.context_panel.next_button.setToolTip(self._tip('text_search_next'))
-        self.log_panel = SearchableTextPanel(empty_text=self._tr('log_empty'), theme=self._theme, tr=self._tr, parent=details_host)
+        self.activity_log_page, activity_layout, _activity_header_widget, _activity_header = self._create_card(
+            self._tr('activity_log_title'),
+            self._tr('activity_log_subtitle'),
+        )
+        self.log_panel = SearchableTextPanel(
+            empty_text=self._tr('log_empty'),
+            theme=self._theme,
+            tr=self._tr,
+            parent=self.activity_log_page,
+        )
         self.log_panel.search_edit.setToolTip(self._tip('text_search_entry'))
         self.log_panel.search_button.setToolTip(self._tip('text_search_button'))
         self.log_panel.next_button.setToolTip(self._tip('text_search_next'))
+        activity_layout.addWidget(self.log_panel, 1)
         self.context_panel.set_header_visible(True)
         self.context_jump_combo = QtWidgets.QComboBox(self.context_panel.header_widget)
         self.context_jump_combo.setToolTip(self._tip('context_jump'))
@@ -350,7 +377,6 @@ class QueryWorkspace(QtWidgets.QWidget):
 
         self.detail_tabs.addTab(self.preview_panel, self._tr('tab_preview'))
         self.detail_tabs.addTab(self.context_panel, self._tr('tab_context'))
-        self.detail_tabs.addTab(self.log_panel, self._tr('tab_log'))
 
         self.results_splitter.addWidget(table_host)
         self.results_splitter.addWidget(details_host)
@@ -429,6 +455,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.source_pdf_check.setChecked(True)
         self.source_tika_check.setChecked(True)
         self._query_runtime_warnings = ()
+        self._query_runtime_requirements = ()
         self._search_controls_collapsed = bool(getattr(self._config, 'qt_query_controls_collapsed', False))
         self._refresh_query_runtime_hint()
         self._apply_search_controls_collapsed()
@@ -438,7 +465,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._refresh_query_scope_label()
 
     def default_query_splitter_sizes(self) -> list[int]:
-        return [max(scaled(self._theme, 250, minimum=220), 220), max(scaled(self._theme, 620, minimum=440), 440)]
+        return [max(scaled(self._theme, 760, minimum=520), 520)]
 
     def default_results_splitter_sizes(self) -> list[int]:
         return [max(scaled(self._theme, 340, minimum=220), 220), max(scaled(self._theme, 360, minimum=220), 220)]
@@ -495,6 +522,7 @@ class QueryWorkspace(QtWidgets.QWidget):
 
     def clear_runtime_feedback(self) -> None:
         self._query_runtime_warnings = ()
+        self._query_runtime_requirements = ()
         self._refresh_query_runtime_hint()
 
     def set_runtime_snapshot_provider(self, provider: Callable[[], tuple[object, object]] | None) -> None:
@@ -529,6 +557,7 @@ class QueryWorkspace(QtWidgets.QWidget):
             'selected_chunk_id': self._selected_chunk_id(),
             'current_query_text': self._current_query_text,
             'query_runtime_warnings': list(self._query_runtime_warnings),
+            'query_runtime_requirements': [dict(item) for item in self._query_runtime_requirements],
             'log_lines': list(self._log_lines),
             'external_blocked': self._external_blocked,
             'external_block_title': self._external_block_title,
@@ -553,6 +582,11 @@ class QueryWorkspace(QtWidgets.QWidget):
             )
         hits = list(payload.get('hits') or [])
         self._query_runtime_warnings = tuple(str(item).strip() for item in (payload.get('query_runtime_warnings') or []) if str(item).strip())
+        self._query_runtime_requirements = tuple(
+            dict(item)
+            for item in (payload.get('query_runtime_requirements') or [])
+            if isinstance(item, dict)
+        )
         self._refresh_query_runtime_hint()
         if hits:
             self.results_model.set_results(hits)
@@ -616,10 +650,6 @@ class QueryWorkspace(QtWidgets.QWidget):
         return bool(self._search_controls_collapsed)
 
     def _toggle_search_controls_collapsed(self) -> None:
-        if not self._search_controls_collapsed:
-            current_sizes = list(self.query_splitter.sizes())
-            if len(current_sizes) == 2 and min(current_sizes) > 0:
-                self._expanded_query_splitter_sizes = current_sizes
         self._search_controls_collapsed = not self._search_controls_collapsed
         self._apply_search_controls_collapsed()
 
@@ -632,31 +662,22 @@ class QueryWorkspace(QtWidgets.QWidget):
     def _apply_query_splitter_compaction(self, *, collapsed: bool) -> None:
         if not self.isVisible():
             return
-        if collapsed:
-            collapsed_height = self._collapsed_search_card_height()
-            current_sizes = list(self.query_splitter.sizes())
-            total_height = sum(current_sizes) if current_sizes else max(self.query_splitter.height(), sum(self.default_query_splitter_sizes()))
-            bottom_height = max(total_height - collapsed_height, 180)
-            self.query_splitter.setSizes([collapsed_height, bottom_height])
-            return
-        restore_sizes = self._expanded_query_splitter_sizes
-        if restore_sizes and len(restore_sizes) == 2 and min(restore_sizes) > 0:
-            self.query_splitter.setSizes(restore_sizes)
-            return
-        current_sizes = list(self.query_splitter.sizes())
-        if self._splitter_state_applied and len(current_sizes) == 2 and min(current_sizes) > 0:
-            return
-        self.query_splitter.setSizes(self.default_query_splitter_sizes())
+        target_height = (
+            self._collapsed_search_card_height()
+            if collapsed
+            else max(self.query_splitter.height(), self.default_query_splitter_sizes()[0])
+        )
+        self.query_splitter.setSizes([target_height])
 
     def _apply_search_controls_collapsed(self) -> None:
         collapsed = bool(self._search_controls_collapsed)
         for widget in (
             self.search_header_widget,
-            self.query_status_banner,
             self.query_hint_label,
             self.search_details_widget,
         ):
             widget.setVisible(not collapsed)
+        self.query_status_banner.setVisible(False)
         self.search_controls_toggle_button.setText(self._tr('search_controls_expand') if collapsed else self._tr('search_controls_collapse'))
         if collapsed:
             collapsed_margin = scaled(self._theme, 10, minimum=8)
@@ -690,7 +711,7 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.search()
 
     def show_log_tab(self) -> None:
-        self.detail_tabs.setCurrentIndex(2)
+        self.activityLogRequested.emit()
 
     def append_external_log(self, message: str) -> None:
         self._append_log(message, persist=False)
@@ -900,9 +921,24 @@ class QueryWorkspace(QtWidgets.QWidget):
             widget.update()
         self.query_status_title.setText(title)
         self.query_status_detail.setText(detail)
+        self.query_status_button.setProperty('mode', mode)
+        self.query_status_button.style().unpolish(self.query_status_button)
+        self.query_status_button.style().polish(self.query_status_button)
+        self.query_status_button.setToolTip(f'{title}\n{detail}'.strip())
+        if mode == 'running':
+            percent = float((self._query_progress_payload or {}).get('overall_percent') or 0.0)
+            chip_text = self._tr('query_status_chip_running', percent=percent)
+        elif mode == 'blocked':
+            chip_text = self._tr('query_status_chip_blocked')
+        elif mode == 'done':
+            chip_text = self._tr('query_status_chip_done', count=self._query_last_result_count)
+        else:
+            chip_text = self._tr('query_status_chip_idle')
+        self.query_status_button.setText(chip_text)
+        self.query_status_button.update()
 
     def _refresh_query_status_banner(self) -> None:
-        self.query_status_banner.setVisible(not self._search_controls_collapsed)
+        self.query_status_banner.setVisible(False)
         if self._busy:
             payload = self._query_progress_payload or {}
             percent = float(payload.get('overall_percent') or 0.0)
@@ -936,7 +972,8 @@ class QueryWorkspace(QtWidgets.QWidget):
 
     def _refresh_query_runtime_hint(self) -> None:
         warnings = list(self._query_runtime_warnings)
-        if not warnings:
+        requirement_messages = self._query_runtime_requirement_messages()
+        if not warnings and not requirement_messages:
             self.query_runtime_hint_label.clear()
             self.query_runtime_hint_label.setVisible(False)
             return
@@ -946,8 +983,77 @@ class QueryWorkspace(QtWidgets.QWidget):
             if item == 'markdown_vector_runtime_unavailable':
                 message = f"{message} <a href=\"runtime-repair\">{html.escape(self._tr('query_runtime_repair_link'))}</a>"
             lines.append(message)
+        lines.extend(html.escape(message).replace('\n', '<br/>') for message in requirement_messages)
         self.query_runtime_hint_label.setText('<br/>'.join(lines))
         self.query_runtime_hint_label.setVisible(not self._search_controls_collapsed)
+
+    @staticmethod
+    def _format_gib(value: object) -> str:
+        try:
+            return f'{int(value or 0) / 1024**3:.2f}'
+        except (TypeError, ValueError):
+            return '0.00'
+
+    def _query_runtime_requirement_messages(self) -> tuple[str, ...]:
+        messages: list[str] = []
+        for requirement in self._query_runtime_requirements:
+            if not isinstance(requirement, dict):
+                continue
+            vault_path = str(requirement.get('vault_path') or '').strip()
+            vault_name = Path(vault_path).name if vault_path else ''
+            scope = self._tr('query_runtime_requirement_scope', vault=vault_name) if vault_name else ''
+            kind = str(requirement.get('kind') or '')
+            reason = str(requirement.get('reason') or '')
+            if kind == 'cuda_memory':
+                current = dict(requirement.get('current') or {})
+                required = dict(requirement.get('required') or {})
+                if current:
+                    messages.append(self._tr(
+                        'query_runtime_requirement_cuda_memory_current',
+                        scope=scope,
+                        commit_headroom=self._format_gib(current.get('commit_headroom_bytes')),
+                        commit_usage=float(current.get('commit_usage_percent') or 0.0),
+                        physical_available=self._format_gib(current.get('available_physical_bytes')),
+                    ))
+                error_class = str(requirement.get('error_class') or '').strip()
+                error_message = str(requirement.get('error_message') or '').strip()
+                if reason == 'cuda_memory_to_cpu' and (error_class or error_message):
+                    detail = ': '.join(part for part in (error_class, error_message) if part)
+                    messages.append(self._tr(
+                        'query_runtime_requirement_cuda_allocation_failed',
+                        scope=scope,
+                        error=detail,
+                    ))
+                messages.append(self._tr(
+                    'query_runtime_requirement_cuda_needed',
+                    min_commit_headroom=self._format_gib(required.get('min_commit_headroom_bytes')),
+                    max_commit_usage=float(required.get('max_commit_usage_percent') or 0.0),
+                    min_physical_available=self._format_gib(required.get('min_physical_available_bytes')),
+                ))
+            elif kind == 'reranker':
+                error_class = str(requirement.get('error_class') or '').strip()
+                error_message = str(requirement.get('error_message') or '').strip()
+                detail = ': '.join(part for part in (error_class, error_message) if part) or self._tr('none_value')
+                if reason == 'reranker_query_circuit_open':
+                    messages.append(self._tr(
+                        'query_runtime_requirement_reranker_circuit',
+                        scope=scope,
+                        error=detail,
+                    ))
+                elif reason == 'model_missing':
+                    messages.append(self._tr(
+                        'query_runtime_requirement_reranker_model_missing',
+                        scope=scope,
+                        model=str(requirement.get('model') or ''),
+                    ))
+                else:
+                    messages.append(self._tr(
+                        'query_runtime_requirement_reranker_failed',
+                        scope=scope,
+                        error=detail,
+                    ))
+                messages.append(self._tr('query_runtime_requirement_reranker_needed'))
+        return tuple(dict.fromkeys(message for message in messages if message.strip()))
 
     def _handle_runtime_hint_link(self, href: str) -> None:
         if str(href).strip().lower() == 'runtime-repair':
@@ -1085,6 +1191,11 @@ class QueryWorkspace(QtWidgets.QWidget):
         self._query_last_copied = payload.copied
         insights = getattr(result, 'insights', None)
         self._query_runtime_warnings = tuple(getattr(insights, 'runtime_warnings', ()) or ())
+        self._query_runtime_requirements = tuple(
+            dict(item)
+            for item in (getattr(insights, 'runtime_requirements', ()) or ())
+            if isinstance(item, dict)
+        )
         self._refresh_query_runtime_hint()
         self._query_limit_recommendation = asdict(insights.recommendation) if getattr(insights, 'recommendation', None) is not None else None
         self._refresh_query_limit_hint()
@@ -1102,6 +1213,8 @@ class QueryWorkspace(QtWidgets.QWidget):
             self._append_log(trace_line, persist=persist_trace)
         for warning in self._query_runtime_warnings:
             self._append_log(self._tr(f'query_runtime_warning_{warning}'))
+        for requirement_message in self._query_runtime_requirement_messages():
+            self._append_log(requirement_message)
         reranker = getattr(insights, 'reranker', None)
         if reranker is not None and getattr(reranker, 'enabled', False):
             if getattr(reranker, 'applied', False):
@@ -1110,9 +1223,11 @@ class QueryWorkspace(QtWidgets.QWidget):
                 self._append_log(self._tr('log_reranker_skipped', reason=reranker.skipped_reason or self._tr('none_value')))
         self.detail_tabs.setCurrentIndex(1)
         self._refresh_query_status_banner()
+        self.resultsRequested.emit()
 
     def _on_query_failure(self, message: str, traceback_text: str) -> None:
         self._query_runtime_warnings = ()
+        self._query_runtime_requirements = ()
         self._refresh_query_runtime_hint()
         error_body = message.strip() or traceback_text.strip() or self._tr('cannot_start_title')
         self.statusMessageChanged.emit(f"{self._tr('search_button')}：{error_body}")

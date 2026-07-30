@@ -318,6 +318,99 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_query_status_button_sits_after_query_action_and_tracks_state(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            search_index = workspace.query_row_layout.indexOf(workspace.search_button)
+            self.assertIs(
+                workspace.query_row_layout.itemAt(search_index + 1).widget(),
+                workspace.query_status_button,
+            )
+            self.assertEqual(workspace.query_status_button.text(), '待查询')
+
+            workspace.set_external_block_state(blocked=True, title='Runtime 检测中', detail='请稍候')
+            self.assertEqual(workspace.query_status_button.text(), '暂不可用')
+            self.assertIn('Runtime 检测中', workspace.query_status_button.toolTip())
+
+            workspace._external_blocked = False
+            workspace._busy = True
+            workspace._query_progress_payload = {'overall_percent': 42.0, 'stage_status': 'vector'}
+            workspace._refresh_query_status_banner()
+            self.assertEqual(workspace.query_status_button.text(), '查询中 42%')
+
+            workspace._busy = False
+            workspace._query_last_completed_at = time.time()
+            workspace._query_last_result_count = 15
+            workspace._refresh_query_status_banner()
+            self.assertEqual(workspace.query_status_button.text(), '完成 · 15')
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_query_workspace_explains_cuda_and_reranker_requirements_in_hint_and_log(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        calls: list[str] = []
+
+        def capture(message: str, *, persist: bool = True) -> None:
+            del persist
+            calls.append(str(message))
+
+        workspace._append_log = capture  # type: ignore[method-assign]
+        try:
+            insights = QueryInsights(
+                runtime_warnings=(
+                    'markdown_vector_system_memory_to_cpu',
+                    'markdown_reranker_unavailable',
+                ),
+                runtime_requirements=(
+                    {
+                        'kind': 'cuda_memory',
+                        'reason': 'system_memory_to_cpu',
+                        'vault_path': str(SAMPLE_ROOT),
+                        'current': {
+                            'commit_headroom_bytes': 4 * 1024**3,
+                            'commit_usage_percent': 95.46,
+                            'available_physical_bytes': 9 * 1024**3,
+                        },
+                        'required': {
+                            'min_commit_headroom_bytes': 2 * 1024**3,
+                            'max_commit_usage_percent': 98.0,
+                            'min_physical_available_bytes': 2 * 1024**3,
+                        },
+                    },
+                    {
+                        'kind': 'reranker',
+                        'reason': 'reranker_execution_failed',
+                        'vault_path': str(SAMPLE_ROOT),
+                        'error_class': 'OSError',
+                        'error_message': 'model shard cannot be opened',
+                    },
+                ),
+            )
+            result = QueryResult(hits=[], context_text='', insights=insights)
+            workspace._on_query_success(
+                QueryTaskResult(query_text='查询', copied=False, result=result)
+            )
+
+            hint = workspace.query_runtime_hint_label.text()
+            self.assertIn('Commit 余量为 4.00 GiB', hint)
+            self.assertIn('至少 2.00 GiB', hint)
+            self.assertIn('低于 98%', hint)
+            self.assertIn('OSError: model shard cannot be opened', hint)
+            self.assertTrue(any('Commit 余量为 4.00 GiB' in message for message in calls))
+            self.assertTrue(any('Reranker 正常运行需满足' in message for message in calls))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_query_workspace_update_runtime_clears_stale_runtime_warning_hint(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -396,7 +489,7 @@ class QtUiTests(unittest.TestCase):
             replacement.deleteLater()
             app.processEvents()
 
-    def test_query_workspace_collapsed_mode_compacts_query_splitter(self) -> None:
+    def test_query_workspace_collapsed_mode_compacts_query_console(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
         paths = ensure_data_paths(str(TEST_ROOT / 'collapsed_splitter_root'), str(SAMPLE_ROOT))
@@ -406,15 +499,15 @@ class QtUiTests(unittest.TestCase):
             workspace.resize(1200, 900)
             workspace.show()
             app.processEvents()
-            before_sizes = workspace.query_splitter.sizes()
+            before_height = workspace.search_card.height()
             workspace._toggle_search_controls_collapsed()
             app.processEvents()
-            after_sizes = workspace.query_splitter.sizes()
+            after_height = workspace.search_card.height()
             self.assertTrue(workspace.search_controls_collapsed())
             self.assertEqual(workspace.search_controls_toggle_button.text(), '展开')
-            self.assertEqual(len(before_sizes), 2)
-            self.assertEqual(len(after_sizes), 2)
-            self.assertLess(after_sizes[0], before_sizes[0])
+            self.assertEqual(workspace.query_splitter.count(), 1)
+            self.assertLess(after_height, before_height)
+            self.assertTrue(workspace.search_details_widget.isHidden())
         finally:
             workspace.close()
             workspace.deleteLater()
@@ -450,13 +543,13 @@ class QtUiTests(unittest.TestCase):
             workspace.resize(1400, 900)
             workspace.show()
             app.processEvents()
-            workspace.query_splitter.setSizes([80, 820])
+            workspace.query_splitter.setSizes([900])
             workspace.results_splitter.setSizes([90, 620])
             app.processEvents()
             query_sizes = workspace.query_splitter.sizes()
             results_sizes = workspace.results_splitter.sizes()
             self.assertGreater(query_sizes[0], 0)
-            self.assertLessEqual(query_sizes[0], 100)
+            self.assertEqual(len(query_sizes), 1)
             self.assertGreater(results_sizes[0], 0)
             self.assertLessEqual(results_sizes[0], 110)
             workspace.hide()
@@ -2546,6 +2639,57 @@ class QtUiTests(unittest.TestCase):
             window.deleteLater()
             app.processEvents()
 
+    def test_main_window_uses_independent_query_results_config_and_log_tabs(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        window = MainWindow(config=config, paths=paths, language_code='zh-CN', theme=theme, version='0.2.0')
+        try:
+            labels = [window.main_tabs.tabText(index) for index in range(window.main_tabs.count())]
+            self.assertEqual(labels, ['查询台', '结果与详情', '配置', '活动日志'])
+            self.assertEqual(window.query_workspace.detail_tabs.count(), 2)
+            self.assertIs(window.query_workspace.log_panel.parentWidget(), window.activity_log_workspace)
+
+            window.query_workspace.resultsRequested.emit()
+            self.assertIs(window.main_tabs.currentWidget(), window.results_workspace)
+            window.query_workspace.activityLogRequested.emit()
+            self.assertIs(window.main_tabs.currentWidget(), window.activity_log_workspace)
+        finally:
+            window.deleteLater()
+            app.processEvents()
+
+    def test_main_window_header_fully_hides_and_toggle_stays_in_tab_row(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        window = MainWindow(config=config, paths=paths, language_code='zh-CN', theme=theme, version='0.2.0')
+        try:
+            window.show()
+            app.processEvents()
+            self.assertTrue(window.header_card.isVisible())
+            self.assertEqual(window.header_toggle_button.text(), '折叠顶部')
+            self.assertIs(
+                window.main_tabs.cornerWidget(QtCore.Qt.Corner.TopRightCorner),
+                window.header_toggle_button,
+            )
+
+            window._toggle_header_collapsed()
+            app.processEvents()
+            self.assertTrue(window.header_card.isHidden())
+            self.assertTrue(window.header_toggle_button.isVisible())
+            self.assertEqual(window.header_toggle_button.text(), '展开顶部')
+
+            window._toggle_header_collapsed()
+            app.processEvents()
+            self.assertTrue(window.header_card.isVisible())
+            self.assertEqual(window.header_toggle_button.text(), '折叠顶部')
+        finally:
+            window.close()
+            window.deleteLater()
+            app.processEvents()
+
     def test_main_window_language_switch_rebuilds_shell_and_preserves_state(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -2570,7 +2714,9 @@ class QtUiTests(unittest.TestCase):
             self.assertEqual(replacement._language_code, 'en')
             self.assertEqual(replacement.language_caption.text(), text('en', 'language'))
             self.assertEqual(replacement.main_tabs.tabText(0), text('en', 'main_tab_query'))
-            self.assertEqual(replacement.main_tabs.tabText(1), text('en', 'main_tab_config'))
+            self.assertEqual(replacement.main_tabs.tabText(1), text('en', 'main_tab_results'))
+            self.assertEqual(replacement.main_tabs.tabText(2), text('en', 'main_tab_config'))
+            self.assertEqual(replacement.main_tabs.tabText(3), text('en', 'main_tab_activity_log'))
             self.assertEqual(replacement.main_tabs.currentWidget(), replacement.config_workspace)
             self.assertEqual(replacement.config_workspace.sub_tabs.currentIndex(), 3)
             self.assertEqual(replacement.query_workspace.query_edit.text(), 'language switch smoke test')
@@ -2597,8 +2743,7 @@ class QtUiTests(unittest.TestCase):
             window.query_workspace.detail_tabs.setCurrentIndex(0)
             window.config_workspace.showQueryLogRequested.emit()
             app.processEvents()
-            self.assertIs(window.main_tabs.currentWidget(), window.query_workspace)
-            self.assertEqual(window.query_workspace.detail_tabs.currentIndex(), 2)
+            self.assertIs(window.main_tabs.currentWidget(), window.activity_log_workspace)
         finally:
             window.deleteLater()
             app.processEvents()

@@ -81,6 +81,8 @@ class RerankOutcome:
     oom_recovered: bool = False
     skipped_reason: str = ''
     fallback_reason: str = ''
+    error_class: str = ''
+    error_message: str = ''
     cuda_peak_mem_before: int = 0
     cuda_peak_mem_after: int = 0
     cuda_peak_mem_delta: int = 0
@@ -95,6 +97,7 @@ class QueryInsights:
     suppressed_same_page: int = 0
     page_diversity: int = 0
     runtime_warnings: tuple[str, ...] = ()
+    runtime_requirements: tuple[dict[str, object], ...] = ()
     query_plan: dict[str, object] = field(default_factory=dict)
     query_fingerprint: dict[str, object] = field(default_factory=dict)
     query_stage: dict[str, object] = field(default_factory=dict)

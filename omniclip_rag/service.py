@@ -35,7 +35,7 @@ from .preflight import estimate_storage_for_vault
 from .runtime_recovery import record_runtime_incident
 from .storage import MetadataStore, _build_fts_query
 from .timing import BuildEtaTracker, append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
-from .vector_index import cached_acceleration_snapshot, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, prepare_local_model_snapshot, release_process_vector_resources, resolve_vector_device, resolve_vector_device_cached, runtime_dependency_issue, runtime_trace_metadata, semantic_query_session
+from .vector_index import cached_acceleration_snapshot, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, prepare_local_model_snapshot, query_cuda_memory_requirements, release_process_vector_resources, resolve_vector_device, resolve_vector_device_cached, runtime_dependency_issue, runtime_trace_metadata, semantic_query_session
 from .runtime_layout import list_pending_runtime_updates, load_runtime_component_registry, runtime_component_registry_path
 
 try:
@@ -56,6 +56,7 @@ TAG_RE = re.compile(r"(?<!\w)#([\w\-\u4e00-\u9fff/]+)")
 QUERY_TERM_RE = re.compile(r"[\w\u4e00-\u9fff-]+", re.UNICODE)
 MAX_RENDER_DEPTH = 4
 MAX_EXPANDED_LENGTH = 480
+QUERY_DIAGNOSTIC_MESSAGE_LIMIT = 600
 WATCH_DEBOUNCE_SECONDS = 0.8
 WATCH_STABLE_FILE_SECONDS = 1.2
 WATCH_DELETE_CONFIRM_SECONDS = 3.0
@@ -1157,6 +1158,8 @@ class OmniClipService:
             'reranker_model_device': str(getattr(reranker_outcome, 'model_device', '') or ''),
             'reranker_actual_device': str(getattr(reranker_outcome, 'actual_device', '') or ''),
             'reranker_fallback_reason': str(getattr(reranker_outcome, 'fallback_reason', '') or ''),
+            'reranker_error_class': str(getattr(reranker_outcome, 'error_class', '') or ''),
+            'reranker_error_message': str(getattr(reranker_outcome, 'error_message', '') or ''),
             'reranker_cuda_peak_mem_before': int(getattr(reranker_outcome, 'cuda_peak_mem_before', 0) or 0),
             'reranker_cuda_peak_mem_after': int(getattr(reranker_outcome, 'cuda_peak_mem_after', 0) or 0),
             'reranker_cuda_peak_mem_delta': int(getattr(reranker_outcome, 'cuda_peak_mem_delta', 0) or 0),
@@ -1166,6 +1169,55 @@ class OmniClipService:
             'fallback_reason': fallback_reason,
             'stage_ms': stage_ms,
         }
+
+    @staticmethod
+    def _compact_query_diagnostic_message(message: object) -> str:
+        compact = ' '.join(str(message or '').split())
+        if len(compact) <= QUERY_DIAGNOSTIC_MESSAGE_LIMIT:
+            return compact
+        return compact[:QUERY_DIAGNOSTIC_MESSAGE_LIMIT - 1].rstrip() + '…'
+
+    def _build_query_runtime_requirements(
+        self,
+        *,
+        vector_execution: dict[str, object],
+        reranker_outcome: RerankOutcome | None,
+    ) -> tuple[dict[str, object], ...]:
+        requirements: list[dict[str, object]] = []
+        vector_fallback = str(vector_execution.get('fallback_reason') or '')
+        if vector_fallback in {'system_memory_to_cpu', 'cuda_memory_to_cpu'}:
+            requirements.append({
+                'kind': 'cuda_memory',
+                'reason': vector_fallback,
+                'vault_path': str(getattr(self.config, 'vault_path', '') or ''),
+                'current': dict(vector_execution.get('memory_pressure') or {}),
+                'required': query_cuda_memory_requirements(),
+                'error_class': str(vector_execution.get('cuda_error_class') or ''),
+                'error_message': self._compact_query_diagnostic_message(vector_execution.get('cuda_error_message')),
+            })
+
+        reranker_fallback = str(getattr(reranker_outcome, 'fallback_reason', '') or '')
+        reranker_skip = str(getattr(reranker_outcome, 'skipped_reason', '') or '')
+        if reranker_fallback in {'reranker_execution_failed', 'reranker_query_circuit_open'} or reranker_skip == 'model_missing':
+            requirements.append({
+                'kind': 'reranker',
+                'reason': reranker_fallback or reranker_skip,
+                'vault_path': str(getattr(self.config, 'vault_path', '') or ''),
+                'model': str(getattr(reranker_outcome, 'model', '') or ''),
+                'device': str(
+                    getattr(reranker_outcome, 'actual_device', '')
+                    or getattr(reranker_outcome, 'resolved_device', '')
+                    or ''
+                ),
+                'error_class': str(
+                    getattr(reranker_outcome, 'error_class', '')
+                    or (reranker_skip if reranker_skip not in {'model_missing', 'query_circuit_open'} else '')
+                ),
+                'error_message': self._compact_query_diagnostic_message(
+                    getattr(reranker_outcome, 'error_message', '')
+                ),
+            })
+        return tuple(requirements)
 
     @semantic_query_session()
     def query(
@@ -1362,6 +1414,10 @@ class OmniClipService:
             rerank_outcome = RerankOutcome(enabled=bool(getattr(self.config, 'reranker_enabled', False)), applied=False, skipped_reason='disabled' if normalized_query_mode != 'hybrid' else 'disabled')
         if bool(getattr(rerank_outcome, 'applied', False)) and str(getattr(rerank_outcome, 'actual_device', '') or '').startswith('cuda'):
             runtime_warnings.append('markdown_reranker_cuda_ready')
+        reranker_fallback_reason = str(getattr(rerank_outcome, 'fallback_reason', '') or '')
+        reranker_skip_reason = str(getattr(rerank_outcome, 'skipped_reason', '') or '')
+        if reranker_fallback_reason in {'reranker_execution_failed', 'reranker_query_circuit_open'} or reranker_skip_reason == 'model_missing':
+            runtime_warnings.append('markdown_reranker_unavailable')
         if normalized_device_policy == 'require-cuda':
             vector_actual_device = str(vector_execution.get('actual_device') or '')
             reranker_actual_device = str(getattr(rerank_outcome, 'actual_device', '') or '')
@@ -1436,6 +1492,10 @@ class OmniClipService:
             fallback_reason=fallback_reason,
             stage_ms=stage_ms,
             vector_execution=vector_execution,
+        )
+        insights.runtime_requirements = self._build_query_runtime_requirements(
+            vector_execution=vector_execution,
+            reranker_outcome=rerank_outcome,
         )
         insights.trace_lines = (
             self._trace_json_line('QUERY_PLAN', insights.query_plan),

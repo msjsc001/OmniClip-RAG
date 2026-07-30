@@ -105,6 +105,12 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
             context_text='context',
             insights=QueryInsights(
                 runtime_warnings=('warning',),
+                runtime_requirements=({
+                    'kind': 'reranker',
+                    'reason': 'reranker_execution_failed',
+                    'error_class': 'OSError',
+                    'error_message': 'model shard cannot be opened',
+                },),
                 trace_lines=('trace',),
                 recommendation=QueryLimitRecommendation(
                     device='cpu',
@@ -120,6 +126,7 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
         self.assertEqual(restored.context_text, 'context')
         self.assertEqual(restored.hits[0].chunk_id, 'chunk-1')
         self.assertEqual(restored.insights.runtime_warnings, ('warning',))
+        self.assertEqual(restored.insights.runtime_requirements[0]['error_class'], 'OSError')
         self.assertEqual(restored.insights.recommendation.preferred, 15)
         self.assertTrue(restored.insights.reranker.applied)
 
@@ -202,7 +209,15 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
                         )
                     ],
                     context_text='',
-                    insights=QueryInsights(),
+                    insights=QueryInsights(
+                        runtime_warnings=('markdown_reranker_unavailable',),
+                        runtime_requirements=({
+                            'kind': 'reranker',
+                            'reason': 'reranker_execution_failed',
+                            'error_class': 'OSError',
+                            'error_message': 'model shard cannot be opened',
+                        },),
+                    ),
                 )
 
             def close(self, *, release_process_resources=True) -> None:
@@ -226,6 +241,12 @@ class MultiVaultQueryWorkerTests(unittest.TestCase):
         self.assertEqual([service.close_calls for service in instances], [[False], [False]])
         release_mock.assert_called_once_with()
         self.assertEqual(len(result.hits), 2)
+        self.assertEqual(result.insights.runtime_warnings, ('markdown_reranker_unavailable',))
+        self.assertEqual(len(result.insights.runtime_requirements), 2)
+        self.assertEqual(
+            {Path(str(item['vault_path'])).name for item in result.insights.runtime_requirements},
+            {'vault-a', 'vault-b'},
+        )
         self.assertEqual(snapshot['mode'], 'multi_vault_fanout')
 
 

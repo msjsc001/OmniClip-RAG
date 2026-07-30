@@ -15,7 +15,7 @@ from unittest.mock import patch
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import RuntimeDependencyError
 from omniclip_rag.canary_backend import CANARY_VECTOR_MODEL_ID
-from omniclip_rag.vector_index import LanceDbVectorIndex, _MODEL_DOWNLOAD_IGNORE_PATTERNS, _discover_active_runtime_dir, _preferred_runtime_dir_path, _probe_runtime_semantic_core_inprocess, _runtime_component_dependency_ids, _runtime_import_environment, _runtime_search_roots, _sanitize_local_model_snapshot, build_runtime_install_command, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, prepare_local_model_snapshot, probe_runtime_gpu_execution, refresh_runtime_capability_snapshot, resolve_vector_device, runtime_dependency_issue, runtime_guidance_context, runtime_management_snapshot, probe_runtime_gpu_query_execution, semantic_query_session
+from omniclip_rag.vector_index import LanceDbVectorIndex, _MODEL_DOWNLOAD_IGNORE_PATTERNS, _discover_active_runtime_dir, _preferred_runtime_dir_path, _probe_runtime_semantic_core_inprocess, _query_memory_pressure_snapshot, _runtime_component_dependency_ids, _runtime_import_environment, _runtime_search_roots, _sanitize_local_model_snapshot, build_runtime_install_command, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, model_download_guidance_context, prepare_local_model_snapshot, probe_runtime_gpu_execution, query_cuda_memory_requirements, refresh_runtime_capability_snapshot, resolve_vector_device, runtime_dependency_issue, runtime_guidance_context, runtime_management_snapshot, probe_runtime_gpu_query_execution, semantic_query_session
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -559,7 +559,7 @@ class VectorIndexTests(unittest.TestCase):
 
 
     def test_build_runtime_install_command_uses_single_quoted_literals_once(self) -> None:
-        expected_root = Path(r'D:/软件编写/OmniClip RAG/dist/OmniClipRAG-v0.2.4')
+        expected_root = Path(r'C:/OmniClipRAG/dist/OmniClipRAG-v0.2.4')
         with patch('omniclip_rag.vector_index._application_root_dir', return_value=expected_root), \
              patch('omniclip_rag.vector_index._install_runtime_script_relative', return_value=r'.\InstallRuntime.ps1'):
             command = build_runtime_install_command('cuda', source='mirror', component='semantic-core')
@@ -570,7 +570,7 @@ class VectorIndexTests(unittest.TestCase):
         self.assertIn('-Component semantic-core', command)
 
     def test_build_runtime_install_command_injects_runtime_root_override_once(self) -> None:
-        expected_root = Path(r'D:/软件编写/OmniClip RAG/dist/OmniClipRAG-v0.2.4')
+        expected_root = Path(r'C:/OmniClipRAG/dist/OmniClipRAG-v0.2.4')
         runtime_root = Path(r'D:/Users/test/AppData/Roaming/OmniClip RAG/shared/runtime')
         with patch('omniclip_rag.vector_index._application_root_dir', return_value=expected_root), \
              patch('omniclip_rag.vector_index._install_runtime_script_relative', return_value=r'.\InstallRuntime.ps1'):
@@ -1213,6 +1213,71 @@ class VectorIndexTests(unittest.TestCase):
         self.assertEqual(factory_devices, ['cpu'])
         self.assertEqual(index.last_execution_report()['fallback_reason'], 'system_memory_to_cpu')
         self.assertEqual(index.last_execution_report()['memory_pressure'], pressure)
+
+    def test_query_memory_guard_only_blocks_extreme_pressure(self) -> None:
+        requirements = query_cuda_memory_requirements()
+        self.assertEqual(requirements['min_commit_headroom_bytes'], 2 * 1024**3)
+        self.assertEqual(requirements['max_commit_usage_percent'], 98.0)
+        self.assertEqual(requirements['min_physical_available_bytes'], 2 * 1024**3)
+
+        healthy = types.SimpleNamespace(
+            commit_headroom_bytes=4 * 1024**3,
+            commit_usage_percent=95.46,
+            available_physical_bytes=9 * 1024**3,
+        )
+        critical = types.SimpleNamespace(
+            commit_headroom_bytes=1 * 1024**3,
+            commit_usage_percent=98.9,
+            available_physical_bytes=9 * 1024**3,
+        )
+        with patch('omniclip_rag.startup_prewarm.read_memory_status', return_value=healthy):
+            self.assertEqual(_query_memory_pressure_snapshot()['reason'], '')
+        with patch('omniclip_rag.startup_prewarm.read_memory_status', return_value=critical):
+            self.assertEqual(_query_memory_pressure_snapshot()['reason'], 'low-commit-headroom')
+
+    def test_healthy_memory_snapshot_keeps_cuda_execution_report(self) -> None:
+        data_paths = ensure_data_paths(str(TEST_DATA_ROOT / 'query_healthy_memory_report'))
+        config = AppConfig(
+            vault_path=str(ROOT),
+            data_root=str(data_paths.global_root),
+            vector_backend='lancedb',
+            vector_device='auto',
+        )
+
+        class NumpyOutput:
+            device = 'cpu'
+
+        class CudaEmbedder:
+            device = 'cuda:0'
+
+            def encode(self, texts, *, batch_size=16, show_progress_bar=False, normalize_embeddings=True):
+                return NumpyOutput()
+
+        fake_cuda = types.SimpleNamespace(
+            reset_peak_memory_stats=lambda _device: None,
+            max_memory_allocated=lambda _device: 4096,
+            synchronize=lambda _device=None: None,
+        )
+        healthy_snapshot = {
+            'reason': '',
+            'commit_headroom_bytes': 6 * 1024**3,
+            'commit_usage_percent': 92.82,
+            'available_physical_bytes': 12 * 1024**3,
+        }
+        with patch('omniclip_rag.vector_index.detect_acceleration', return_value={'cuda_available': True}), \
+             patch('omniclip_rag.vector_index._query_memory_pressure_snapshot', return_value=healthy_snapshot), \
+             patch('omniclip_rag.vector_index._runtime_import_environment', return_value=nullcontext()), \
+             patch.dict(sys.modules, {'torch': types.SimpleNamespace(cuda=fake_cuda)}), \
+             semantic_query_session():
+            index = LanceDbVectorIndex(config, data_paths, embedder_factory=CudaEmbedder)
+            index._encode(['query'])
+
+        report = index.last_execution_report()
+        self.assertEqual(report['resolved_device'], 'cuda')
+        self.assertEqual(report['model_device'], 'cuda:0')
+        self.assertEqual(report['actual_device'], 'cuda:0')
+        self.assertNotIn('fallback_reason', report)
+        self.assertNotIn('memory_pressure', report)
 
     def test_lancedb_rebuild_accepts_iterable_stream(self) -> None:
         data_paths = ensure_data_paths(str(TEST_DATA_ROOT / "iterable_rebuild"))

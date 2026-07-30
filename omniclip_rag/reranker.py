@@ -27,6 +27,7 @@ from .vector_index import (
     mark_semantic_query_cuda_memory_failure,
     mark_semantic_query_reranker_failure,
     resolve_vector_device,
+    semantic_query_reranker_failure_message,
     semantic_query_reranker_failure_reason,
 )
 
@@ -128,6 +129,8 @@ class CrossEncoderReranker:
                 reranked_count=0,
                 skipped_reason='query_circuit_open',
                 fallback_reason='reranker_query_circuit_open',
+                error_class=prior_failure,
+                error_message=semantic_query_reranker_failure_message(),
             )
         if limit <= 1:
             return hits, RerankOutcome(
@@ -183,7 +186,8 @@ class CrossEncoderReranker:
                         degraded_to_cpu = True
                         batch_size = self._initial_batch_size('cpu')
                         continue
-                mark_semantic_query_reranker_failure(exc.__class__.__name__)
+                error_message = str(exc).strip()
+                mark_semantic_query_reranker_failure(exc.__class__.__name__, error_message)
                 return hits, RerankOutcome(
                     enabled=True,
                     applied=False,
@@ -198,6 +202,8 @@ class CrossEncoderReranker:
                     oom_recovered=oom_recovered,
                     skipped_reason=type(exc).__name__,
                     fallback_reason='reranker_execution_failed',
+                    error_class=exc.__class__.__name__,
+                    error_message=error_message,
                 )
 
         normalized_scores = _normalize_rerank_scores(scores or [])
@@ -392,6 +398,8 @@ class CanaryTorchReranker:
                 reranked_count=0,
                 skipped_reason=exc.__class__.__name__,
                 fallback_reason='reranker_execution_failed',
+                error_class=exc.__class__.__name__,
+                error_message=str(exc).strip(),
             )
         normalized_scores = _normalize_rerank_scores(scores)
         rescored: list[SearchHit] = []

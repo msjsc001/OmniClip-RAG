@@ -88,6 +88,11 @@ def query_result_from_payload(payload: dict[str, object]) -> QueryResult:
     recommendation_payload = insights_payload.get('recommendation')
     reranker_payload = insights_payload.get('reranker')
     insights_payload['runtime_warnings'] = tuple(insights_payload.get('runtime_warnings') or ())
+    insights_payload['runtime_requirements'] = tuple(
+        dict(item)
+        for item in (insights_payload.get('runtime_requirements') or ())
+        if isinstance(item, dict)
+    )
     insights_payload['trace_lines'] = tuple(insights_payload.get('trace_lines') or ())
     insights_payload['recommendation'] = (
         QueryLimitRecommendation(**dict(recommendation_payload))
@@ -164,6 +169,7 @@ def execute_query_request(
     total = len(selected_vaults)
     merged_hits: list[SearchHit] = []
     runtime_warnings: list[str] = []
+    runtime_requirements: list[dict[str, object]] = []
     trace_lines: list[str] = []
     snapshots: dict[str, dict[str, object]] = {}
     shared_reranker = None
@@ -233,6 +239,12 @@ def execute_query_request(
                 insights = getattr(result, 'insights', None)
                 if insights is not None:
                     runtime_warnings.extend(tuple(getattr(insights, 'runtime_warnings', ()) or ()))
+                    for requirement in tuple(getattr(insights, 'runtime_requirements', ()) or ()):
+                        if not isinstance(requirement, dict):
+                            continue
+                        enriched = dict(requirement)
+                        enriched.setdefault('vault_path', vault_path)
+                        runtime_requirements.append(enriched)
                     trace_lines.extend(tuple(getattr(insights, 'trace_lines', ()) or ()))
             finally:
                 service.close(release_process_resources=False)
@@ -242,12 +254,21 @@ def execute_query_request(
         merged_hits.sort(key=lambda hit: float(getattr(hit, 'score', 0.0) or 0.0), reverse=True)
         final_limit = max(int(getattr(config, 'query_limit', 15) or 15), 1)
         final_hits = merged_hits[:final_limit]
+        unique_requirements: list[dict[str, object]] = []
+        seen_requirements: set[str] = set()
+        for requirement in runtime_requirements:
+            marker = json.dumps(requirement, ensure_ascii=False, sort_keys=True, default=_json_default)
+            if marker in seen_requirements:
+                continue
+            seen_requirements.add(marker)
+            unique_requirements.append(requirement)
         result = QueryResult(
             hits=final_hits,
             context_text='',
             insights=QueryInsights(
                 selected_hits=len(final_hits),
                 runtime_warnings=tuple(dict.fromkeys(runtime_warnings)),
+                runtime_requirements=tuple(unique_requirements),
                 trace_lines=tuple(dict.fromkeys(trace_lines)),
                 query_plan={
                     'mode': 'multi_vault_fanout' if total > 1 else query_mode,

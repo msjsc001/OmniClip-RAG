@@ -107,9 +107,13 @@ _VECTOR_BATCH_CHAR_BUDGETS = {
 }
 _VECTOR_SLOW_BATCH_WARNING_SECONDS = 12.0
 _VECTOR_STALL_STACK_DUMP_SECONDS = 45.0
-_QUERY_MIN_COMMIT_HEADROOM_BYTES = 6 * 1024**3
-_QUERY_MAX_COMMIT_USAGE_PERCENT = 94.0
-_QUERY_MIN_PHYSICAL_AVAILABLE_BYTES = 4 * 1024**3
+# Query work is isolated in a disposable, below-normal-priority process. Only
+# pre-empt CUDA loading when Windows is close to exhausting its commit budget;
+# ordinary memory pressure is better left to the OS and the existing OOM
+# recovery path.
+_QUERY_MIN_COMMIT_HEADROOM_BYTES = 2 * 1024**3
+_QUERY_MAX_COMMIT_USAGE_PERCENT = 98.0
+_QUERY_MIN_PHYSICAL_AVAILABLE_BYTES = 2 * 1024**3
 _RUNTIME_STDLIB_SUPPORT_MODULES = (
     'asyncio.base_events',
     'asyncio.base_futures',
@@ -136,6 +140,7 @@ def semantic_query_session():
         _QUERY_SEMANTIC_STATE.cuda_memory_failed = False
         _QUERY_SEMANTIC_STATE.vector_failure_reason = ''
         _QUERY_SEMANTIC_STATE.reranker_failure_reason = ''
+        _QUERY_SEMANTIC_STATE.reranker_failure_message = ''
     _QUERY_SEMANTIC_STATE.depth = depth + 1
     try:
         yield
@@ -146,6 +151,7 @@ def semantic_query_session():
             _QUERY_SEMANTIC_STATE.cuda_memory_failed = False
             _QUERY_SEMANTIC_STATE.vector_failure_reason = ''
             _QUERY_SEMANTIC_STATE.reranker_failure_reason = ''
+            _QUERY_SEMANTIC_STATE.reranker_failure_message = ''
 
 
 def semantic_query_cuda_memory_failed() -> bool:
@@ -178,9 +184,24 @@ def semantic_query_reranker_failure_reason() -> str:
     return str(getattr(_QUERY_SEMANTIC_STATE, 'reranker_failure_reason', '') or '')
 
 
-def mark_semantic_query_reranker_failure(reason: str) -> None:
+def semantic_query_reranker_failure_message() -> str:
+    if not getattr(_QUERY_SEMANTIC_STATE, 'depth', 0):
+        return ''
+    return str(getattr(_QUERY_SEMANTIC_STATE, 'reranker_failure_message', '') or '')
+
+
+def mark_semantic_query_reranker_failure(reason: str, message: str = '') -> None:
     if getattr(_QUERY_SEMANTIC_STATE, 'depth', 0):
         _QUERY_SEMANTIC_STATE.reranker_failure_reason = str(reason or 'semantic_reranker_failed')
+        _QUERY_SEMANTIC_STATE.reranker_failure_message = str(message or '')
+
+
+def query_cuda_memory_requirements() -> dict[str, object]:
+    return {
+        'min_commit_headroom_bytes': _QUERY_MIN_COMMIT_HEADROOM_BYTES,
+        'max_commit_usage_percent': _QUERY_MAX_COMMIT_USAGE_PERCENT,
+        'min_physical_available_bytes': _QUERY_MIN_PHYSICAL_AVAILABLE_BYTES,
+    }
 
 
 def _query_memory_pressure_snapshot() -> dict[str, object]:
@@ -1047,9 +1068,11 @@ class LanceDbVectorIndex:
         requested_device = (self.config.vector_device or 'auto').strip().lower() or 'auto'
         resolved_device = resolve_vector_device(self.config.vector_device)
         memory_pressure: dict[str, object] = {}
+        memory_pressure_reason = ''
         if semantic_query_session_active() and resolved_device == 'cuda':
             memory_pressure = _query_memory_pressure_snapshot()
-            if str(memory_pressure.get('reason') or ''):
+            memory_pressure_reason = str(memory_pressure.get('reason') or '')
+            if memory_pressure_reason:
                 mark_semantic_query_cuda_memory_failure()
                 resolved_device = 'cpu'
                 LOGGER.warning(
@@ -1064,7 +1087,7 @@ class LanceDbVectorIndex:
                 resolved_device=resolved_device,
             )
         except Exception as exc:
-            if memory_pressure:
+            if memory_pressure_reason:
                 report = dict(self._last_execution_report)
                 report.update({
                     'fallback_reason': 'system_memory_to_cpu_failed',
@@ -1111,7 +1134,7 @@ class LanceDbVectorIndex:
             })
             self._last_execution_report = report
             return vectors
-        if memory_pressure:
+        if memory_pressure_reason:
             report = dict(self._last_execution_report)
             report.update({
                 'fallback_reason': 'system_memory_to_cpu',
@@ -1160,7 +1183,11 @@ class LanceDbVectorIndex:
                     _torch_cuda_synchronize(torch, device_name)
                     report['cuda_peak_mem_after'] = _torch_cuda_peak_memory(torch, device_name)
                     report['cuda_peak_mem_delta'] = max(int(report['cuda_peak_mem_after']) - int(report['cuda_peak_mem_before']), 0)
-                    report['actual_device'] = str(getattr(vectors, 'device', '') or report['model_device'] or device_name)
+                    # SentenceTransformer normally returns a NumPy array on
+                    # CPU even when the model and inference ran on CUDA. The
+                    # output container location is therefore not evidence of
+                    # the execution device.
+                    report['actual_device'] = str(report['model_device'] or device_name)
             else:
                 vectors = embedder.encode(
                     texts,

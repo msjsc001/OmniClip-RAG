@@ -105,12 +105,12 @@
   - runtime / Tika JAR / JRE 未被错误打包进 EXE
 
 ## 关键文件
-- [vector_index.py](/D:/软件编写/OmniClip%20RAG/omniclip_rag/vector_index.py)
-- [runtime_layout.py](/D:/软件编写/OmniClip%20RAG/omniclip_rag/runtime_layout.py)
-- [config_workspace.py](/D:/软件编写/OmniClip%20RAG/omniclip_rag/ui_next_qt/config_workspace.py)
-- [tika_catalog.py](/D:/软件编写/OmniClip%20RAG/omniclip_rag/extensions/tika_catalog.py)
-- [install_runtime.ps1](/D:/软件编写/OmniClip%20RAG/scripts/install_runtime.ps1)
-- [OmniClipRAG.spec](/D:/软件编写/OmniClip%20RAG/OmniClipRAG.spec)
+- [vector_index.py](../omniclip_rag/vector_index.py)
+- [runtime_layout.py](../omniclip_rag/runtime_layout.py)
+- [config_workspace.py](../omniclip_rag/ui_next_qt/config_workspace.py)
+- [tika_catalog.py](../omniclip_rag/extensions/tika_catalog.py)
+- [install_runtime.ps1](../scripts/install_runtime.ps1)
+- [OmniClipRAG.spec](../OmniClipRAG.spec)
 
 ## 后续建议
 - 下一阶段优先做实机点验：

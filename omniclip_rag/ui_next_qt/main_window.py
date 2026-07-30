@@ -155,15 +155,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.language_combo.currentTextChanged.connect(self._on_language_changed)
         controls_bottom.addWidget(self.language_combo, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
 
-        self.header_toggle_button = QtWidgets.QToolButton(self.header_card)
+        self.main_tabs = QtWidgets.QTabWidget(central)
+        self.main_tabs.currentChanged.connect(self._sync_status_bar)
+        self.header_toggle_button = QtWidgets.QToolButton(self.main_tabs)
         self.header_toggle_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.header_toggle_button.setAutoRaise(False)
         self.header_toggle_button.setToolTip(self._tip('header_toggle'))
         self.header_toggle_button.clicked.connect(self._toggle_header_collapsed)
-        controls_bottom.addWidget(self.header_toggle_button, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
-
-        self.main_tabs = QtWidgets.QTabWidget(central)
-        self.main_tabs.currentChanged.connect(self._sync_status_bar)
+        self.main_tabs.setCornerWidget(
+            self.header_toggle_button,
+            QtCore.Qt.Corner.TopRightCorner,
+        )
         root_layout.addWidget(self.main_tabs, 1)
 
         self.config_workspace = ConfigWorkspace(
@@ -193,6 +195,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.query_workspace.statusMessageChanged.connect(self._set_query_status_message)
             self.query_workspace.resultSummaryChanged.connect(self._set_query_result_summary)
             self.main_tabs.addTab(self.query_workspace, self._tr('main_tab_query'))
+            self.results_workspace = self.query_workspace.results_card
+            self.activity_log_workspace = self.query_workspace.activity_log_page
+            self.main_tabs.addTab(self.results_workspace, self._tr('main_tab_results'))
             self.config_workspace.queryBlockStateChanged.connect(
                 lambda blocked, title, detail: self.query_workspace.set_external_block_state(blocked=blocked, title=title, detail=detail)
             )
@@ -202,10 +207,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.query_workspace.pageBlocklistRequested.connect(self.config_workspace.open_page_blocklist_dialog)
             self.query_workspace.sensitiveFilterRequested.connect(self.config_workspace.open_sensitive_filter_dialog)
             self.query_workspace.runtimeRepairRequested.connect(self._show_runtime_management)
+            self.query_workspace.resultsRequested.connect(self._show_query_results_tab)
+            self.query_workspace.activityLogRequested.connect(self._show_query_log_tab)
             self.query_workspace.set_runtime_snapshot_provider(self.config_workspace.current_runtime_snapshot)
         else:
             self.query_workspace = None
+            self.results_workspace = None
+            self.activity_log_workspace = None
         self.main_tabs.addTab(self.config_workspace, self._tr('main_tab_config'))
+        if self.activity_log_workspace is not None:
+            self.main_tabs.addTab(self.activity_log_workspace, self._tr('main_tab_activity_log'))
         if self._recovery_mode:
             self.main_tabs.setCurrentWidget(self.config_workspace)
 
@@ -235,16 +246,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_header_collapsed(self) -> None:
         collapsed = self._header_collapsed
-        self.tagline_label.setVisible(not collapsed)
-        self.guide_label.setVisible(not collapsed)
-        self.version_label.setVisible(not collapsed)
+        self.header_card.setVisible(not collapsed)
         self.header_toggle_button.setText(self._tr('header_expand') if collapsed else self._tr('header_collapse'))
         self.header_toggle_button.setArrowType(QtCore.Qt.ArrowType.DownArrow if collapsed else QtCore.Qt.ArrowType.UpArrow)
-        layout = self.header_card.layout()
-        if isinstance(layout, QtWidgets.QHBoxLayout):
-            layout.setContentsMargins(12, 8, 12, 8) if collapsed else layout.setContentsMargins(12, 12, 12, 12)
-        self.header_card.updateGeometry()
-        self.adjustSize()
+        self.main_tabs.updateGeometry()
 
     def _toggle_header_collapsed(self) -> None:
         self._header_collapsed = not self._header_collapsed
@@ -319,10 +324,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sync_status_bar()
 
     def _show_query_log_tab(self) -> None:
-        if self.query_workspace is None:
+        if self.query_workspace is None or self.activity_log_workspace is None:
             return
-        self.main_tabs.setCurrentWidget(self.query_workspace)
-        self.query_workspace.show_log_tab()
+        self.main_tabs.setCurrentWidget(self.activity_log_workspace)
+        self._sync_status_bar()
+
+    def _show_query_results_tab(self) -> None:
+        if self.query_workspace is None or self.results_workspace is None:
+            return
+        self.main_tabs.setCurrentWidget(self.results_workspace)
         self._sync_status_bar()
 
     def _show_runtime_management(self) -> None:

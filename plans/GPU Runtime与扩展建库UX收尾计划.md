@@ -9,7 +9,7 @@
 - 让新窗口或新 AI 接手时，能直接沿本计划继续，而不是重新围绕 Runtime、GPU、扩展建库 UX 四处散修
 
 ## 与上一份计划的关系
-- 上一份主计划：[Markdown主查询与Runtime稳定性RCA计划.md](/D:/软件编写/OmniClip%20RAG/plans/Markdown%E4%B8%BB%E6%9F%A5%E8%AF%A2%E4%B8%8ERuntime%E7%A8%B3%E5%AE%9A%E6%80%A7RCA%E8%AE%A1%E5%88%92.md)
+- 上一份主计划：[Markdown主查询与Runtime稳定性RCA计划.md](../plans/Markdown%E4%B8%BB%E6%9F%A5%E8%AF%A2%E4%B8%8ERuntime%E7%A8%B3%E5%AE%9A%E6%80%A7RCA%E8%AE%A1%E5%88%92.md)
 - 上一份计划主要解决的是：
   - 构建版 EXE 的 Markdown 主查询到底有没有真正执行高级搜索
   - Runtime 健康探测与真实查询执行是否一致
@@ -90,13 +90,13 @@
 - 不会无限增长成单一超大日志文件
 
 关键位置：
-- [config.py](/D:/软件编写/OmniClip%20RAG/omniclip_rag/config.py)
-- [service.py](/D:/软件编写/OmniClip%20RAG/omniclip_rag/service.py)
-- [app_logging.py](/D:/软件编写/OmniClip%20RAG/omniclip_rag/app_logging.py)
+- [config.py](../omniclip_rag/config.py)
+- [service.py](../omniclip_rag/service.py)
+- [app_logging.py](../omniclip_rag/app_logging.py)
 
 ### 已确认 2：当前 GPU 行确实是派生状态，不是真组件
 关键位置：
-- [config_workspace.py](/D:/软件编写/OmniClip%20RAG/omniclip_rag/ui_next_qt/config_workspace.py)
+- [config_workspace.py](../omniclip_rag/ui_next_qt/config_workspace.py)
 
 当前关键事实：
 - `gpu-acceleration` 安装目标映射到 `semantic-core + cuda`
@@ -109,8 +109,8 @@
 
 ### 已确认 3：扩展来源目录当前进度提示确实偏数值化
 关键位置：
-- [extensions/service.py](/D:/软件编写/OmniClip%20RAG/omniclip_rag/extensions/service.py)
-- [config_workspace.py](/D:/软件编写/OmniClip%20RAG/omniclip_rag/ui_next_qt/config_workspace.py)
+- [extensions/service.py](../omniclip_rag/extensions/service.py)
+- [config_workspace.py](../omniclip_rag/ui_next_qt/config_workspace.py)
 
 当前关键事实：
 - 行级进度主要依赖：
@@ -599,6 +599,6 @@
 接手时必须按这个顺序做：
 
 1. 先读本计划
-2. 再读 [Markdown主查询与Runtime稳定性RCA计划.md](/D:/软件编写/OmniClip%20RAG/plans/Markdown%E4%B8%BB%E6%9F%A5%E8%AF%A2%E4%B8%8ERuntime%E7%A8%B3%E5%AE%9A%E6%80%A7RCA%E8%AE%A1%E5%88%92.md)
-3. 再读 [ARCHITECTURE.md](/D:/软件编写/OmniClip%20RAG/ARCHITECTURE.md)
+2. 再读 [Markdown主查询与Runtime稳定性RCA计划.md](../plans/Markdown%E4%B8%BB%E6%9F%A5%E8%AF%A2%E4%B8%8ERuntime%E7%A8%B3%E5%AE%9A%E6%80%A7RCA%E8%AE%A1%E5%88%92.md)
+3. 再读 [ARCHITECTURE.md](../ARCHITECTURE.md)
 4. 然后只沿当前 Phase 往下推进，不得跳回散修

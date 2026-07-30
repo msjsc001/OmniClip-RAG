@@ -12,7 +12,7 @@
     {
       "registryType": "mcpb",
       "identifier": "https://github.com/EllisMorrow/OmniClip-RAG/releases/download/v0.4.10/omniclip-rag-mcp-win-x64-v0.4.10.mcpb",
-      "fileSha256": "abf5100d7c5b2032a10035b3230d5672800327ce041af1ee5f7255fe58b2735c",
+      "fileSha256": "ca77edf039bb04760df15628f5e5eb4e80e2895163f841f2ebea029c31b35ea8",
       "transport": {
         "type": "stdio"
       }

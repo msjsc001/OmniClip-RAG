@@ -120,6 +120,38 @@ class RerankerTests(unittest.TestCase):
         self.assertEqual(loaded_devices, ['cuda', 'cpu'])
         self.assertEqual(len(reranked), 2)
 
+    def test_reranker_failure_preserves_error_for_multi_vault_circuit(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'failure_detail'))
+        model_dir = paths.cache_dir / 'models' / 'BAAI__bge-reranker-v2-m3'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / 'config.json').write_text('{}', encoding='utf-8')
+        (model_dir / 'pytorch_model.bin').write_text('x', encoding='utf-8')
+        config = AppConfig(
+            vault_path='.',
+            data_root=str(paths.global_root),
+            reranker_enabled=True,
+            vector_device='cpu',
+        )
+
+        def failing_loader(_local_dir, _device):
+            raise OSError('model shard cannot be opened')
+
+        reranker = CrossEncoderReranker(config, paths, loader=failing_loader)
+        hits = [
+            SearchHit(score=40.0, title='A', anchor='A', source_path='a.md', rendered_text='alpha', chunk_id='a'),
+            SearchHit(score=30.0, title='B', anchor='B', source_path='b.md', rendered_text='beta', chunk_id='b'),
+        ]
+        with semantic_query_session():
+            _first_hits, first = reranker.rerank('test', hits, 2)
+            _second_hits, second = reranker.rerank('test', hits, 2)
+
+        self.assertEqual(first.error_class, 'OSError')
+        self.assertEqual(first.error_message, 'model shard cannot be opened')
+        self.assertEqual(first.fallback_reason, 'reranker_execution_failed')
+        self.assertEqual(second.skipped_reason, 'query_circuit_open')
+        self.assertEqual(second.error_class, 'OSError')
+        self.assertEqual(second.error_message, 'model shard cannot be opened')
+
     def test_reranker_download_guidance_context_builds_commands_and_dirs(self) -> None:
         paths = ensure_data_paths(str(TEST_DATA_ROOT / 'manual_reranker_context'))
         config = AppConfig(vault_path='.', data_root=str(paths.global_root), reranker_enabled=True)

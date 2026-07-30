@@ -15,12 +15,19 @@
 - Changed startup query readiness so searches remain disabled until the automatic Runtime status probe finishes.
 - Changed safe startup so it still runs the isolated status-only Runtime probe while continuing to suppress semantic prewarming.
 - Changed desktop shutdown so an active query subprocess is terminated instead of being orphaned.
+- Changed the Auto-device Windows memory preflight to intervene only near the commit limit (less than 2 GiB commit headroom, at least 98% commit usage, or less than 2 GiB physical memory available); the isolated process and CUDA OOM recovery remain active.
+- Changed the Query console hint area and Activity log to show measured resource values, exact normal-operation requirements, and retained Reranker error details.
+- Changed the desktop shell to use separate Query Console, Results & Details, Config, and Activity Log tabs, with all log-focus actions routed to the new top-level Activity Log page.
+- Changed the global header collapse control into a right-aligned tab-row action; collapsed mode now hides the entire header instead of leaving partial title and language controls visible.
+- Added a compact query-state button immediately after the Query action for idle, blocked, progress, and completed states.
 
 ### Fixed
 
 - Fixed the Start page retaining a stale `runtime needs repair` state until the Runtime page was refreshed manually.
 - Fixed native PyTorch, SentenceTransformer, and CrossEncoder access violations terminating the entire Qt desktop process during a query.
 - Fixed lexical-only recovery paths importing the semantic runtime solely to populate diagnostic metadata.
+- Fixed multi-vault queries discarding the first Reranker exception and showing only a non-actionable circuit-open skip for later vaults.
+- Fixed healthy Windows memory snapshots being mislabeled as `system_memory_to_cpu`, and fixed CPU-hosted NumPy result arrays being mistaken for CPU model execution after successful CUDA inference.
 
 ## V0.4.9 - 2026-07-29
 

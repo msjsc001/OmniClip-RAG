@@ -1,12 +1,12 @@
-# OmniClip RAG v0.4.10 Candidate Release Notes
+# OmniClip RAG v0.4.10 Release Notes
 
-## Candidate Status
+## Release Status
 
-`v0.4.10` is intentionally prepared as a draft release for user validation. It is not promoted as the latest stable release until the packaged Windows build has been exercised against the user's real Runtime and vault configuration.
+`v0.4.10` is the Runtime-readiness, query-isolation, CUDA diagnostics, and desktop workspace-layout release. The packaged Windows build has been exercised against a real Runtime and multi-vault configuration before publication.
 
 ## Release Focus
 
-This candidate prevents startup Runtime detection and native semantic-model failures from taking control of the interactive desktop process.
+This release prevents startup Runtime detection and native semantic-model failures from taking control of the interactive desktop process.
 
 The query interface stays blocked while the automatic Runtime probe is active. Safe startup still skips semantic prewarming, but it no longer skips the isolated status-only probe that supplies the Start and Runtime pages with an accurate state.
 
@@ -23,15 +23,20 @@ Queries now run in a disposable child process. A native Windows access violation
 - A fresh lexical-only process provides one automatic recovery attempt.
 - Closing the desktop terminates an active query process so it is not orphaned.
 - Multi-vault queries continue to reuse the same embedding and reranker resources within one query.
+- Auto now leaves ordinary Windows memory pressure to the operating system and intervenes only near the commit/physical-memory limit; the query still retains isolated-process and CUDA-OOM recovery protection.
+- The Query console and Activity log report the measured memory values, the exact CUDA/Reranker readiness conditions, and the original Reranker exception instead of presenting an unexplained failure.
+- Healthy memory snapshots no longer generate a false CPU-fallback warning, and CUDA execution is identified from the model/inference device rather than the CPU location of the returned NumPy array.
+- Query Console, Results & Details, Config, and Activity Log now occupy independent top-level tabs; existing diagnostic jumps open the new Activity Log location.
+- The header can be hidden completely while its Expand/Collapse action remains at the far right of the tab row, and a compact state button beside Query shows whether a query is ready, blocked, running, or complete.
 
-## Candidate Assets
+## Release Assets
 
 - `OmniClipRAG-v0.4.10-win64.zip`
-  - desktop GUI candidate package
+  - desktop GUI package
 - `OmniClipRAG-MCP-v0.4.10-win64.zip`
   - manual MCP package for direct `stdio` setup
 - `omniclip-rag-mcp-win-x64-v0.4.10.mcpb`
-  - MCPB candidate package
+  - MCPB package
 
 ## Validation Scope
 
@@ -39,7 +44,7 @@ Queries now run in a disposable child process. A native Windows access violation
 - Start-page Runtime state synchronization.
 - Query result serialization, progress transport, and native-crash recovery coordination.
 - A real source-build child-process round trip against a synthetic Markdown vault.
-- Full automated test suite, packaged build audit, MCPB validation/unpack, and packaged desktop smoke testing before the draft is uploaded.
+- Full automated test suite, packaged build audit, MCPB validation/unpack, and packaged desktop smoke testing before publication.
 
 ## Privacy and Compatibility
 
