@@ -27,6 +27,14 @@ OmniClip RAG builds searchable indexes from knowledge you already keep on your o
 
 The desktop app manages data roots, Runtime components, models, knowledge-base builds, live watch, queries, and result review. The optional MCP server exposes the same retrieval core to MCP-capable AI clients through two read-only tools.
 
+## Interface preview
+
+The Query Console keeps input, scope, retrieval settings, and live query state together. Results and Details uses a separate page for source-labelled hits, snippet review, full-context selection, and page filtering.
+
+<div align="center">
+  <img src="docs/assets/readme-ui-en.png" alt="OmniClip RAG Query Console and Results and Details interface" width="900" />
+</div>
+
 ## Download
 
 Open the [latest release](https://github.com/EllisMorrow/OmniClip-RAG/releases/latest) and choose the package that matches your use case:

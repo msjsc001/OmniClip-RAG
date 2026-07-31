@@ -27,6 +27,14 @@
 
 桌面版负责管理数据目录、Runtime、模型、知识库建库、热监听、查询和结果查看。可选的 MCP Server 则通过两个只读工具，把同一套检索能力提供给支持 MCP 的 AI 客户端。
 
+## 界面预览
+
+查询台集中放置问题输入、检索范围、查询设置与实时阶段状态；“结果与详情”使用独立页面展示带来源标签的命中结果、片段详情、完整上下文选择和页面过滤。
+
+<div align="center">
+  <img src="docs/assets/readme-ui-zh-CN.png" alt="方寸引查询台与结果和详情界面" width="900" />
+</div>
+
 ## 下载
 
 进入[最新版本 Releases](https://github.com/EllisMorrow/OmniClip-RAG/releases/latest)，根据用途选择文件：
