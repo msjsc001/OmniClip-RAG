@@ -27,12 +27,26 @@
 
 桌面版负责管理数据目录、Runtime、模型、知识库建库、热监听、查询和结果查看。可选的 MCP Server 则通过两个只读工具，把同一套检索能力提供给支持 MCP 的 AI 客户端。
 
+### 按目标选择入口
+
+| 我想要…… | 从这里开始 |
+| --- | --- |
+| 安装 Windows 版并完成第一次建库 | [快速开始](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Getting-Started) |
+| 了解 Runtime、模型、CPU、CUDA 或资源提示 | [Runtime 与模型](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Runtime-and-Models) |
+| 让笔记修改后自动进入索引 | [知识库与热监听](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Knowledge-Bases-and-Live-Watch) |
+| 通过 MCP 连接 AI 客户端 | [MCP 接入](https://github.com/EllisMorrow/OmniClip-RAG/wiki/MCP-Integration) |
+| 安全排查故障 | [故障排查](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Troubleshooting) |
+
 ## 界面预览
 
 查询台集中放置问题输入、检索范围、查询设置与实时阶段状态；“结果与详情”使用独立页面展示带来源标签的命中结果、片段详情、完整上下文选择和页面过滤。
 
 <div align="center">
-  <img src="docs/assets/readme-ui-zh-CN.png" alt="方寸引查询台与结果和详情界面" width="900" />
+  <a href="docs/assets/readme-ui-zh-CN.png">
+    <img src="docs/assets/readme-ui-zh-CN.png" alt="方寸引查询台与结果和详情界面" width="900" />
+  </a>
+  <br />
+  <sub>查询台与结果和详情 · 点击图片可查看原始尺寸</sub>
 </div>
 
 ## 下载

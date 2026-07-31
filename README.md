@@ -27,12 +27,26 @@ OmniClip RAG builds searchable indexes from knowledge you already keep on your o
 
 The desktop app manages data roots, Runtime components, models, knowledge-base builds, live watch, queries, and result review. The optional MCP server exposes the same retrieval core to MCP-capable AI clients through two read-only tools.
 
+### Choose your path
+
+| I want to… | Start here |
+| --- | --- |
+| Install the Windows app and build my first index | [Getting Started](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Getting-Started) |
+| Understand Runtime, models, CPU, CUDA, or resource messages | [Runtime and Models](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Runtime-and-Models) |
+| Keep indexes current after editing notes | [Knowledge Bases and Live Watch](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Knowledge-Bases-and-Live-Watch) |
+| Connect an AI client through MCP | [MCP Integration](https://github.com/EllisMorrow/OmniClip-RAG/wiki/MCP-Integration) |
+| Diagnose a problem safely | [Troubleshooting](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Troubleshooting) |
+
 ## Interface preview
 
 The Query Console keeps input, scope, retrieval settings, and live query state together. Results and Details uses a separate page for source-labelled hits, snippet review, full-context selection, and page filtering.
 
 <div align="center">
-  <img src="docs/assets/readme-ui-en.png" alt="OmniClip RAG Query Console and Results and Details interface" width="900" />
+  <a href="docs/assets/readme-ui-en.png">
+    <img src="docs/assets/readme-ui-en.png" alt="OmniClip RAG Query Console and Results and Details interface" width="900" />
+  </a>
+  <br />
+  <sub>Query Console and Results and Details · click the image to open it at full size</sub>
 </div>
 
 ## Download
