@@ -53,6 +53,7 @@
       workflow_kicker: "FROM FOLDER TO RESULT",
       workflow_title: "Choose a folder. Let it index. Start asking.",
       workflow_intro: "Keep your folders and writing habits. OmniClip works around them.",
+      workflow_visual_caption: "Search local Markdown, PDF, and other documents, review source-linked results directly, or provide selected evidence to AI.",
       workflow_one_title: "Choose your folders",
       workflow_one_body: "Add a Markdown vault and optional PDF or Tika directories. Each workspace stays isolated.",
       workflow_two_title: "Build the local index",
@@ -182,6 +183,7 @@
       workflow_kicker: "从目录到结果",
       workflow_title: "选目录，等索引，然后直接问。",
       workflow_intro: "目录结构和写作习惯照旧，OmniClip 只负责把内容变得可查。",
+      workflow_visual_caption: "在本地查询 Markdown、PDF 和其他文档，直接查看带来源的结果，或将选定证据提供给 AI。",
       workflow_one_title: "选择知识目录",
       workflow_one_body: "添加 Markdown 知识库，并按需加入 PDF 或 Tika 目录；不同工作区彼此隔离。",
       workflow_two_title: "建立本地索引",
@@ -265,6 +267,7 @@
   const languageButtons = [...document.querySelectorAll("[data-language]")];
   const textNodes = [...document.querySelectorAll("[data-i18n]")];
   const ariaNodes = [...document.querySelectorAll("[data-aria-zh]")];
+  const altNodes = [...document.querySelectorAll("[data-alt-zh]")];
   const descriptionMeta = document.querySelector('meta[name="description"]');
   const ogTitle = document.querySelector('meta[property="og:title"]');
   const ogDescription = document.querySelector('meta[property="og:description"]');
@@ -320,6 +323,13 @@
         node.dataset.ariaEn = node.getAttribute("aria-label") || "";
       }
       node.setAttribute("aria-label", nextLanguage === "zh" ? node.dataset.ariaZh : node.dataset.ariaEn);
+    });
+
+    altNodes.forEach((node) => {
+      if (!node.dataset.altEn) {
+        node.dataset.altEn = node.getAttribute("alt") || "";
+      }
+      node.setAttribute("alt", nextLanguage === "zh" ? node.dataset.altZh : node.dataset.altEn);
     });
 
     languageButtons.forEach((button) => {

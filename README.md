@@ -27,6 +27,12 @@ OmniClip RAG builds searchable indexes from knowledge you already keep on your o
 
 The desktop app manages data roots, Runtime components, models, knowledge-base builds, live watch, queries, and result review. The optional MCP server exposes the same retrieval core to MCP-capable AI clients through two read-only tools.
 
+<div align="center">
+  <img src="docs/assets/omniclip-rag-local-search-flow.png" alt="OmniClip RAG searches private local documents, ranks source-linked results for direct review, and can optionally provide selected evidence to AI" width="900" />
+  <br />
+  <sub>Search local Markdown, PDF, and other documents, review source-linked results directly, or provide selected evidence to AI.</sub>
+</div>
+
 ### Choose your path
 
 | I want to… | Start here |

@@ -27,6 +27,12 @@
 
 桌面版负责管理数据目录、Runtime、模型、知识库建库、热监听、查询和结果查看。可选的 MCP Server 则通过两个只读工具，把同一套检索能力提供给支持 MCP 的 AI 客户端。
 
+<div align="center">
+  <img src="docs/assets/omniclip-rag-local-search-flow.png" alt="方寸引从本地私人文档中检索并排序带来源的结果，用户可直接查看，也可选择性提供给 AI" width="900" />
+  <br />
+  <sub>在本地查询 Markdown、PDF 和其他文档，直接查看带来源的结果，或将选定证据提供给 AI。</sub>
+</div>
+
 ### 按目标选择入口
 
 | 我想要…… | 从这里开始 |

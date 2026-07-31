@@ -792,6 +792,27 @@ html[lang="zh"] .hero h1 {
   font-weight: 750;
 }
 
+.workflow-visual {
+  margin: 0 0 42px;
+}
+
+.workflow-visual img {
+  width: 100%;
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #f7fbff;
+  box-shadow: 0 18px 48px rgba(18, 59, 74, 0.08);
+}
+
+.workflow-visual figcaption {
+  max-width: 860px;
+  margin: 12px auto 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-align: center;
+}
+
 .workflow-grid {
   position: relative;
   display: grid;
@@ -1872,6 +1893,20 @@ html[lang="zh"] .hero h1 {
   .feature-signal {
     grid-column: 2;
     justify-content: flex-start;
+  }
+
+  .workflow-visual {
+    margin-bottom: 34px;
+  }
+
+  .workflow-visual img {
+    border-radius: 12px;
+  }
+
+  .workflow-visual figcaption {
+    margin-top: 10px;
+    font-size: 0.76rem;
+    text-align: left;
   }
 
   .workflow-grid {
