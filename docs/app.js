@@ -354,13 +354,41 @@
 
   const siteHeader = document.querySelector(".site-header");
   const pageContent = document.querySelector(".page-content");
+  const heroMotionRoot = document.querySelector(".hero-stage .hero");
+  const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
   let headerFramePending = false;
 
   function syncHeaderTheme() {
     headerFramePending = false;
     if (!siteHeader || !pageContent) return;
-    const contentHasReachedHeader = pageContent.getBoundingClientRect().top <= siteHeader.offsetHeight + 12;
+    const contentTop = pageContent.getBoundingClientRect().top;
+    const contentHasReachedHeader = contentTop <= siteHeader.offsetHeight + 12;
     siteHeader.classList.toggle("is-past-hero", contentHasReachedHeader);
+
+    if (!heroMotionRoot) return;
+    const progress = Math.max(0, Math.min(1, 1 - contentTop / window.innerHeight));
+    const viewportFactor = window.innerWidth <= 700 ? 0.56 : 1;
+    const accessibilityFactor = reducedMotionQuery.matches ? 0.42 : 1;
+    const motion = progress * viewportFactor * accessibilityFactor;
+    const baseScale = window.innerWidth <= 700 ? 1.02 : 1.012;
+
+    heroMotionRoot.style.setProperty("--scene-x", `${(-4 * motion).toFixed(2)}px`);
+    heroMotionRoot.style.setProperty("--scene-y", `${(-12 * motion).toFixed(2)}px`);
+    heroMotionRoot.style.setProperty("--scene-scale", (baseScale + 0.018 * motion).toFixed(4));
+    heroMotionRoot.style.setProperty("--stars-y", `${(-22 * motion).toFixed(2)}px`);
+    heroMotionRoot.style.setProperty("--beam-x", `${(4 * motion).toFixed(2)}px`);
+    heroMotionRoot.style.setProperty("--beam-y", `${(-7 * motion).toFixed(2)}px`);
+    heroMotionRoot.style.setProperty("--beam-scale", (1 + 0.08 * motion).toFixed(4));
+    heroMotionRoot.style.setProperty("--beam-opacity", (0.12 + 0.1 * motion).toFixed(3));
+    heroMotionRoot.style.setProperty("--doc-one-x", `${(-10 * motion).toFixed(2)}px`);
+    heroMotionRoot.style.setProperty("--doc-one-y", `${(-28 * motion).toFixed(2)}px`);
+    heroMotionRoot.style.setProperty("--doc-one-rotation", `${(-5 + 1.2 * motion).toFixed(3)}deg`);
+    heroMotionRoot.style.setProperty("--doc-two-x", `${(8 * motion).toFixed(2)}px`);
+    heroMotionRoot.style.setProperty("--doc-two-y", `${(-18 * motion).toFixed(2)}px`);
+    heroMotionRoot.style.setProperty("--doc-two-rotation", `${(6 - motion).toFixed(3)}deg`);
+    heroMotionRoot.style.setProperty("--doc-three-x", `${(-6 * motion).toFixed(2)}px`);
+    heroMotionRoot.style.setProperty("--doc-three-y", `${(-20 * motion).toFixed(2)}px`);
+    heroMotionRoot.style.setProperty("--doc-three-rotation", `${(-2 + 0.7 * motion).toFixed(3)}deg`);
   }
 
   function requestHeaderSync() {

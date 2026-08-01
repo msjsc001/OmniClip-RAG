@@ -1700,6 +1700,23 @@ html[lang="zh"] .hero h1 {
 }
 
 .hero-stage .hero {
+  --scene-x: 0px;
+  --scene-y: 0px;
+  --scene-scale: 1.012;
+  --stars-y: 0px;
+  --beam-x: 0px;
+  --beam-y: 0px;
+  --beam-scale: 1;
+  --beam-opacity: 0.12;
+  --doc-one-x: 0px;
+  --doc-one-y: 0px;
+  --doc-one-rotation: -5deg;
+  --doc-two-x: 0px;
+  --doc-two-y: 0px;
+  --doc-two-rotation: 6deg;
+  --doc-three-x: 0px;
+  --doc-three-y: 0px;
+  --doc-three-rotation: -2deg;
   position: sticky;
   top: 0;
   height: 100svh;
@@ -1722,7 +1739,9 @@ html[lang="zh"] .hero h1 {
   background-image: url("./assets/caelune-knowledge-universe.jpg");
   background-position: center center;
   background-size: cover;
-  transform: scale(1.012);
+  transform: translate3d(var(--scene-x), var(--scene-y), 0) scale(var(--scene-scale));
+  transform-origin: 68% 48%;
+  will-change: transform;
 }
 
 .hero-shade {
@@ -1730,6 +1749,97 @@ html[lang="zh"] .hero h1 {
   background:
     linear-gradient(90deg, rgba(3, 16, 30, 0.96) 0%, rgba(4, 18, 33, 0.86) 25%, rgba(4, 18, 33, 0.28) 52%, rgba(4, 18, 33, 0.04) 74%),
     linear-gradient(180deg, rgba(4, 17, 31, 0.32), transparent 46%, rgba(3, 15, 27, 0.28));
+}
+
+.hero-motion-layer {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.hero-beam {
+  position: absolute;
+  left: 60.8%;
+  top: 34%;
+  width: 12%;
+  height: 33%;
+  transform: translate3d(var(--beam-x), var(--beam-y), 0) rotate(15deg) scaleY(var(--beam-scale));
+  transform-origin: 50% 100%;
+  clip-path: polygon(42% 0, 61% 0, 100% 100%, 0 100%);
+  background: linear-gradient(180deg, rgba(255, 222, 154, 0.55), rgba(137, 204, 231, 0.06));
+  filter: blur(5px);
+  mix-blend-mode: screen;
+  opacity: var(--beam-opacity);
+  will-change: transform, opacity;
+}
+
+.hero-star {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  transform: translate3d(0, var(--stars-y), 0) rotate(45deg);
+  border-radius: 1px;
+  background: #ffe1a2;
+  box-shadow: 0 0 8px 2px rgba(255, 210, 121, 0.55);
+  opacity: 0.42;
+  animation: hero-star-breathe 6.8s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.hero-star-one { left: 57%; top: 23%; animation-delay: -1.2s; }
+.hero-star-two { left: 70%; top: 18%; animation-delay: -4.6s; }
+.hero-star-three { left: 79%; top: 31%; animation-delay: -2.8s; }
+.hero-star-four { left: 88%; top: 20%; animation-delay: -5.4s; }
+
+@keyframes hero-star-breathe {
+  0%, 100% { opacity: 0.28; filter: brightness(0.9); }
+  45% { opacity: 0.68; filter: brightness(1.18); }
+}
+
+.hero-float-document {
+  position: absolute;
+  width: clamp(26px, 2.3vw, 38px);
+  aspect-ratio: 0.72;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 7px 6px;
+  border: 1px solid rgba(135, 184, 219, 0.52);
+  border-radius: 2px;
+  background: linear-gradient(145deg, rgba(25, 62, 105, 0.88), rgba(9, 34, 66, 0.92));
+  box-shadow: 0 7px 18px rgba(0, 0, 0, 0.24), inset 0 0 12px rgba(91, 164, 211, 0.08);
+  opacity: 0.58;
+  will-change: transform;
+}
+
+.hero-float-document i {
+  height: 2px;
+  display: block;
+  border-radius: 999px;
+  background: rgba(146, 192, 222, 0.46);
+}
+
+.hero-float-document i:nth-child(2) { width: 76%; }
+.hero-float-document i:nth-child(3) { width: 55%; }
+
+.hero-float-document-one {
+  left: 63.5%;
+  top: 20%;
+  transform: translate3d(var(--doc-one-x), var(--doc-one-y), 0) rotate(var(--doc-one-rotation));
+}
+
+.hero-float-document-two {
+  left: 84%;
+  top: 30%;
+  transform: translate3d(var(--doc-two-x), var(--doc-two-y), 0) rotate(var(--doc-two-rotation));
+}
+
+.hero-float-document-three {
+  left: 76%;
+  top: 47%;
+  transform: translate3d(var(--doc-three-x), var(--doc-three-y), 0) rotate(var(--doc-three-rotation));
 }
 
 .hero-stage .hero-grid {
@@ -2422,12 +2532,37 @@ html[lang="zh"] .hero-stage .hero h1 {
   }
 
   .hero-stage .hero {
+    --scene-scale: 1.02;
     min-height: 600px;
   }
 
   .hero-scene {
     background-position: 67% center;
-    transform: scale(1.02);
+  }
+
+  .hero-motion-layer {
+    opacity: 0.72;
+  }
+
+  .hero-float-document-two {
+    display: none;
+  }
+
+  .hero-float-document-one {
+    left: 75%;
+    top: 24%;
+  }
+
+  .hero-float-document-three {
+    left: 86%;
+    top: 49%;
+  }
+
+  .hero-beam {
+    left: 56%;
+    top: 40%;
+    width: 23%;
+    height: 29%;
   }
 
   .hero-shade {
@@ -2515,5 +2650,10 @@ html[lang="zh"] .hero-stage .hero h1 {
 
   .hero-scroll-hint::after {
     animation: none;
+  }
+
+  .hero-star {
+    animation: none;
+    opacity: 0.38;
   }
 }
