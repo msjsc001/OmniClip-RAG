@@ -22,7 +22,7 @@ class BuildReleaseSupportTests(unittest.TestCase):
             shutil.rmtree(TEST_ROOT, ignore_errors=True)
 
     def test_prepare_bundled_python_extracts_runtime_python_into_gui_bundle(self) -> None:
-        output_dir = TEST_ROOT / 'OmniClipRAG-vtest'
+        output_dir = TEST_ROOT / 'Caelune-vtest'
         metadata_dir = output_dir / 'runtime_support'
         metadata_dir.mkdir(parents=True, exist_ok=True)
         metadata_path = metadata_dir / 'bundled_python.json'
@@ -43,11 +43,11 @@ class BuildReleaseSupportTests(unittest.TestCase):
             archive.writestr('tools/python.exe', 'stub-python')
 
         target = BuildTarget(
-            exe_basename='OmniClipRAG',
-            spec_path=ROOT / 'OmniClipRAG.spec',
-            output_name='OmniClipRAG-vtest',
+            exe_basename='Caelune',
+            spec_path=ROOT / 'Caelune.spec',
+            output_name='Caelune-vtest',
             output_dir=output_dir,
-            release_zip_path=TEST_ROOT / 'OmniClipRAG-vtest.zip',
+            release_zip_path=TEST_ROOT / 'Caelune-vtest.zip',
             support_files={},
             protected_runtime_dir=None,
         )
@@ -68,13 +68,13 @@ class BuildReleaseSupportTests(unittest.TestCase):
         cache_dir.mkdir(parents=True, exist_ok=True)
         (source_dir / 'install.py').write_text('print("ok")\n', encoding='utf-8')
         (cache_dir / 'install.cpython-313.pyc').write_bytes(b'local-build-path')
-        output_dir = TEST_ROOT / 'OmniClipRAG-vtest'
+        output_dir = TEST_ROOT / 'Caelune-vtest'
         target = BuildTarget(
-            exe_basename='OmniClipRAG',
-            spec_path=ROOT / 'OmniClipRAG.spec',
-            output_name='OmniClipRAG-vtest',
+            exe_basename='Caelune',
+            spec_path=ROOT / 'Caelune.spec',
+            output_name='Caelune-vtest',
             output_dir=output_dir,
-            release_zip_path=TEST_ROOT / 'OmniClipRAG-vtest.zip',
+            release_zip_path=TEST_ROOT / 'Caelune-vtest.zip',
             support_files={source_dir: output_dir / 'runtime_support'},
             protected_runtime_dir=None,
         )
@@ -91,18 +91,19 @@ class BuildReleaseSupportTests(unittest.TestCase):
         self.assertEqual(server['version'], __version__)
         self.assertEqual(
             GUI_TARGET.release_zip_path.name,
-            f'OmniClipRAG-v{__version__}-WIN-EXE.zip',
+            f'Caelune-v{__version__}-WIN-EXE.zip',
         )
         self.assertIn(f'/v{__version__}/', server['packages'][0]['identifier'])
         self.assertIn(f'-v{__version__}.mcpb', server['packages'][0]['identifier'])
         self.assertIn(
-            f'version-v{__version__}-',
+            'github/v/release/EllisMorrow/Caelune',
             (ROOT / 'README.md').read_text(encoding='utf-8'),
         )
-        self.assertIn(
-            f'version-v{__version__}-',
-            (ROOT / 'README.zh-CN.md').read_text(encoding='utf-8'),
-        )
+        for readme_name in ('README.md', 'README.zh-CN.md'):
+            self.assertIn(
+                f'version-v{__version__}-',
+                (ROOT / readme_name).read_text(encoding='utf-8'),
+            )
 
 
 if __name__ == '__main__':

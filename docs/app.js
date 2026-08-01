@@ -1,9 +1,10 @@
 (() => {
-  const STORAGE_KEY = "omniclip-site-language";
+  const STORAGE_KEY = "caelune-site-language";
+  const LEGACY_STORAGE_KEY = "omniclip-site-language";
   const HTML_KEYS = new Set(["hero_title"]);
   const translations = {
     en: {
-      page_title: "OmniClip RAG | Private Knowledge, Local Retrieval",
+      page_title: "Caelune | Private Knowledge, Local Retrieval",
       page_description: "Search private Markdown, PDF, and Tika-backed documents locally on Windows. Use hybrid retrieval in the desktop app or connect AI clients through a read-only MCP server.",
       skip: "Skip to main content",
       nav_features: "Features",
@@ -52,7 +53,7 @@
       feature_mcp_body: "Let compatible AI clients search the same local index through two focused, read-only tools.",
       workflow_kicker: "FROM FOLDER TO RESULT",
       workflow_title: "Choose a folder. Let it index. Start asking.",
-      workflow_intro: "Keep your folders and writing habits. OmniClip works around them.",
+      workflow_intro: "Keep your folders and writing habits. Caelune works around them.",
       workflow_visual_caption: "Search local Markdown, PDF, and other documents, review source-linked results directly, or provide selected evidence to AI.",
       workflow_one_title: "Choose your folders",
       workflow_one_body: "Add a Markdown vault and optional PDF or Tika directories. Each workspace stays isolated.",
@@ -71,7 +72,7 @@
       boundary_network_body: "Used for user-initiated downloads of the app, Runtime, or models—not for telemetry.",
       mcp_kicker: "READ-ONLY MCP BRIDGE",
       mcp_title: "One local index, available to compatible AI clients.",
-      mcp_body: "OmniClip exposes status and search through a narrow stdio surface. It does not provide write, delete, or file-editing tools.",
+      mcp_body: "Caelune exposes status and search through a narrow stdio surface. It does not provide write, delete, or file-editing tools.",
       mcp_setup: "Read MCP setup",
       mcp_registry: "Open MCP Registry",
       mcp_ready: "ready · hybrid",
@@ -133,7 +134,7 @@
       footer_releases: "Releases"
     },
     zh: {
-      page_title: "OmniClip RAG | 私人知识，本地检索",
+      page_title: "Caelune | 私人知识，本地检索",
       page_description: "在 Windows 本地检索私人 Markdown、PDF 与 Tika 文档。通过桌面端使用混合检索，或用只读 MCP 连接兼容的 AI 客户端。",
       skip: "跳到主要内容",
       nav_features: "核心功能",
@@ -182,7 +183,7 @@
       feature_mcp_body: "兼容的 AI 客户端可通过两个专注的只读工具搜索同一个本地索引。",
       workflow_kicker: "从目录到结果",
       workflow_title: "选目录，等索引，然后直接问。",
-      workflow_intro: "目录结构和写作习惯照旧，OmniClip 只负责把内容变得可查。",
+      workflow_intro: "目录结构和写作习惯照旧，Caelune 只负责把内容变得可查。",
       workflow_visual_caption: "在本地查询 Markdown、PDF 和其他文档，直接查看带来源的结果，或将选定证据提供给 AI。",
       workflow_one_title: "选择知识目录",
       workflow_one_body: "添加 Markdown 知识库，并按需加入 PDF 或 Tika 目录；不同工作区彼此隔离。",
@@ -201,7 +202,7 @@
       boundary_network_body: "仅用于用户主动下载软件、Runtime 或模型，不用于遥测。",
       mcp_kicker: "只读 MCP 桥接",
       mcp_title: "一个本地索引，供兼容的 AI 客户端调用。",
-      mcp_body: "OmniClip 通过精简的 stdio 接口提供状态和搜索，不提供写入、删除或修改文件的工具。",
+      mcp_body: "Caelune 通过精简的 stdio 接口提供状态和搜索，不提供写入、删除或修改文件的工具。",
       mcp_setup: "阅读 MCP 接入指南",
       mcp_registry: "打开 MCP Registry",
       mcp_ready: "已就绪 · 混合模式",
@@ -276,7 +277,8 @@
 
   function storedLanguage() {
     try {
-      return window.localStorage.getItem(STORAGE_KEY);
+      return window.localStorage.getItem(STORAGE_KEY)
+        || window.localStorage.getItem(LEGACY_STORAGE_KEY);
     } catch (_error) {
       return null;
     }

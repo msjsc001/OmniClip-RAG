@@ -424,7 +424,7 @@ def _extract_rmeta_text_from_record(record: dict[str, object]) -> str:
 
 def _download_file(url: str, destination: Path, *, progress_callback=None, stage: str = 'download') -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(url=url, headers={'User-Agent': 'OmniClipRAG/1.0'})
+    request = urllib.request.Request(url=url, headers={'User-Agent': 'Caelune/1.0'})
     with urllib.request.urlopen(request, timeout=30) as response, destination.open('wb') as handle:
         total = int(response.headers.get('Content-Length', '0') or 0)
         downloaded = 0

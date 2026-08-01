@@ -81,10 +81,16 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse((legacy_workspace / 'cache').exists())
         self.assertFalse((legacy_workspace / 'logs').exists())
 
-    def test_default_data_root_uses_rag_default_suffix(self) -> None:
+    def test_default_data_root_uses_caelune_default_suffix(self) -> None:
         self.assertEqual(
             config_module.default_data_root(),
-            (ROOT / '.tmp' / 'config_appdata' / 'OmniClip RAG-default').resolve(),
+            (ROOT / '.tmp' / 'config_appdata' / 'Caelune-default').resolve(),
+        )
+
+    def test_legacy_default_data_root_keeps_omniclip_location(self) -> None:
+        self.assertEqual(
+            config_module.legacy_default_data_root(),
+            (ROOT / '.tmp' / 'config_appdata' / 'OmniClip RAG').resolve(),
         )
 
     def test_probe_data_root_distinguishes_new_invalid_and_existing_states(self) -> None:

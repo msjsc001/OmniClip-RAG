@@ -18,7 +18,7 @@ if (-not $Version) {
     $Version = (& $python -c "from omniclip_rag import __version__; print(__version__)").Trim()
 }
 
-$mcpDist = Join-Path $root "dist\OmniClipRAG-MCP-v$Version"
+$mcpDist = Join-Path $root "dist\Caelune-MCP-v$Version"
 if (-not (Test-Path $mcpDist)) {
     throw "Missing built MCP directory: $mcpDist. Run python build.py or .\\scripts\\build_exe.ps1 first."
 }
@@ -55,8 +55,8 @@ New-Item -ItemType Directory -Force -Path $bundleRoot | Out-Null
 Copy-Item -Path $mcpDist -Destination $serverTarget -Recurse -Force
 Copy-Item -Path $iconSource -Destination $iconTarget -Force
 
-$env:OMNICLIP_REGISTRY_VERSION = $Version
-$env:OMNICLIP_MANIFEST_PATH = $manifestPath
+$env:CAELUNE_REGISTRY_VERSION = $Version
+$env:CAELUNE_MANIFEST_PATH = $manifestPath
 @'
 import json
 import os
@@ -64,8 +64,8 @@ from pathlib import Path
 
 from omniclip_rag.mcp.registry import build_mcpb_manifest
 
-target = Path(os.environ['OMNICLIP_MANIFEST_PATH'])
-payload = build_mcpb_manifest(os.environ['OMNICLIP_REGISTRY_VERSION'])
+target = Path(os.environ['CAELUNE_MANIFEST_PATH'])
+payload = build_mcpb_manifest(os.environ['CAELUNE_REGISTRY_VERSION'])
 target.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + '\n', encoding='utf-8')
 '@ | & $python -
 
@@ -82,8 +82,8 @@ if ($LASTEXITCODE -ne 0) {
 $hash = (Get-FileHash -Path $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
 Set-Content -Path $shaPath -Value ($hash + '  ' + [IO.Path]::GetFileName($artifactPath)) -Encoding ascii
 
-$env:OMNICLIP_SERVER_JSON_PATH = $serverJsonPath
-$env:OMNICLIP_SERVER_SHA256 = $hash
+$env:CAELUNE_SERVER_JSON_PATH = $serverJsonPath
+$env:CAELUNE_SERVER_SHA256 = $hash
 @'
 import json
 import os
@@ -91,10 +91,10 @@ from pathlib import Path
 
 from omniclip_rag.mcp.registry import build_registry_server_payload
 
-target = Path(os.environ['OMNICLIP_SERVER_JSON_PATH'])
+target = Path(os.environ['CAELUNE_SERVER_JSON_PATH'])
 payload = build_registry_server_payload(
-    file_sha256=os.environ['OMNICLIP_SERVER_SHA256'],
-    version=os.environ['OMNICLIP_REGISTRY_VERSION'],
+    file_sha256=os.environ['CAELUNE_SERVER_SHA256'],
+    version=os.environ['CAELUNE_REGISTRY_VERSION'],
 )
 target.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + '\n', encoding='utf-8')
 '@ | & $python -
@@ -122,8 +122,8 @@ $entryPath = Join-Path $verifyRoot ($entryPoint -replace '/', '\')
 if (-not (Test-Path $entryPath)) {
     throw "Manifest entry executable not found: $entryPath"
 }
-if ([IO.Path]::GetFileName($entryPath) -ne 'OmniClipRAG-MCP.exe') {
-    throw "Manifest entry is not OmniClipRAG-MCP.exe: $entryPath"
+if ([IO.Path]::GetFileName($entryPath) -ne 'Caelune-MCP.exe') {
+    throw "Manifest entry is not Caelune-MCP.exe: $entryPath"
 }
 
 $summary = @{

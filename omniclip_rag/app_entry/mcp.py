@@ -10,7 +10,7 @@ from ..mcp.core import MCP_SELFTEST_QUERY, OmniClipMcpApplication
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Run OmniClip RAG as a read-only MCP server.')
+    parser = argparse.ArgumentParser(description='Run Caelune as a read-only MCP server.')
     parser.add_argument('--data-root', default='')
     parser.add_argument('--vault', default='')
     parser.add_argument('--mcp-selfcheck', action='store_true')

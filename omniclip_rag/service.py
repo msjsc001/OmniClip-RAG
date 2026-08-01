@@ -365,7 +365,7 @@ class OmniClipService:
             total_files,
         )
         if str(getattr(self.config, 'vector_device', '') or '').strip().lower() == 'cuda' and resolved_device != 'cuda':
-            LOGGER.warning('CUDA was requested for rebuild, but OmniClip fell back to %s.', resolved_device)
+            LOGGER.warning('CUDA was requested for rebuild, but Caelune fell back to %s.', resolved_device)
 
         phase_on_resume = str(state.get('phase', 'indexing') or 'indexing').strip().lower() or 'indexing'
         indexing_cursor = min(max(int(state.get('indexing_cursor', 0) or 0), 0), total_files)
@@ -1902,7 +1902,7 @@ class OmniClipService:
         try:
             if stop_event.is_set():
                 return
-            # One startup reconciliation catches changes made while OmniClip was
+            # One startup reconciliation catches changes made while Caelune was
             # closed. After that, watchdog events are the only trigger: an idle
             # vault does not get recursively rescanned on a timer.
             current_snapshot, offline_reason = self._snapshot_safe(cancel_event=stop_event)

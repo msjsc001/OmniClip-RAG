@@ -20,21 +20,44 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-if ((Test-Path (Join-Path $scriptDir 'launcher.exe')) -or (Test-Path (Join-Path $scriptDir 'OmniClipRAG.exe'))) {
+if ((Test-Path (Join-Path $scriptDir 'launcher.exe')) -or (Test-Path (Join-Path $scriptDir 'Caelune.exe')) -or (Test-Path (Join-Path $scriptDir 'OmniClipRAG.exe'))) {
     $appDir = $scriptDir
 } else {
     $appDir = (Resolve-Path (Join-Path $scriptDir '..')).ProviderPath
 }
 
 function Get-DefaultDataRoot {
-    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
-        return (Join-Path $env:APPDATA 'OmniClip RAG')
+    $roamingRoot = [string]($env:APPDATA)
+    if ([string]::IsNullOrWhiteSpace($roamingRoot)) {
+        $roamingRoot = [Environment]::GetFolderPath('ApplicationData')
     }
-    return (Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'OmniClip RAG')
+    $currentBootstrap = Join-Path (Join-Path $roamingRoot 'Caelune') 'bootstrap.json'
+    $legacyBootstrap = Join-Path (Join-Path $roamingRoot 'OmniClip RAG') 'bootstrap.json'
+    foreach ($bootstrapPath in @($currentBootstrap, $legacyBootstrap)) {
+        if (-not (Test-Path -LiteralPath $bootstrapPath)) {
+            continue
+        }
+        try {
+            $bootstrapPayload = Get-Content -LiteralPath $bootstrapPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $activeRoot = [string]($bootstrapPayload.active_data_root)
+            if (-not [string]::IsNullOrWhiteSpace($activeRoot)) {
+                return $activeRoot
+            }
+        } catch {
+        }
+    }
+    $legacyRoot = Join-Path $roamingRoot 'OmniClip RAG'
+    if (Test-Path -LiteralPath (Join-Path $legacyRoot 'config.json')) {
+        return $legacyRoot
+    }
+    return (Join-Path $roamingRoot 'Caelune-default')
 }
 
 function Get-PreferredRuntimeRoot {
-    $override = [string]($env:OMNICLIP_RUNTIME_ROOT)
+    $override = [string]($env:CAELUNE_RUNTIME_ROOT)
+    if ([string]::IsNullOrWhiteSpace($override)) {
+        $override = [string]($env:OMNICLIP_RUNTIME_ROOT)
+    }
     if (-not [string]::IsNullOrWhiteSpace($override)) {
         $resolvedOverride = Resolve-Path -LiteralPath $override -ErrorAction SilentlyContinue
         if ($null -ne $resolvedOverride) {
@@ -266,7 +289,7 @@ if ($null -ne $WaitForProcessName) {
 if ($name) {
     $runningApp = (Get-RunningAppCount -ProcessName $name) -gt 0
     if ($runningApp) {
-        Write-Host "Detected running process '$name'. Packages will be downloaded into a pending staging area and activated automatically after OmniClipRAG closes."
+        Write-Host "Detected running process '$name'. Packages will be downloaded into a pending staging area and activated automatically after Caelune closes."
     }
 }
 
@@ -280,7 +303,7 @@ $pythonPrefix = @()
 $usingBundledPython = Test-Path $bundledPythonExe
 if ($usingBundledPython) {
     $pythonExe = $bundledPythonExe
-} elseif (-not ((Test-Path (Join-Path $appDir 'launcher.exe')) -or (Test-Path (Join-Path $appDir 'OmniClipRAG.exe')))) {
+} elseif (-not ((Test-Path (Join-Path $appDir 'launcher.exe')) -or (Test-Path (Join-Path $appDir 'Caelune.exe')) -or (Test-Path (Join-Path $appDir 'OmniClipRAG.exe')))) {
     try {
         $cmd = Get-Command py -ErrorAction Stop
         $pythonExe = $cmd.Source
@@ -318,7 +341,7 @@ $resultPath = if ([string]::IsNullOrWhiteSpace($ResultPath)) { Join-Path $runtim
 New-Item -ItemType Directory -Force -Path $runtimeLogDir, $wheelhouseRoot | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $diagnosticsPath), (Split-Path -Parent $resultPath) | Out-Null
 
-Write-Host "Installing OmniClip runtime profile '$effectiveProfile' / component '$Component' / source '$Source' into isolated component root: $payloadTarget"
+Write-Host "Installing Caelune runtime profile '$effectiveProfile' / component '$Component' / source '$Source' into isolated component root: $payloadTarget"
 if ($usingBundledPython) {
     Write-Host "Using bundled Python runtime installer: $pythonExe"
 } else {
@@ -400,7 +423,7 @@ Write-Host "Runtime validation succeeded."
 Write-Host "Runtime component was installed successfully."
 Write-Host "Runtime diagnostic log: $diagnosticsPath"
 if ($runningApp) {
-    Write-Host "Restart OmniClipRAG.exe after the download finishes. The new runtime component has been registered and the next launch will use it automatically."
+    Write-Host "Restart Caelune.exe after the download finishes. The new runtime component has been registered and the next launch will use it automatically."
 } else {
     Write-Host "Runtime component is ready to use immediately."
 }

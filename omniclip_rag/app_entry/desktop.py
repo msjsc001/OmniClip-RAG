@@ -791,7 +791,7 @@ def run_selfcheck_runtime(*, check_kind: str, output_path: str) -> int:
 def launch_desktop(ui_mode: str = 'next') -> int:
     normalized = str(ui_mode or 'next').strip().lower() or 'next'
     if normalized != 'next':
-        print('Legacy UI has been permanently retired. OmniClip RAG now starts the Qt desktop only.', file=sys.stderr, flush=True)
+        print('Legacy UI has been permanently retired. Caelune now starts the Qt desktop only.', file=sys.stderr, flush=True)
     try:
         from ..ui_next_qt.app import main as qt_main
     except Exception as exc:

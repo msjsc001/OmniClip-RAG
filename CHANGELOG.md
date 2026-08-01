@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## V0.5.0 - 2026-08-01
+
+### Changed
+
+- Renamed the public English product identity from `OmniClip RAG` to `Caelune` and the Chinese product name from `方寸引` to `星野`.
+- Renamed the Windows desktop and MCP executables, release archives, package metadata, website, documentation, and current MCP Registry metadata to the Caelune identity.
+- Changed fresh installations to use `%APPDATA%\Caelune-default` and `%APPDATA%\Caelune\bootstrap.json`.
+- Added the public `CAELUNE_DATA_ROOT`, `CAELUNE_BOOTSTRAP_PATH`, and `CAELUNE_RUNTIME_ROOT` environment-variable names.
+
+### Compatibility
+
+- Existing `%APPDATA%\OmniClip RAG` environments, bootstrap pointers, Runtime locations, and `OMNICLIP_*` environment variables remain readable so an upgrade does not detach existing knowledge bases or models.
+- The Python import package `omniclip_rag`, stored index filenames, and MCP tool IDs `omniclip.status` / `omniclip.search` remain stable compatibility contracts.
+- Historical release notes and architecture records keep their original names so old versions and migration evidence remain accurate.
+
+### Documentation
+
+- Reworked the English and Chinese README files, website metadata and illustrations, setup guides, examples, and third-party notices for the new identity.
+- Added [RELEASE_NOTES_v0.5.0](releases/RELEASE_NOTES_v0.5.0.md) with migration, artifact, and privacy guidance.
+
 ## V0.4.13 - 2026-07-30
 
 ### Added

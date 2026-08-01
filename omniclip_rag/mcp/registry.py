@@ -6,20 +6,17 @@ from .. import __version__
 
 
 REGISTRY_SCHEMA_URL = 'https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json'
-REGISTRY_SERVER_NAME = 'io.github.EllisMorrow/omniclip-rag-mcp'
-# Keep the installed MCPB identity stable across the GitHub account rename.
-# Registry discovery follows the current owner namespace, while existing MCPB
-# clients continue to recognize upgrades as the same installed extension.
-MCPB_MANIFEST_NAME = 'io.github.msjsc001/omniclip-rag-mcp'
-REGISTRY_TITLE = 'OmniClip RAG'
+REGISTRY_SERVER_NAME = 'io.github.EllisMorrow/caelune-mcp'
+MCPB_MANIFEST_NAME = REGISTRY_SERVER_NAME
+REGISTRY_TITLE = 'Caelune'
 REGISTRY_DESCRIPTION = 'Read-only local-first MCP server for private Markdown, PDF, and Tika-backed search on Windows.'
-REGISTRY_REPOSITORY_URL = 'https://github.com/EllisMorrow/OmniClip-RAG'
-REGISTRY_DOCUMENTATION_URL = 'https://github.com/EllisMorrow/OmniClip-RAG/blob/main/MCP_SETUP.md'
-REGISTRY_SUPPORT_URL = 'https://github.com/EllisMorrow/OmniClip-RAG/issues'
-REGISTRY_RELEASES_URL = 'https://github.com/EllisMorrow/OmniClip-RAG/releases'
+REGISTRY_REPOSITORY_URL = 'https://github.com/EllisMorrow/Caelune'
+REGISTRY_DOCUMENTATION_URL = 'https://github.com/EllisMorrow/Caelune/blob/main/MCP_SETUP.md'
+REGISTRY_SUPPORT_URL = 'https://github.com/EllisMorrow/Caelune/issues'
+REGISTRY_RELEASES_URL = 'https://github.com/EllisMorrow/Caelune/releases'
 MCPB_MANIFEST_VERSION = '0.4'
-MCPB_BUNDLE_PREFIX = 'omniclip-rag-mcp-win-x64'
-MCP_EXE_NAME = 'OmniClipRAG-MCP.exe'
+MCPB_BUNDLE_PREFIX = 'caelune-mcp-win-x64'
+MCP_EXE_NAME = 'Caelune-MCP.exe'
 MCPB_ENTRY_POINT = f'server/{MCP_EXE_NAME}'
 MCPB_ICON_NAME = 'icon.png'
 
@@ -80,11 +77,11 @@ def build_mcpb_manifest(version: str = __version__) -> dict[str, Any]:
         'tools': [
             {
                 'name': 'omniclip.status',
-                'description': 'Return OmniClip query readiness, runtime status, and the current live snapshot.',
+                'description': 'Return Caelune query readiness, runtime status, and the current live snapshot.',
             },
             {
                 'name': 'omniclip.search',
-                'description': 'Search private Markdown, PDF, and Tika-backed knowledge bases through OmniClip.',
+                'description': 'Search private Markdown, PDF, and Tika-backed knowledge bases through Caelune.',
             },
         ],
     }

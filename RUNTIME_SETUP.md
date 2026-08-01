@@ -1,6 +1,6 @@
 # Runtime Setup
 
-The official Windows build of OmniClip RAG / 方寸引 intentionally stays lean.
+The official Windows build of Caelune / 星野 intentionally stays lean.
 It does **not** bundle heavyweight optional local-AI runtimes such as `torch`, `sentence-transformers`, `lancedb`, `pyarrow`, or `onnxruntime` into the main EXE package.
 
 Why:
@@ -12,7 +12,7 @@ Why:
 
 ## Runtime Layout In `v0.3.3`
 
-Starting with the current packaged design, OmniClip distinguishes two Runtime paths:
+Starting with the current packaged design, Caelune distinguishes two Runtime paths:
 
 - **Active Runtime**: the Runtime the app is currently using right now
 - **Preferred Install / Repair Target**: where future Runtime downloads and repairs should be written
@@ -20,7 +20,7 @@ Starting with the current packaged design, OmniClip distinguishes two Runtime pa
 For packaged builds, the preferred target now defaults to:
 
 ```text
-%APPDATA%\OmniClip RAG\shared\runtime
+%APPDATA%\Caelune-default\shared\runtime
 ```
 
 This means:
@@ -29,11 +29,13 @@ This means:
 - future repairs converge into one shared Runtime root;
 - older healthy Runtime folders can still be reused as legacy sources.
 
+Existing installations that already use `%APPDATA%\OmniClip RAG` keep using that data root automatically. The renamed app reads the legacy bootstrap pointer and Runtime override variables before creating a fresh Caelune environment.
+
 The app can still auto-detect and reuse valid legacy runtimes from places such as:
 
 - the current packaged folder's `runtime/`
 - a manually moved `runtime/`
-- sibling packaged folders like `OmniClipRAG-v0.3.0/runtime`
+- sibling packaged folders like `Caelune-v0.3.0/runtime`
 
 So version updates should no longer imply "download everything again."
 
@@ -41,7 +43,7 @@ So version updates should no longer imply "download everything again."
 
 To enable model warmup, full rebuild, semantic query, and GPU acceleration on the packaged app, install the required Runtime components through the Runtime page or the bundled PowerShell installer.
 
-The packaged app still ships `InstallRuntime.ps1` next to `OmniClipRAG.exe`, and the GUI Runtime page uses the same installation chain.
+The packaged app still ships `InstallRuntime.ps1` next to `Caelune.exe`, and the GUI Runtime page uses the same installation chain.
 That installer now prefers the **bundled Python runtime inside the app package** and writes to the shared Runtime target by default instead of only writing into the current EXE folder.
 Runtime manifests now lock an **exact wheel set** per component, so installation is no longer left to live pip dependency resolution from loose version ranges.
 
@@ -78,7 +80,7 @@ Expected size:
 Notes:
 
 - `cuda` requires an NVIDIA GPU, working drivers, and a compatible PyTorch CUDA stack.
-- a working system CUDA installation alone is **not** enough; OmniClip still needs its own Runtime payloads.
+- a working system CUDA installation alone is **not** enough; Caelune still needs its own Runtime payloads.
 - the installer now uses the **bundled Python runtime** that ships with the packaged GUI build, so users do **not** need to install Python separately.
 - Runtime installation is staged as: download wheels -> verify files -> offline install -> validate modules.
 - the packaged EXE remains unchanged; only the external Runtime sidecar grows.
@@ -87,7 +89,7 @@ Notes:
 
 ## Pending Updates And Restart Behavior
 
-If OmniClip is running while you repair or download Runtime, the installer may stage the payload into a pending area first.
+If Caelune is running while you repair or download Runtime, the installer may stage the payload into a pending area first.
 
 In that case:
 
@@ -124,6 +126,6 @@ When a failure happens, check the latest JSON report there. It records:
 Runtime payloads and local model files are different things.
 
 - Runtime payloads provide the executable libraries needed for local embedding / vector work.
-- model files remain in the OmniClip data/cache area and are downloaded or managed separately.
+- model files remain in the Caelune data/cache area and are downloaded or managed separately.
 
 This separation is intentional: Runtime should be shareable and repairable across versions, while model caches stay under the app's own data management.

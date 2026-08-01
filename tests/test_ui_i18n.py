@@ -14,8 +14,9 @@ class UiI18nTests(unittest.TestCase):
         self.assertEqual(normalize_language('English'), 'en')
 
     def test_text_catalog_returns_translated_strings(self) -> None:
-        self.assertIn('OmniClip', text('en', 'title'))
-        self.assertIn('方寸引', text('zh-CN', 'title'))
+        self.assertIn('Caelune', text('en', 'title'))
+        self.assertIn('星野', text('zh-CN', 'title'))
+        self.assertIn('Caelune', text('zh-CN', 'title'))
 
     def test_app_config_has_ui_language_default(self) -> None:
         config = AppConfig(vault_path='.', data_root='.')

@@ -1,34 +1,35 @@
 <div align="center">
 
-<img src="docs/assets/social-preview.png" alt="OmniClip RAG — Private knowledge. Local retrieval." width="900" />
+<img src="docs/assets/social-preview.png" alt="Caelune — Private knowledge. Local retrieval." width="900" />
 
-# OmniClip RAG
+# Caelune
 
 **A local-first Windows desktop app and read-only MCP server for searching private Markdown, PDF, and Tika-backed knowledge bases.**
 
-[![Latest Release](https://img.shields.io/github/v/release/EllisMorrow/OmniClip-RAG?style=flat-square&label=release)](https://github.com/EllisMorrow/OmniClip-RAG/releases/latest)
-[![Windows](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](https://github.com/EllisMorrow/OmniClip-RAG/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/EllisMorrow/Caelune?style=flat-square&label=release)](https://github.com/EllisMorrow/Caelune/releases/latest)
+[![Version](https://img.shields.io/badge/version-v0.5.0-0b7285?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/tag/v0.5.0)
+[![Windows](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/latest)
 [![Local-first](https://img.shields.io/badge/local--first-yes-1d7467?style=flat-square)](#privacy-boundary)
-[![Downloads](https://img.shields.io/github/downloads/EllisMorrow/OmniClip-RAG/total?label=downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/OmniClip-RAG/releases)
-[![MCP Registry](https://img.shields.io/badge/MCP_Registry-listed-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.EllisMorrow/omniclip-rag-mcp)
+[![Downloads](https://img.shields.io/github/downloads/EllisMorrow/Caelune/total?label=downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/Caelune/releases)
+[![MCP Registry](https://img.shields.io/badge/MCP_Registry-listed-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.EllisMorrow/caelune-mcp)
 [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
-[Download Windows app](https://github.com/EllisMorrow/OmniClip-RAG/releases/latest) ·
+[Download Windows app](https://github.com/EllisMorrow/Caelune/releases/latest) ·
 [中文说明](README.zh-CN.md) ·
-[Website](https://ellismorrow.github.io/OmniClip-RAG/) ·
-[User Wiki](https://github.com/EllisMorrow/OmniClip-RAG/wiki) ·
+[Website](https://ellismorrow.github.io/Caelune/) ·
+[User Wiki](https://github.com/EllisMorrow/Caelune/wiki) ·
 [MCP Setup](MCP_SETUP.md)
 
 </div>
 
-## What OmniClip RAG does
+## What Caelune does
 
-OmniClip RAG builds searchable indexes from knowledge you already keep on your own computer. It combines exact-text retrieval, structural signals, semantic vector search, optional reranking, and source-aware context assembly.
+Caelune builds searchable indexes from knowledge you already keep on your own computer. It combines exact-text retrieval, structural signals, semantic vector search, optional reranking, and source-aware context assembly.
 
 The desktop app manages data roots, Runtime components, models, knowledge-base builds, live watch, queries, and result review. The optional MCP server exposes the same retrieval core to MCP-capable AI clients through two read-only tools.
 
 <div align="center">
-  <img src="docs/assets/omniclip-rag-local-search-flow.png" alt="OmniClip RAG searches private local documents, ranks source-linked results for direct review, and can optionally provide selected evidence to AI" width="900" />
+  <img src="docs/assets/caelune-local-search-flow.png" alt="Caelune searches private local documents, ranks source-linked results for direct review, and can optionally provide selected evidence to AI" width="900" />
   <br />
   <sub>Search local Markdown, PDF, and other documents, review source-linked results directly, or provide selected evidence to AI.</sub>
 </div>
@@ -37,11 +38,11 @@ The desktop app manages data roots, Runtime components, models, knowledge-base b
 
 | I want to… | Start here |
 | --- | --- |
-| Install the Windows app and build my first index | [Getting Started](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Getting-Started) |
-| Understand Runtime, models, CPU, CUDA, or resource messages | [Runtime and Models](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Runtime-and-Models) |
-| Keep indexes current after editing notes | [Knowledge Bases and Live Watch](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Knowledge-Bases-and-Live-Watch) |
-| Connect an AI client through MCP | [MCP Integration](https://github.com/EllisMorrow/OmniClip-RAG/wiki/MCP-Integration) |
-| Diagnose a problem safely | [Troubleshooting](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Troubleshooting) |
+| Install the Windows app and build my first index | [Getting Started](https://github.com/EllisMorrow/Caelune/wiki/Getting-Started) |
+| Understand Runtime, models, CPU, CUDA, or resource messages | [Runtime and Models](https://github.com/EllisMorrow/Caelune/wiki/Runtime-and-Models) |
+| Keep indexes current after editing notes | [Knowledge Bases and Live Watch](https://github.com/EllisMorrow/Caelune/wiki/Knowledge-Bases-and-Live-Watch) |
+| Connect an AI client through MCP | [MCP Integration](https://github.com/EllisMorrow/Caelune/wiki/MCP-Integration) |
+| Diagnose a problem safely | [Troubleshooting](https://github.com/EllisMorrow/Caelune/wiki/Troubleshooting) |
 
 ## Interface preview
 
@@ -49,7 +50,7 @@ The Query Console keeps input, scope, retrieval settings, and live query state t
 
 <div align="center">
   <a href="docs/assets/readme-ui-en.png">
-    <img src="docs/assets/readme-ui-en.png" alt="OmniClip RAG Query Console and Results and Details interface" width="900" />
+    <img src="docs/assets/readme-ui-en.png" alt="Caelune Query Console and Results and Details interface" width="900" />
   </a>
   <br />
   <sub>Query Console and Results and Details · click the image to open it at full size</sub>
@@ -57,7 +58,7 @@ The Query Console keeps input, scope, retrieval settings, and live query state t
 
 ## Download
 
-Open the [latest release](https://github.com/EllisMorrow/OmniClip-RAG/releases/latest) and choose the package that matches your use case:
+Open the [latest release](https://github.com/EllisMorrow/Caelune/releases/latest) and choose the package that matches your use case:
 
 | Package label | Use it for |
 | --- | --- |
@@ -80,7 +81,7 @@ Open the [latest release](https://github.com/EllisMorrow/OmniClip-RAG/releases/l
 
 ## Privacy boundary
 
-OmniClip RAG is local-first, not a promise that every possible workflow is permanently offline.
+Caelune is local-first, not a promise that every possible workflow is permanently offline.
 
 - Source files are read for indexing; normal build and source-removal operations do not delete or rewrite the original notes or documents.
 - Network access is needed only for user-initiated downloads such as Runtime components, models, Java, or Tika.
@@ -92,14 +93,14 @@ Keep backups of important source material and review retrieved context before us
 ## Quick start
 
 1. Download the release asset whose name contains `WIN-EXE`.
-2. Extract the archive and launch `OmniClipRAG.exe`.
+2. Extract the archive and launch `Caelune.exe`.
 3. Wait for the automatic Runtime detection to finish.
 4. Choose the local data root and add one or more Markdown knowledge-base directories.
 5. Install or repair the CPU/CUDA Runtime and local models from the Runtime page when prompted.
 6. Run a full build once.
 7. Search from the Query Console. Enable live watch if you want later edits to enter the index automatically.
 
-Detailed instructions: [Getting Started](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Getting-Started).
+Detailed instructions: [Getting Started](https://github.com/EllisMorrow/Caelune/wiki/Getting-Started).
 
 ## Practical requirements
 
@@ -109,7 +110,7 @@ Detailed instructions: [Getting Started](https://github.com/EllisMorrow/OmniClip
 - CPU execution is supported; a compatible NVIDIA GPU and driver are optional
 - Windows automatic paging-file management is recommended for large knowledge bases and local AI models
 
-The Runtime and models are external sidecars so healthy components can be reused across application versions. See [Runtime and Models](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Runtime-and-Models).
+The Runtime and models are external sidecars so healthy components can be reused across application versions. See [Runtime and Models](https://github.com/EllisMorrow/Caelune/wiki/Runtime-and-Models).
 
 ## Retrieval flow
 
@@ -129,12 +130,12 @@ flowchart LR
 
 1. Build at least one knowledge base with the desktop app.
 2. Download the MCP ZIP for manual `stdio` configuration, or use the Registry/MCPB package.
-3. Point a compatible client at `OmniClipRAG-MCP.exe`.
+3. Point a compatible client at `Caelune-MCP.exe`.
 4. Let the client call:
    - `omniclip.status` to inspect readiness and active retrieval mode
    - `omniclip.search` to retrieve source-labelled results
 
-Some clients do not accept local `stdio` servers directly and may require a local proxy. See the [MCP Integration Wiki](https://github.com/EllisMorrow/OmniClip-RAG/wiki/MCP-Integration) and [MCP_SETUP.md](MCP_SETUP.md).
+Some clients do not accept local `stdio` servers directly and may require a local proxy. See the [MCP Integration Wiki](https://github.com/EllisMorrow/Caelune/wiki/MCP-Integration) and [MCP_SETUP.md](MCP_SETUP.md).
 
 ## Documentation
 
@@ -142,13 +143,13 @@ Some clients do not accept local `stdio` servers directly and may require a loca
 
 | Topic | Guide |
 | --- | --- |
-| Installation and first build | [Getting Started](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Getting-Started) |
-| Runtime, models, CPU, and CUDA | [Runtime and Models](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Runtime-and-Models) |
-| Knowledge bases and live watch | [Knowledge Bases and Live Watch](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Knowledge-Bases-and-Live-Watch) |
-| Query stages and resource messages | [Search and Resources](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Search-and-Resources) |
-| PDF and Tika sources | [PDF and Tika](https://github.com/EllisMorrow/OmniClip-RAG/wiki/PDF-and-Tika) |
-| MCP clients and tools | [MCP Integration](https://github.com/EllisMorrow/OmniClip-RAG/wiki/MCP-Integration) |
-| Common problems | [Troubleshooting](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Troubleshooting) |
+| Installation and first build | [Getting Started](https://github.com/EllisMorrow/Caelune/wiki/Getting-Started) |
+| Runtime, models, CPU, and CUDA | [Runtime and Models](https://github.com/EllisMorrow/Caelune/wiki/Runtime-and-Models) |
+| Knowledge bases and live watch | [Knowledge Bases and Live Watch](https://github.com/EllisMorrow/Caelune/wiki/Knowledge-Bases-and-Live-Watch) |
+| Query stages and resource messages | [Search and Resources](https://github.com/EllisMorrow/Caelune/wiki/Search-and-Resources) |
+| PDF and Tika sources | [PDF and Tika](https://github.com/EllisMorrow/Caelune/wiki/PDF-and-Tika) |
+| MCP clients and tools | [MCP Integration](https://github.com/EllisMorrow/Caelune/wiki/MCP-Integration) |
+| Common problems | [Troubleshooting](https://github.com/EllisMorrow/Caelune/wiki/Troubleshooting) |
 
 ### Project references
 
@@ -157,7 +158,7 @@ Some clients do not accept local `stdio` servers directly and may require a loca
 - [MCP setup reference](MCP_SETUP.md)
 - [Changelog](CHANGELOG.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
-- [Release history](https://github.com/EllisMorrow/OmniClip-RAG/releases)
+- [Release history](https://github.com/EllisMorrow/Caelune/releases)
 
 ## Development
 
@@ -176,12 +177,12 @@ Some clients do not accept local `stdio` servers directly and may require a loca
 python launcher_mcp.py --mcp-selfcheck
 ```
 
-Developer orientation and architecture links live in [Development and Architecture](https://github.com/EllisMorrow/OmniClip-RAG/wiki/Development-and-Architecture).
+Developer orientation and architecture links live in [Development and Architecture](https://github.com/EllisMorrow/Caelune/wiki/Development-and-Architecture).
 
 ## License and third-party software
 
-OmniClip RAG is released under the [MIT License](LICENSE). It relies on open-source projects including PySide6, SQLite, LanceDB, Apache Arrow, PyTorch, sentence-transformers, Transformers, BGE models, PyPDF, Apache Tika, Eclipse Temurin, watchdog, PyInstaller, and the Model Context Protocol SDK.
+Caelune is released under the [MIT License](LICENSE). It relies on open-source projects including PySide6, SQLite, LanceDB, Apache Arrow, PyTorch, sentence-transformers, Transformers, BGE models, PyPDF, Apache Tika, Eclipse Temurin, watchdog, PyInstaller, and the Model Context Protocol SDK.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the repository-level legal and distribution notices.
 
-> OmniClip RAG and its retrieval results are provided without warranty. Verify important results, maintain backups, and do not use retrieved context or downstream AI output as the sole basis for medical, legal, financial, safety-critical, or other high-stakes decisions.
+> Caelune and its retrieval results are provided without warranty. Verify important results, maintain backups, and do not use retrieved context or downstream AI output as the sole basis for medical, legal, financial, safety-critical, or other high-stakes decisions.

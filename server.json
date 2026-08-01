@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.EllisMorrow/omniclip-rag-mcp",
-  "title": "OmniClip RAG",
+  "name": "io.github.EllisMorrow/caelune-mcp",
+  "title": "Caelune",
   "description": "Read-only local-first MCP server for private Markdown, PDF, and Tika-backed search on Windows.",
   "repository": {
-    "url": "https://github.com/EllisMorrow/OmniClip-RAG",
+    "url": "https://github.com/EllisMorrow/Caelune",
     "source": "github"
   },
-  "version": "0.4.13",
+  "version": "0.5.0",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/EllisMorrow/OmniClip-RAG/releases/download/v0.4.13/omniclip-rag-mcp-win-x64-v0.4.13.mcpb",
-      "fileSha256": "dce8065de23fea921f73647d54252e91428fc1e40e68b033f69b582d49e51d40",
+      "identifier": "https://github.com/EllisMorrow/Caelune/releases/download/v0.5.0/caelune-mcp-win-x64-v0.5.0.mcpb",
+      "fileSha256": "e502c76b84b187f96a76740a4cba5223cb74906312068aebc36fb80c6fdd4f31",
       "transport": {
         "type": "stdio"
       }

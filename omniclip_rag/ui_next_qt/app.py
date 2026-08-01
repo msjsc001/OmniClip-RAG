@@ -16,13 +16,13 @@ if TYPE_CHECKING:
 
 from .. import __version__
 from ..app_logging import configure_file_logging, install_exception_logging
-from ..config import AppConfig, build_data_paths, default_data_root
+from ..config import APP_NAME, AppConfig, build_data_paths, default_data_root
 from ..errors import ActiveDataRootUnavailableError
 from ..headless.bootstrap import RuntimeBundle, apply_runtime_layout_if_needed, load_runtime_bundle
 from ..runtime_recovery import mark_session_clean_exit, mark_session_running, mark_session_started, prepare_startup_recovery
 from ..ui_i18n import data_root_reason_text, detect_system_language, text
 
-APP_USER_MODEL_ID = 'msjsc001.OmniClipRAG.GUI'
+APP_USER_MODEL_ID = 'EllisMorrow.Caelune.GUI'
 APP_LOGGER = logging.getLogger(__name__)
 
 _QT_MODULES: tuple[Any, Any, Any] | None = None
@@ -48,7 +48,7 @@ def _startup_progress_dialog_class():
 
         def __init__(self) -> None:
             super().__init__(None, QtCore.Qt.WindowType.Window | QtCore.Qt.WindowType.WindowTitleHint | QtCore.Qt.WindowType.WindowMinimizeButtonHint)
-            self.setWindowTitle('OmniClip RAG [开发态]' if not getattr(sys, 'frozen', False) else 'OmniClip RAG')
+            self.setWindowTitle(f'{APP_NAME} [开发态]' if not getattr(sys, 'frozen', False) else APP_NAME)
             self.setWindowModality(QtCore.Qt.WindowModality.NonModal)
             self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
             self.setMinimumWidth(420)
@@ -57,7 +57,7 @@ def _startup_progress_dialog_class():
             layout.setContentsMargins(18, 18, 18, 18)
             layout.setSpacing(10)
 
-            self._title_label = QtWidgets.QLabel('OmniClip RAG [开发态]' if not getattr(sys, 'frozen', False) else 'OmniClip RAG', self)
+            self._title_label = QtWidgets.QLabel(f'{APP_NAME} [开发态]' if not getattr(sys, 'frozen', False) else APP_NAME, self)
             title_font = self._title_label.font()
             title_font.setPointSize(max(title_font.pointSize() + 3, 12))
             title_font.setBold(True)
@@ -272,7 +272,7 @@ def main() -> int:
         mark_session_started(bundle.paths, version=__version__, safe_startup=bool(recovery.get('safe_startup')))
         atexit.register(lambda paths=bundle.paths: mark_session_clean_exit(paths))
         if recovery.get('safe_startup'):
-            APP_LOGGER.warning('Previous session ended unexpectedly or hit memory pressure; OmniClip is starting in safe startup mode.')
+            APP_LOGGER.warning('Previous session ended unexpectedly or hit memory pressure; Caelune is starting in safe startup mode.')
         if startup_dialog is not None:
             startup_dialog.set_status('正在加载界面主题...', detail='你可以移动或最小化这个启动窗口。')
             app.processEvents()
@@ -349,9 +349,9 @@ def _set_windows_app_user_model_id() -> None:
 
 def _apply_app_identity(app) -> None:
     try:
-        app.setApplicationName('OmniClip RAG')
-        app.setApplicationDisplayName('OmniClip RAG')
-        app.setOrganizationName('msjsc001')
+        app.setApplicationName(APP_NAME)
+        app.setApplicationDisplayName(APP_NAME)
+        app.setOrganizationName('EllisMorrow')
     except Exception:
         pass
 

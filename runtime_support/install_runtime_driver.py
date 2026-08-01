@@ -596,7 +596,7 @@ def _write_bootstrap_metadata(payload_target: Path) -> dict[str, Any]:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Download and install OmniClip Runtime components into an isolated payload target.')
+    parser = argparse.ArgumentParser(description='Download and install Caelune Runtime components into an isolated payload target.')
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--profile', required=True)
     parser.add_argument('--component', required=True)

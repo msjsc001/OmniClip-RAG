@@ -11,6 +11,9 @@ from omniclip_rag.config import default_bootstrap_root, default_data_root, legac
 from omniclip_rag.data_root_bootstrap import (
     BOOTSTRAP_FILENAME,
     BOOTSTRAP_PATH_ENV,
+    DATA_ROOT_OVERRIDE_ENV,
+    LEGACY_BOOTSTRAP_PATH_ENV,
+    LEGACY_DATA_ROOT_OVERRIDE_ENV,
     bootstrap_file_path,
     known_data_roots,
     read_bootstrap_pointer,
@@ -49,11 +52,11 @@ class DataRootBootstrapTests(unittest.TestCase):
         if TEST_ROOT.exists():
             shutil.rmtree(TEST_ROOT, ignore_errors=True)
 
-    def test_default_data_root_uses_rag_default_suffix(self) -> None:
-        self.assertEqual(default_data_root(), (TEST_ROOT / 'appdata' / 'OmniClip RAG-default').resolve())
+    def test_default_data_root_uses_caelune_default_suffix(self) -> None:
+        self.assertEqual(default_data_root(), (TEST_ROOT / 'appdata' / 'Caelune-default').resolve())
 
-    def test_bootstrap_root_stays_on_appdata_omniclip_rag(self) -> None:
-        self.assertEqual(default_bootstrap_root(), (TEST_ROOT / 'appdata' / 'OmniClip RAG').resolve())
+    def test_bootstrap_root_uses_appdata_caelune(self) -> None:
+        self.assertEqual(default_bootstrap_root(), (TEST_ROOT / 'appdata' / 'Caelune').resolve())
 
     def test_write_and_read_bootstrap_pointer_roundtrip(self) -> None:
         data_root = TEST_ROOT / 'profiles' / 'alpha'
@@ -92,7 +95,7 @@ class DataRootBootstrapTests(unittest.TestCase):
     def test_default_source_allows_first_run_nonexistent_directory(self) -> None:
         resolved = resolve_active_data_root()
         validated = validate_active_data_root(resolved)
-        self.assertEqual(validated.path, (TEST_ROOT / 'appdata' / 'OmniClip RAG-default').resolve())
+        self.assertEqual(validated.path, (TEST_ROOT / 'appdata' / 'Caelune-default').resolve())
         self.assertEqual(validated.source, 'default')
 
     def test_known_data_roots_returns_active_first(self) -> None:
@@ -109,6 +112,36 @@ class DataRootBootstrapTests(unittest.TestCase):
         roots = known_data_roots()
         self.assertEqual(roots[0], str(default_data_root()))
         self.assertIn(str(legacy_root.resolve()), roots)
+
+    def test_legacy_bootstrap_env_remains_supported(self) -> None:
+        legacy_pointer = TEST_ROOT / 'legacy-roaming' / BOOTSTRAP_FILENAME
+        with patch.dict(
+            os.environ,
+            {BOOTSTRAP_PATH_ENV: '', LEGACY_BOOTSTRAP_PATH_ENV: str(legacy_pointer)},
+            clear=False,
+        ):
+            self.assertEqual(bootstrap_file_path(), legacy_pointer.resolve())
+
+    def test_legacy_data_root_env_remains_supported(self) -> None:
+        legacy_root = TEST_ROOT / 'legacy-env-root'
+        with patch.dict(
+            os.environ,
+            {BOOTSTRAP_PATH_ENV: '', DATA_ROOT_OVERRIDE_ENV: '', LEGACY_DATA_ROOT_OVERRIDE_ENV: str(legacy_root)},
+            clear=False,
+        ):
+            resolved = resolve_active_data_root()
+        self.assertEqual(resolved.path, legacy_root.resolve())
+        self.assertEqual(resolved.source, 'env')
+
+    def test_existing_legacy_environment_is_reused_without_pointer(self) -> None:
+        legacy_root = legacy_default_data_root()
+        (legacy_root / 'shared').mkdir(parents=True, exist_ok=True)
+        (legacy_root / 'workspaces').mkdir(parents=True, exist_ok=True)
+        (legacy_root / 'config.json').write_text('{}', encoding='utf-8')
+        with patch.dict(os.environ, {BOOTSTRAP_PATH_ENV: ''}, clear=False):
+            resolved = resolve_active_data_root()
+        self.assertEqual(resolved.path, legacy_root.resolve())
+        self.assertEqual(resolved.source, 'legacy-default')
 
     def test_resolve_and_validate_active_data_root_accepts_existing_explicit_directory(self) -> None:
         explicit_root = TEST_ROOT / 'profiles' / 'gamma'

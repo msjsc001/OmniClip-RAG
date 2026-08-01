@@ -73,7 +73,7 @@ from .runtime_install_dialog import RuntimeInstallDialog
 from .model_download_dialog import ModelDownloadDialog
 from .tika_format_dialog import TikaFormatDialog
 from .workers import FunctionWorker, ProgressFunctionWorker, RuntimeProbeWorker, ServiceTaskWorker, WatchWorker
-REPO_URL = 'https://github.com/EllisMorrow/OmniClip-RAG'
+REPO_URL = 'https://github.com/EllisMorrow/Caelune'
 LOGGER = logging.getLogger(__name__)
 
 
@@ -5212,7 +5212,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         if worker_command:
             worker_line = ' '.join(self._powershell_literal(part) for part in worker_command)
             script += (
-                "Write-Host 'OmniClip RAG download worker'; "
+                "Write-Host 'Caelune download worker'; "
                 "Write-Host 'Closing this window will stop the current download.'; "
                 f"& {worker_line}; "
                 "$exitCode = $LASTEXITCODE; "
@@ -5223,7 +5223,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             script += (
                 f"$logPath = {self._powershell_literal(log_path)}; "
                 "if (-not (Test-Path -LiteralPath $logPath)) { New-Item -ItemType File -Force -Path $logPath | Out-Null }; "
-                "Write-Host 'OmniClip RAG download log'; "
+                "Write-Host 'Caelune download log'; "
                 "Write-Host 'Press Ctrl+C to stop following; the download itself keeps running in the app.'; "
                 "Get-Content -LiteralPath $logPath -Encoding UTF8 -Tail 20 -Wait"
             )
@@ -5660,7 +5660,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             '-File', str(install_script),
             '-Profile', profile,
             '-Source', normalized_source,
-            '-WaitForProcessName', 'OmniClipRAG',
+            '-WaitForProcessName', 'Caelune',
             '-DiagnosticsPath', str(diagnostics_path),
             '-ResultPath', str(result_path),
         ]
@@ -5668,7 +5668,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             command.extend(['-Component', install_component])
         creationflags = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0)
         child_env = os.environ.copy()
-        child_env['OMNICLIP_RUNTIME_ROOT'] = str(runtime_root)
+        child_env['CAELUNE_RUNTIME_ROOT'] = str(runtime_root)
         try:
             subprocess.Popen(command, cwd=str(app_dir), creationflags=creationflags, env=child_env)
         except Exception as exc:
@@ -7432,7 +7432,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 active_log_path,
             ),
             log_path=log_path,
-            terminal_title=f'OmniClip RAG - {config.vector_model}',
+            terminal_title=f'Caelune - {config.vector_model}',
             start_message=start_message,
             success_payload_builder=lambda: self._build_model_download_success_payload(config, paths),
             local_files_only=bool(getattr(config, 'vector_local_files_only', False)),
@@ -7486,7 +7486,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 active_log_path,
             ),
             log_path=log_path,
-            terminal_title=f'OmniClip RAG - {config.reranker_model}',
+            terminal_title=f'Caelune - {config.reranker_model}',
             start_message=start_message,
             success_payload_builder=lambda: self._build_reranker_download_success_payload(config, paths),
         )

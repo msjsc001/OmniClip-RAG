@@ -26,7 +26,7 @@ class McpRegistryTests(unittest.TestCase):
         self.assertEqual(manifest['server']['entry_point'], MCPB_ENTRY_POINT)
         self.assertEqual(
             manifest['server']['mcp_config']['command'],
-            '${__dirname}/server/OmniClipRAG-MCP.exe',
+            '${__dirname}/server/Caelune-MCP.exe',
         )
         self.assertEqual(manifest['server']['mcp_config']['args'], [])
 
@@ -41,11 +41,11 @@ class McpRegistryTests(unittest.TestCase):
         self.assertEqual(payload['packages'][0]['identifier'], mcpb_download_url('0.4.1'))
         self.assertEqual(payload['packages'][0]['fileSha256'], 'abc123')
 
-    def test_registry_identity_follows_owner_while_mcpb_identity_stays_compatible(self) -> None:
-        self.assertEqual(REGISTRY_SERVER_NAME, 'io.github.EllisMorrow/omniclip-rag-mcp')
-        self.assertEqual(MCPB_MANIFEST_NAME, 'io.github.msjsc001/omniclip-rag-mcp')
-        self.assertEqual(REGISTRY_REPOSITORY_URL, 'https://github.com/EllisMorrow/OmniClip-RAG')
-        self.assertIn('github.com/EllisMorrow/OmniClip-RAG/releases/', mcpb_download_url('0.4.9'))
+    def test_registry_and_mcpb_identity_use_current_product_name(self) -> None:
+        self.assertEqual(REGISTRY_SERVER_NAME, 'io.github.EllisMorrow/caelune-mcp')
+        self.assertEqual(MCPB_MANIFEST_NAME, REGISTRY_SERVER_NAME)
+        self.assertEqual(REGISTRY_REPOSITORY_URL, 'https://github.com/EllisMorrow/Caelune')
+        self.assertIn('github.com/EllisMorrow/Caelune/releases/', mcpb_download_url('0.4.9'))
 
     def test_mcpb_filename_contains_mcp_and_version(self) -> None:
         filename = mcpb_filename('0.4.1')

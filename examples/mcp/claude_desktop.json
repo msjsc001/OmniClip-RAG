@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "omniclip": {
-      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.13\\OmniClipRAG-MCP.exe",
+    "caelune": {
+      "command": "D:\\Apps\\Caelune\\dist\\Caelune-MCP-v0.5.0\\Caelune-MCP.exe",
       "args": [],
       "env": {}
     }

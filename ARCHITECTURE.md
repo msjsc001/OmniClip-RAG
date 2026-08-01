@@ -1,5 +1,20 @@
 # Architecture Notes
 
+## Product Identity And Rename Compatibility
+
+The current public product name is **Caelune**; the Chinese product name is **星野**. Public UI, executable names, release artifacts, documentation, website metadata, and MCP display metadata use the new brand.
+
+Compatibility identifiers remain deliberately stable where changing them would disconnect existing users from their data or integrations:
+
+- the Python import package remains `omniclip_rag`,
+- existing `%APPDATA%\OmniClip RAG` environments and bootstrap pointers remain readable,
+- `OMNICLIP_*` data/runtime overrides remain accepted as legacy aliases for `CAELUNE_*`,
+- `.omniclip-root.json`, `omniclip.sqlite3`, and existing log names remain valid on-disk contracts,
+- MCP tool IDs remain `omniclip.status` and `omniclip.search`,
+- the installed MCPB package identity remains `io.github.msjsc001/omniclip-rag-mcp` so upgrades do not become duplicate installations.
+
+Fresh installations use `%APPDATA%\Caelune\bootstrap.json` and `%APPDATA%\Caelune-default` by default. Startup checks the new pointer first, then the legacy pointer and legacy environment before creating a new root.
+
 ## Release Boundary For Current Mainline
 
 The current mainline is not trying to ship a giant all-in-one AI platform.
@@ -108,7 +123,7 @@ Why: a desktop app must let the user manage background listeners safely and expl
 
 ### 6. User data must stay out of the program directory
 
-The app prefers `%APPDATA%\OmniClip RAG` and only falls back to `%LOCALAPPDATA%\OmniClip RAG` when needed. It must not write user data, indexes, logs, or exports into the program directory or repository working tree.
+Fresh installations use `%APPDATA%\Caelune-default`; existing installations may continue using a previously selected root, including `%APPDATA%\OmniClip RAG`. The app must not write user data, indexes, logs, or exports into the program directory or repository working tree.
 
 Why: the storage convention is correct, and it also prevents personal data, test indexes, or exported context packs from leaking into source-controlled paths.
 
@@ -289,11 +304,12 @@ Why: the real product promise is "download the app, repair/download Runtime insi
 
 Current data-root policy:
 
-- the active OmniClip environment is resolved from one startup truth chain only:
+- the active Caelune environment is resolved from one startup truth chain only:
   1. explicit override,
   2. explicit test/developer override,
-  3. `%APPDATA%\OmniClip RAG\bootstrap.json`,
-  4. first-run default `%APPDATA%\OmniClip RAG-default`,
+  3. `%APPDATA%\Caelune\bootstrap.json`, then the legacy `%APPDATA%\OmniClip RAG\bootstrap.json`,
+  4. an existing legacy `%APPDATA%\OmniClip RAG` environment,
+  5. first-run default `%APPDATA%\Caelune-default`,
 - the bootstrap file is only a locator and may remember multiple known roots, but it does not store user data,
 - the real environment lives entirely under the selected `data_root`,
 - config, workspaces, logs, cache, models, main Runtime, and Tika Runtime all derive from that same root,

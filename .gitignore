@@ -20,8 +20,8 @@ build_release*/
 dist/
 dist_smoke/
 *.spec
-!OmniClipRAG.spec
-!OmniClipRAG-MCP.spec
+!Caelune.spec
+!Caelune-MCP.spec
 
 # Local app data / databases / logs
 /cache/

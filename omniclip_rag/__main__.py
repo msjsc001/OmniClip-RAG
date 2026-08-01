@@ -135,7 +135,7 @@ def main() -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="omniclip")
+    parser = argparse.ArgumentParser(prog="caelune")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init", help="初始化配置")

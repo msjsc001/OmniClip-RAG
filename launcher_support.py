@@ -14,7 +14,11 @@ _DLL_HANDLES: list[object] = []
 
 
 def _preferred_runtime_dir() -> Path:
-    override = str(os.environ.get('OMNICLIP_RUNTIME_ROOT') or '').strip()
+    override = str(
+        os.environ.get('CAELUNE_RUNTIME_ROOT')
+        or os.environ.get('OMNICLIP_RUNTIME_ROOT')
+        or ''
+    ).strip()
     if override:
         return Path(override).expanduser().resolve()
     try:

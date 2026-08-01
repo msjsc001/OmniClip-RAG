@@ -1,8 +1,8 @@
-# OmniClip RAG MCP Setup
+# Caelune MCP Setup
 
 ## What It Is
 
-`OmniClip RAG MCP Server` is the read-only, headless MCP interface for OmniClip's local retrieval core.
+`Caelune MCP Server` is the read-only, headless MCP interface for Caelune's local retrieval core.
 
 V1 deliberately keeps the surface small and durable:
 
@@ -14,17 +14,19 @@ V1 deliberately keeps the surface small and durable:
 
 The MCP server is a second shell over the same retrieval core. It is not a second backend.
 
+The `omniclip.*` tool IDs remain unchanged as protocol-level compatibility aliases. Existing MCP clients and saved automations can therefore upgrade to Caelune without rewriting their tool calls.
+
 ## Delivery Shape
 
 Packaged releases now come in three distinct forms:
 
-- `OmniClipRAG-vX.Y.Z-win64.zip`
+- `Caelune-vX.Y.Z-win64.zip`
   - desktop GUI package
   - use this when you want the full desktop app for indexing, Runtime management, and normal daily use
-- `OmniClipRAG-MCP-vX.Y.Z-win64.zip`
+- `Caelune-MCP-vX.Y.Z-win64.zip`
   - manual MCP package
-  - use this when you want to point a local MCP client directly at `OmniClipRAG-MCP.exe`
-- `omniclip-rag-mcp-win-x64-vX.Y.Z.mcpb`
+  - use this when you want to point a local MCP client directly at `Caelune-MCP.exe`
+- `caelune-mcp-win-x64-vX.Y.Z.mcpb`
   - MCPB package for the official MCP Registry and MCPB-aware clients
   - use this when you want a standard Registry-friendly distribution artifact instead of a raw ZIP
 
@@ -97,13 +99,13 @@ python launcher_mcp.py --mcp-selfcheck
 ### From packaged MCP build
 
 ```powershell
-.\OmniClipRAG-MCP.exe --mcp-selfcheck
+.\Caelune-MCP.exe --mcp-selfcheck
 ```
 
 This writes a shared self-check record under:
 
 ```text
-%APPDATA%\OmniClip RAG\shared\mcp_selfcheck.json
+%APPDATA%\Caelune\shared\mcp_selfcheck.json
 ```
 
 The self-check is meant to verify:
@@ -118,7 +120,7 @@ The self-check is meant to verify:
 
 The MCP server follows the same storage rules as the desktop app:
 
-- shared app data lives under `%APPDATA%\OmniClip RAG\shared`
+- shared app data lives under `%APPDATA%\Caelune\shared`
 - per-workspace data remains workspace-scoped
 - Runtime prefers the shared AppData sidecar root
 - healthy legacy Runtime folders may still be reused
@@ -136,7 +138,7 @@ Do not add plain `print()` diagnostics to MCP request handling.
 
 ## Official MCP Registry / MCPB
 
-OmniClip RAG now keeps a first-class Registry publishing line.
+Caelune now keeps a first-class Registry publishing line.
 
 The Registry metadata lives in the repository root as:
 
@@ -144,17 +146,17 @@ The Registry metadata lives in the repository root as:
 
 The current public discovery identity is:
 
-- `io.github.EllisMorrow/omniclip-rag-mcp`
+- `io.github.EllisMorrow/caelune-mcp`
 
-The MCPB manifest intentionally retains the legacy pre-rename package identity so existing installations remain upgrade-compatible.
+The MCPB manifest uses the same `io.github.EllisMorrow/caelune-mcp` identity. If an MCPB-aware client previously installed `io.github.msjsc001/omniclip-rag-mcp`, remove that old extension once before installing the Caelune package. Existing MCP tool calls remain compatible because `omniclip.status` and `omniclip.search` are unchanged.
 
 The standard publishable artifact is:
 
-- `omniclip-rag-mcp-win-x64-vX.Y.Z.mcpb`
+- `caelune-mcp-win-x64-vX.Y.Z.mcpb`
 
 Important difference:
 
-- the ZIP package is for people who manually point a client at `OmniClipRAG-MCP.exe`
+- the ZIP package is for people who manually point a client at `Caelune-MCP.exe`
 - the `.mcpb` package is for Registry publishing and MCPB-aware distribution flows
 
 ### Maintainer Publish Order
@@ -183,22 +185,22 @@ Example config files live under:
 - `examples/mcp/cline.json`
 - `examples/mcp/openclaw.json`
 
-Replace the executable path with the actual location of `OmniClipRAG-MCP.exe` on your machine.
+Replace the executable path with the actual location of `Caelune-MCP.exe` on your machine.
 
 ## Jan.ai Reference Setup
 
 Use these values when adding a new MCP server in Jan.ai:
 
-- `Server Name`: `OmniClip RAG`
+- `Server Name`: `Caelune`
 - `Transport Type`: `STDIO`
-- `Command`: full path to `OmniClipRAG-MCP.exe`
+- `Command`: full path to `Caelune-MCP.exe`
 - `Arguments`: leave empty
 - `Environment Variables`: leave empty unless you intentionally overrode your data root or runtime root
 
 Example:
 
 ```text
-D:\Apps\OmniClip RAG\dist\OmniClipRAG-MCP-v0.4.13\OmniClipRAG-MCP.exe
+D:\Apps\Caelune\dist\Caelune-MCP-v0.5.0\Caelune-MCP.exe
 ```
 
 ## OpenClaw Reference Setup
@@ -216,9 +218,9 @@ Add or merge an `mcpServers` block like this:
 ```json
 {
   "mcpServers": {
-    "omniclip-rag": {
+    "caelune": {
       "transport": "stdio",
-      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.13\\OmniClipRAG-MCP.exe",
+      "command": "D:\\Apps\\Caelune\\dist\\Caelune-MCP-v0.5.0\\Caelune-MCP.exe",
       "args": []
     }
   }
@@ -228,7 +230,7 @@ Add or merge an `mcpServers` block like this:
 Important notes:
 
 - do not replace your whole config if OpenClaw already has other settings
-- only merge the `mcpServers.omniclip-rag` entry into the existing file
+- only merge the `mcpServers.caelune` entry into the existing file
 - restart OpenClaw or its gateway/runtime process after saving
 
 If you use a custom data root or runtime root, add the required environment variables in the same MCP server block according to your local layout.
@@ -237,10 +239,10 @@ If you use a custom data root or runtime root, add the required environment vari
 
 After the MCP server is connected, you can speak to the AI naturally. Good examples:
 
-- `Use OmniClip to search my local knowledge base for "project roadmap" and summarize the useful parts.`
+- `Use Caelune to search my local knowledge base for "project roadmap" and summarize the useful parts.`
 - `Call omniclip.status first and tell me whether my local vault is ready.`
-- `Search only PDF results in OmniClip for "attention mechanism".`
-- `Find notes about "my thinking model" in OmniClip and show me the top 5 snippets with sources.`
+- `Search only PDF results in Caelune for "attention mechanism".`
+- `Find notes about "my thinking model" in Caelune and show me the top 5 snippets with sources.`
 
 The most important habit is to tell the AI:
 
@@ -250,7 +252,7 @@ The most important habit is to tell the AI:
 
 ## Important Reminder
 
-`OmniClipRAG-MCP.exe` is read-only. It does not build indexes, delete data, or change your configuration.
+`Caelune-MCP.exe` is read-only. It does not build indexes, delete data, or change your configuration.
 
 You should still use the desktop app to:
 

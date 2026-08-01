@@ -2,9 +2,9 @@
 
 ## Purpose / 文档目的
 
-This file is the repository-level notice for the major third-party projects, runtimes, and optional model artifacts that OmniClip RAG directly integrates, explicitly relies on, or may download during normal use.
+This file is the repository-level notice for the major third-party projects, runtimes, and optional model artifacts that Caelune directly integrates, explicitly relies on, or may download during normal use.
 
-本文件是方寸引 / OmniClip RAG 在仓库层面的第三方许可与声明入口，用来记录本项目直接集成、明确依赖、或在正常使用过程中可能下载的主要第三方项目、运行时与模型。
+本文件是星野 / Caelune 在仓库层面的第三方许可与声明入口，用来记录本项目直接集成、明确依赖、或在正常使用过程中可能下载的主要第三方项目、运行时与模型。
 
 This document is:
 
@@ -28,9 +28,9 @@ When there is any conflict, ambiguity, or version mismatch, the authoritative up
 
 ## Project License / 本项目许可证
 
-OmniClip RAG itself is released under the [MIT License](LICENSE).
+Caelune itself is released under the [MIT License](LICENSE).
 
-方寸引 / OmniClip RAG 自身采用 [MIT License](LICENSE) 发布。
+星野 / Caelune 自身采用 [MIT License](LICENSE) 发布。
 
 That does **not** replace the licenses of third-party code, runtimes, models, or tools used by this project.
 
@@ -54,11 +54,11 @@ That does **not** replace the licenses of third-party code, runtimes, models, or
 
 ## Representative Core Components / 代表性核心第三方组件
 
-The table below is intentionally focused on the major projects that are directly visible in OmniClip's architecture, Runtime line, build line, or model workflows.
+The table below is intentionally focused on the major projects that are directly visible in Caelune's architecture, Runtime line, build line, or model workflows.
 
-下表刻意聚焦在方寸引架构、Runtime、构建链与模型链里最核心、最可见的项目。
+下表刻意聚焦在星野架构、Runtime、构建链与模型链里最核心、最可见的项目。
 
-| Component | How OmniClip uses it | License / note | Upstream |
+| Component | How Caelune uses it | License / note | Upstream |
 | --- | --- | --- | --- |
 | Python | Core language/runtime for source tree, tooling, and bundled Runtime installer support | PSF License | <https://docs.python.org/3/license.html> |
 | Qt for Python (`PySide6`, `Shiboken6`) | Desktop GUI framework | LGPL-based community distribution with additional upstream third-party notices; see Qt documentation for details | <https://doc.qt.io/qtforpython-6/licenses.html> |
@@ -85,7 +85,7 @@ These model artifacts are not the same thing as the Python libraries that load t
 
 这些模型文件不等同于加载它们的 Python 库；若要再分发或做下游商业使用，应单独查看模型卡与托管页条款。
 
-| Model | Typical role in OmniClip | License shown by upstream model page | Upstream |
+| Model | Typical role in Caelune | License shown by upstream model page | Upstream |
 | --- | --- | --- | --- |
 | `BAAI/bge-m3` | Local embedding model | MIT | <https://huggingface.co/BAAI/bge-m3> |
 | `BAAI/bge-reranker-v2-m3` | Local reranker model | Apache-2.0 | <https://huggingface.co/BAAI/bge-reranker-v2-m3> |

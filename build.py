@@ -25,6 +25,8 @@ BLACKLIST_FRAGMENTS = (
     'local_appdata/',
     'appdata/roaming/omniclip rag/',
     'appdata/local/omniclip rag/',
+    'appdata/roaming/caelune/',
+    'appdata/local/caelune/',
     'baai__bge-m3',
     'baai__bge-reranker-v2-m3',
     '.lance',
@@ -73,30 +75,30 @@ class BuildTarget:
 
 
 GUI_TARGET = BuildTarget(
-    exe_basename='OmniClipRAG',
-    spec_path=ROOT / 'OmniClipRAG.spec',
-    output_name=f'OmniClipRAG-v{APP_VERSION}',
-    output_dir=DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}',
-    release_zip_path=DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}-WIN-EXE.zip',
+    exe_basename='Caelune',
+    spec_path=ROOT / 'Caelune.spec',
+    output_name=f'Caelune-v{APP_VERSION}',
+    output_dir=DIST_ROOT / f'Caelune-v{APP_VERSION}',
+    release_zip_path=DIST_ROOT / f'Caelune-v{APP_VERSION}-WIN-EXE.zip',
     support_files={
-        ROOT / 'scripts' / 'install_runtime.ps1': DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'InstallRuntime.ps1',
-        ROOT / 'RUNTIME_SETUP.md': DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'RUNTIME_SETUP.md',
-        ROOT / 'runtime_support': DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'runtime_support',
+        ROOT / 'scripts' / 'install_runtime.ps1': DIST_ROOT / f'Caelune-v{APP_VERSION}' / 'InstallRuntime.ps1',
+        ROOT / 'RUNTIME_SETUP.md': DIST_ROOT / f'Caelune-v{APP_VERSION}' / 'RUNTIME_SETUP.md',
+        ROOT / 'runtime_support': DIST_ROOT / f'Caelune-v{APP_VERSION}' / 'runtime_support',
     },
-    protected_runtime_dir=DIST_ROOT / f'OmniClipRAG-v{APP_VERSION}' / 'runtime',
+    protected_runtime_dir=DIST_ROOT / f'Caelune-v{APP_VERSION}' / 'runtime',
 )
 MCP_TARGET = BuildTarget(
-    exe_basename='OmniClipRAG-MCP',
-    spec_path=ROOT / 'OmniClipRAG-MCP.spec',
-    output_name=f'OmniClipRAG-MCP-v{APP_VERSION}',
-    output_dir=DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}',
-    release_zip_path=DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}-win64.zip',
+    exe_basename='Caelune-MCP',
+    spec_path=ROOT / 'Caelune-MCP.spec',
+    output_name=f'Caelune-MCP-v{APP_VERSION}',
+    output_dir=DIST_ROOT / f'Caelune-MCP-v{APP_VERSION}',
+    release_zip_path=DIST_ROOT / f'Caelune-MCP-v{APP_VERSION}-win64.zip',
     support_files={
-        ROOT / 'MCP_SETUP.md': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'MCP_SETUP.md',
-        ROOT / 'examples' / 'mcp' / 'claude_desktop.json': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'claude_desktop.json',
-        ROOT / 'examples' / 'mcp' / 'cursor.json': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'cursor.json',
-        ROOT / 'examples' / 'mcp' / 'cline.json': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'cline.json',
-        ROOT / 'examples' / 'mcp' / 'openclaw.json': DIST_ROOT / f'OmniClipRAG-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'openclaw.json',
+        ROOT / 'MCP_SETUP.md': DIST_ROOT / f'Caelune-MCP-v{APP_VERSION}' / 'MCP_SETUP.md',
+        ROOT / 'examples' / 'mcp' / 'claude_desktop.json': DIST_ROOT / f'Caelune-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'claude_desktop.json',
+        ROOT / 'examples' / 'mcp' / 'cursor.json': DIST_ROOT / f'Caelune-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'cursor.json',
+        ROOT / 'examples' / 'mcp' / 'cline.json': DIST_ROOT / f'Caelune-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'cline.json',
+        ROOT / 'examples' / 'mcp' / 'openclaw.json': DIST_ROOT / f'Caelune-MCP-v{APP_VERSION}' / 'examples' / 'mcp' / 'openclaw.json',
     },
 )
 LEGACY_OUTPUT_DIR = DIST_ROOT / 'OmniClipRAG_App'
@@ -224,7 +226,7 @@ def _extract_zip(source: Path, destination: Path) -> None:
 
 
 def _prepare_bundled_python(target: BuildTarget) -> None:
-    if target.exe_basename != 'OmniClipRAG':
+    if target.exe_basename != 'Caelune':
         return
     metadata_path = target.output_dir / 'runtime_support' / 'bundled_python.json'
     if not metadata_path.exists():
@@ -267,7 +269,7 @@ def _audit_bundle(target: BuildTarget) -> None:
             raise RuntimeError(f'Missing release support file: {required}')
     payload_root = _bundle_payload_root(target.output_dir)
     required_resources = [payload_root / 'resources' / 'tika_suffixes_3.2.3.txt']
-    if target.exe_basename == 'OmniClipRAG':
+    if target.exe_basename == 'Caelune':
         required_resources.extend(
             (
                 payload_root / 'resources' / 'app_icon.ico',
@@ -334,7 +336,7 @@ def _summarize() -> None:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Build the lean onedir bundle into a versioned dist/OmniClipRAG-vX.Y.Z folder while preserving any existing local runtime trees.')
+    parser = argparse.ArgumentParser(description='Build the lean onedir bundle into a versioned dist/Caelune-vX.Y.Z folder while preserving any existing local runtime trees.')
     parser.add_argument('--no-clean', action='store_true', help='Keep previous staging/output files if they already exist.')
     parser.add_argument('--skip-audit', action='store_true', help='Skip the post-build purity audit.')
     return parser.parse_args(argv)
