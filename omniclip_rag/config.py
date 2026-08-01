@@ -12,7 +12,8 @@ from pathlib import Path
 from .ui_i18n import detect_system_language, normalize_language
 
 
-APP_NAME = "OmniClip RAG"
+APP_NAME = "Caelune"
+LEGACY_APP_NAME = "OmniClip RAG"
 DEFAULT_ENV_ROOT_NAME = f"{APP_NAME}-default"
 ENVIRONMENT_MARKER_FILENAME = ".omniclip-root.json"
 ENVIRONMENT_MARKER_SCHEMA_VERSION = 1
@@ -169,8 +170,8 @@ def default_bootstrap_root() -> Path:
 def legacy_default_data_root() -> Path:
     appdata = os.environ.get("APPDATA")
     if appdata:
-        return Path(appdata) / APP_NAME
-    return Path.home() / "AppData" / "Roaming" / APP_NAME
+        return Path(appdata) / LEGACY_APP_NAME
+    return Path.home() / "AppData" / "Roaming" / LEGACY_APP_NAME
 
 
 def default_local_data_root() -> Path:

@@ -105,7 +105,7 @@ class RuntimeInstallScriptTests(unittest.TestCase):
         self.assertIn('function Apply-PendingRuntimeUpdates', text)
         self.assertIn('function Start-PendingApplyHelper', text)
         self.assertIn('-ApplyPendingOnly', text)
-        self.assertIn('Restart OmniClipRAG.exe after the download finishes.', text)
+        self.assertIn('Restart Caelune.exe after the download finishes.', text)
         self.assertIn('The new runtime component has been registered and the next launch will use it automatically.', text)
 
     def test_pending_runtime_payload_stays_staged_until_restart(self) -> None:
@@ -162,7 +162,7 @@ class RuntimeInstallScriptTests(unittest.TestCase):
         pending_vector = runtime_dir / '.pending' / 'vector-store' / 'payload'
         pending_semantic.mkdir(parents=True, exist_ok=True)
         pending_vector.mkdir(parents=True, exist_ok=True)
-        (app_root / 'OmniClipRAG.exe').write_text('', encoding='utf-8')
+        (app_root / 'Caelune.exe').write_text('', encoding='utf-8')
         shutil.copy2(SCRIPT, app_root / 'InstallRuntime.ps1')
 
         def write_pkg(base: Path, name: str, body: str = '') -> None:

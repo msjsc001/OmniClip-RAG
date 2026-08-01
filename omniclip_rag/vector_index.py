@@ -1680,8 +1680,8 @@ def build_runtime_install_command(
         f'\"Set-Location -LiteralPath {app_dir_literal}; '
     )
     if runtime_root_literal:
-        command += f"$env:OMNICLIP_RUNTIME_ROOT = {runtime_root_literal}; "
-    command += f"& {script_literal} -Profile {normalized_profile} -Source {normalized_source} -WaitForProcessName OmniClipRAG"
+        command += f"$env:CAELUNE_RUNTIME_ROOT = {runtime_root_literal}; "
+    command += f"& {script_literal} -Profile {normalized_profile} -Source {normalized_source} -WaitForProcessName Caelune"
     if normalized_component != 'all':
         command += f" -Component {normalized_component}"
     command += '\"'
@@ -1828,7 +1828,11 @@ def _application_root_dir() -> Path:
 
 
 def _preferred_runtime_dir_path() -> Path:
-    override = str(os.environ.get('OMNICLIP_RUNTIME_ROOT') or '').strip()
+    override = str(
+        os.environ.get('CAELUNE_RUNTIME_ROOT')
+        or os.environ.get('OMNICLIP_RUNTIME_ROOT')
+        or ''
+    ).strip()
     if override:
         return Path(override).expanduser().resolve()
     resolved = resolve_active_data_root()
@@ -1864,7 +1868,7 @@ def _legacy_runtime_candidate_dirs() -> list[Path]:
         if sibling_app == app_dir:
             continue
         sibling_name = sibling_app.name.strip()
-        if not re.match(r'^OmniClipRAG-v\d+(?:\.\d+)*$', sibling_name, re.IGNORECASE):
+        if not re.match(r'^(?:Caelune|OmniClipRAG)-v\d+(?:\.\d+)*$', sibling_name, re.IGNORECASE):
             continue
         sibling_runtime = sibling_app / 'runtime'
         if sibling_runtime.exists():

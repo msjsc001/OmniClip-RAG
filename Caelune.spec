@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 _spec_anchor = Path(globals().get('SPECPATH', Path.cwd()))
 ROOT = _spec_anchor.resolve().parent if _spec_anchor.is_file() else _spec_anchor.resolve()
@@ -19,37 +19,60 @@ def _safe_collect_hidden(package: str) -> list[str]:
         return []
 
 
-# Why: MCP 壳子仍然复用同一套本地检索核心，因此需要共享最小资源面与运行时引导，
-# 但继续把重型 AI/runtime 依赖留在外部 runtime/ 中，而不是重新塞进包体。
+def _safe_copy_metadata(distribution: str) -> list[tuple[str, str]]:
+    try:
+        return copy_metadata(distribution)
+    except Exception:
+        return []
+
+
+# Why: 纯净主程序只打包 Qt 壳子和业务代码，所有重型 AI/runtime 统一外置到 runtime/。
 datas: list[tuple[str, str]] = [
+    (str(ROOT / 'resources' / 'app_icon.ico'), 'resources'),
+    (str(ROOT / 'resources' / 'app_icon.png'), 'resources'),
+    (str(ROOT / 'resources' / 'app_icon_32.png'), 'resources'),
     (str(ROOT / 'resources' / 'tika_suffixes_3.2.3.txt'), 'resources'),
 ]
+datas.extend(_safe_copy_metadata('pypdf'))
 
 binaries: list[tuple[str, str]] = []
 hiddenimports = [
-    'omniclip_rag.app_entry.mcp',
-    'omniclip_rag.headless.bootstrap',
-    'omniclip_rag.mcp.core',
-    'mcp',
-    'mcp.server',
-    'mcp.server.stdio',
-    'mcp.server.lowlevel',
-    'mcp.server.lowlevel.server',
-    'mcp.types',
+    'omniclip_rag.app_entry.desktop',
+    'omniclip_rag.ui_next_qt.app',
+    'omniclip_rag.ui_next_qt.main_window',
+    'omniclip_rag.ui_next_qt.config_workspace',
+    'omniclip_rag.ui_next_qt.query_workspace',
+    'omniclip_rag.extensions.parsers.pdf',
+    'omniclip_rag.extensions.parsers.tika',
+    'PySide6.QtCore',
+    'PySide6.QtGui',
+    'PySide6.QtWidgets',
+    'shiboken6',
     'multiprocessing',
     '_multiprocessing',
     'asyncio',
     '_asyncio',
     '_overlapped',
     'charset_normalizer.md',
+    'modelscope',
+    'modelscope.hub',
+    'modelscope.hub.api',
+    'modelscope.hub.snapshot_download',
 ]
 
 for package in (
-    'omniclip_rag.headless',
-    'omniclip_rag.mcp',
+    'omniclip_rag.ui_next_qt',
+    'omniclip_rag.ui_shared',
 ):
     hiddenimports.extend(_safe_collect_hidden(package))
 
+# Why: the packaged shell keeps heavy AI/runtime packages outside the bundle, so
+# PyInstaller cannot statically see every stdlib module those runtime wheels
+# import later. When CPU semantic search loads torch/transformers at query-time,
+# the frozen app still needs a complete-enough stdlib surface (for example pdb,
+# timeit, http.cookies, asyncio.base_events, concurrent.futures.process). We
+# therefore ship a curated stdlib support set alongside the frozen app instead of
+# discovering missing modules one by one at user runtime.
 _RUNTIME_STDLIB_PACKAGES = (
     '_pyrepl',
     'asyncio',
@@ -125,6 +148,7 @@ for package in _RUNTIME_STDLIB_PACKAGES:
     hiddenimports.extend(_safe_collect_hidden(package))
 hiddenimports.extend(_RUNTIME_STDLIB_MODULES)
 
+# Keep the legacy minimal declarations too; they are harmless once deduped.
 for package in (
     'asyncio',
     'concurrent',
@@ -132,7 +156,9 @@ for package in (
     'multiprocessing',
 ):
     hiddenimports.extend(_safe_collect_hidden(package))
-hiddenimports.extend(['timeit'])
+hiddenimports.extend([
+    'timeit',
+])
 
 hiddenimports = sorted(set(hiddenimports))
 excludes = [
@@ -158,15 +184,26 @@ excludes = [
     'sentence_transformers',
     'numpy',
     'pandas',
-    'PySide6',
-    'shiboken6',
+    'PySide6.QtWebEngine',
+    'PySide6.QtWebEngineCore',
+    'PySide6.Qt3DCore',
+    'PySide6.Qt3DExtras',
+    'PySide6.Qt3DInput',
+    'PySide6.Qt3DLogic',
+    'PySide6.Qt3DRender',
+    'PySide6.QtQml',
+    'PySide6.QtQmlCore',
+    'PySide6.QtQmlModels',
+    'PySide6.QtQuick',
+    'PySide6.QtQuickControls2',
+    'PySide6.QtQuickWidgets',
 ]
 
 block_cipher = None
 
 
 a = Analysis(
-    ['launcher_mcp.py'],
+    ['launcher.py'],
     pathex=[str(ROOT)],
     binaries=binaries,
     datas=datas,
@@ -185,12 +222,12 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='OmniClipRAG-MCP',
+    name='Caelune',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -208,5 +245,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='OmniClipRAG-MCP',
+    name='Caelune',
 )

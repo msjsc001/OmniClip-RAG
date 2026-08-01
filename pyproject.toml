@@ -1,7 +1,7 @@
 [project]
-name = "omniclip-rag"
-version = "0.4.13"
-description = "Local-first desktop RAG for Markdown and Logseq vaults."
+name = "caelune"
+version = "0.5.0"
+description = "Caelune is a local-first desktop RAG for private Markdown, PDF, and Tika-backed knowledge bases."
 readme = "README.md"
 requires-python = ">=3.13"
 license = { file = "LICENSE" }
@@ -15,5 +15,5 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/EllisMorrow/OmniClip-RAG"
-Documentation = "https://msjsc001.github.io/OmniClip-RAG/"
+Repository = "https://github.com/EllisMorrow/Caelune"
+Documentation = "https://ellismorrow.github.io/Caelune/"

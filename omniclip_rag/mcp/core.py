@@ -46,7 +46,7 @@ class OmniClipMcpApplication:
         self.bundle = context.bundle
         self.service = context.service
         self.server = FastMCP(
-            'OmniClip RAG MCP Server',
+            'Caelune MCP Server',
             instructions=(
                 'Use omniclip.status to inspect readiness and degradation before deep search. '
                 'Use omniclip.search for read-only local knowledge retrieval.'
@@ -58,7 +58,7 @@ class OmniClipMcpApplication:
     def _register_tools(self) -> None:
         @self.server.tool(
             name=MCP_STATUS_TOOL,
-            description='Return OmniClip query readiness, runtime status, and current live snapshot.',
+            description='Return Caelune query readiness, runtime status, and current live snapshot.',
             annotations=_READ_ONLY_ANNOTATIONS,
         )
         def status() -> types.CallToolResult:
@@ -66,7 +66,7 @@ class OmniClipMcpApplication:
 
         @self.server.tool(
             name=MCP_SEARCH_TOOL,
-            description='Search OmniClip local knowledge across markdown, PDF, and Tika-backed sources.',
+            description='Search Caelune local knowledge across Markdown, PDF, and Tika-backed sources.',
             annotations=_READ_ONLY_ANNOTATIONS,
         )
         def search(
@@ -172,7 +172,7 @@ class OmniClipMcpApplication:
             return (
                 {
                     'error_code': 'index_not_ready',
-                    'message': 'OmniClip indexes are not ready yet.',
+                    'message': 'Caelune indexes are not ready yet.',
                     'status': status_payload,
                 },
                 True,
@@ -328,7 +328,7 @@ class OmniClipMcpApplication:
         warning_line = f"Warnings: {', '.join(warnings)}" if warnings else 'Warnings: none'
         return '\n'.join(
             (
-                'OmniClip MCP status',
+                'Caelune MCP status',
                 f"Version: {payload.get('version')}",
                 f"Query ready: {payload.get('query_ready')}",
                 f"Default mode: {payload.get('default_mode')}",
@@ -342,7 +342,7 @@ class OmniClipMcpApplication:
 
     def _format_search_text(self, payload: dict[str, Any]) -> str:
         lines = [
-            f"OmniClip search returned {payload.get('returned', 0)} result(s).",
+            f"Caelune search returned {payload.get('returned', 0)} result(s).",
             f"Effective mode: {payload.get('effective_mode')}.",
         ]
         warnings = payload.get('warnings') or []
@@ -355,7 +355,7 @@ class OmniClipMcpApplication:
 
     def _format_search_error_text(self, payload: dict[str, Any]) -> str:
         lines = [
-            'OmniClip search failed.',
+            'Caelune search failed.',
             f"Error: {payload.get('error_code')}",
             f"Message: {payload.get('message')}",
         ]

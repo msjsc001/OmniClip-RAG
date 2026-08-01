@@ -2389,13 +2389,13 @@ class QtUiTests(unittest.TestCase):
             self.assertIn('-Source', command)
             self.assertIn('mirror', command)
             self.assertIn('-WaitForProcessName', command)
-            self.assertIn('OmniClipRAG', command)
+            self.assertIn('Caelune', command)
             self.assertIn('-Component', command)
             self.assertIn('semantic-core', command)
             self.assertIn('-DiagnosticsPath', command)
             self.assertIn('-ResultPath', command)
             self.assertEqual(popen_mock.call_args.kwargs['cwd'], str(install_script.parent))
-            self.assertEqual(popen_mock.call_args.kwargs['env']['OMNICLIP_RUNTIME_ROOT'], str(runtime_root))
+            self.assertEqual(popen_mock.call_args.kwargs['env']['CAELUNE_RUNTIME_ROOT'], str(runtime_root))
             self.assertFalse(workspace.runtime_install_progress_label.isHidden())
             self.assertIn(text('zh-CN', 'runtime_component_semantic_core'), workspace.runtime_install_progress_label.text())
         finally:
@@ -2609,9 +2609,9 @@ class QtUiTests(unittest.TestCase):
             }):
                 context = workspace._runtime_manual_context('semantic-core')
             self.assertEqual(context['runtime_dir'], str(runtime_root))
-            self.assertIn('OMNICLIP_RUNTIME_ROOT', context['official_install_command'])
+            self.assertIn('CAELUNE_RUNTIME_ROOT', context['official_install_command'])
             self.assertIn(str(runtime_root), context['official_install_command'])
-            self.assertIn('OMNICLIP_RUNTIME_ROOT', context['mirror_install_command'])
+            self.assertIn('CAELUNE_RUNTIME_ROOT', context['mirror_install_command'])
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -2631,7 +2631,7 @@ class QtUiTests(unittest.TestCase):
                  patch('omniclip_rag.ui_next_qt.config_workspace.subprocess.Popen') as popen_mock:
                 workspace._launch_download_log_terminal(
                     log_path=log_path,
-                    title='OmniClip RAG - test',
+                    title='Caelune - test',
                     worker_command=worker_command,
                 )
             popen_mock.assert_called_once()
@@ -2718,7 +2718,7 @@ class QtUiTests(unittest.TestCase):
                 log_path=log_path,
                 pid_path=log_path.with_suffix('.pid'),
                 result_path=log_path.with_suffix('.result.json'),
-                terminal_title='OmniClip RAG - test',
+                terminal_title='Caelune - test',
                 start_message='start',
                 local_files_only=False,
                 on_success=lambda _payload: None,
@@ -3173,7 +3173,8 @@ class QtUiTests(unittest.TestCase):
         try:
             workspace.data_root_combo.setCurrentText(str(legacy_root))
             app.processEvents()
-            self.assertIn('已识别现有 OmniClip 环境', workspace.workspace_summary_label.text())
+            self.assertIn('已识别现有 Caelune 环境', workspace.workspace_summary_label.text())
+            self.assertIn('legacy 结构', workspace.workspace_summary_label.text())
             self.assertIn('legacy', workspace.workspace_summary_label.text())
             self.assertIn(str(legacy_root), workspace.workspace_summary_label.text())
         finally:

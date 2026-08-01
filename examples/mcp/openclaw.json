@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "omniclip-rag": {
+    "caelune": {
       "transport": "stdio",
-      "command": "D:\\Apps\\OmniClip RAG\\dist\\OmniClipRAG-MCP-v0.4.13\\OmniClipRAG-MCP.exe",
+      "command": "D:\\Apps\\Caelune\\dist\\Caelune-MCP-v0.5.0\\Caelune-MCP.exe",
       "args": []
     }
   }

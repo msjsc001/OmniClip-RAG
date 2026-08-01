@@ -11,8 +11,10 @@ from .errors import ActiveDataRootUnavailableError
 
 BOOTSTRAP_SCHEMA_VERSION = 2
 BOOTSTRAP_FILENAME = "bootstrap.json"
-BOOTSTRAP_PATH_ENV = "OMNICLIP_BOOTSTRAP_PATH"
-DATA_ROOT_OVERRIDE_ENV = "OMNICLIP_DATA_ROOT"
+BOOTSTRAP_PATH_ENV = "CAELUNE_BOOTSTRAP_PATH"
+DATA_ROOT_OVERRIDE_ENV = "CAELUNE_DATA_ROOT"
+LEGACY_BOOTSTRAP_PATH_ENV = "OMNICLIP_BOOTSTRAP_PATH"
+LEGACY_DATA_ROOT_OVERRIDE_ENV = "OMNICLIP_DATA_ROOT"
 
 
 @dataclass(slots=True)
@@ -33,10 +35,18 @@ class ResolvedActiveDataRoot:
 
 
 def bootstrap_file_path() -> Path:
-    override = str(os.environ.get(BOOTSTRAP_PATH_ENV) or "").strip()
+    override = str(
+        os.environ.get(BOOTSTRAP_PATH_ENV)
+        or os.environ.get(LEGACY_BOOTSTRAP_PATH_ENV)
+        or ""
+    ).strip()
     if override:
         return Path(override).expanduser().resolve()
-    return default_bootstrap_root().resolve() / BOOTSTRAP_FILENAME
+    current_pointer = default_bootstrap_root().resolve() / BOOTSTRAP_FILENAME
+    legacy_pointer = legacy_default_data_root().resolve() / BOOTSTRAP_FILENAME
+    if current_pointer.exists() or not legacy_pointer.exists():
+        return current_pointer
+    return legacy_pointer
 
 
 def read_bootstrap_pointer() -> dict[str, object] | None:
@@ -104,7 +114,11 @@ def resolve_active_data_root(explicit_data_root: str | Path | None = None) -> Re
             bootstrap_state="explicit",
         )
 
-    env_value = str(os.environ.get(DATA_ROOT_OVERRIDE_ENV) or "").strip()
+    env_value = str(
+        os.environ.get(DATA_ROOT_OVERRIDE_ENV)
+        or os.environ.get(LEGACY_DATA_ROOT_OVERRIDE_ENV)
+        or ""
+    ).strip()
     if env_value:
         return ResolvedActiveDataRoot(
             path=Path(env_value).expanduser().resolve(),
@@ -116,6 +130,21 @@ def resolve_active_data_root(explicit_data_root: str | Path | None = None) -> Re
 
     if not pointer_path.exists():
         default_root = default_data_root().resolve()
+        legacy_root = legacy_default_data_root().resolve()
+        legacy_probe = probe_data_root(legacy_root, allow_create=False)
+        if legacy_probe.state == "existing":
+            return ResolvedActiveDataRoot(
+                path=legacy_probe.root,
+                source="legacy-default",
+                bootstrap_file=pointer_path,
+                known_data_roots=tuple(
+                    _merge_known_data_roots(
+                        [legacy_probe.root],
+                        _implicit_known_data_roots(active_root=legacy_probe.root),
+                    )
+                ),
+                bootstrap_state="legacy",
+            )
         return ResolvedActiveDataRoot(
             path=default_root,
             source="default",

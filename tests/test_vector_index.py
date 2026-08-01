@@ -566,7 +566,7 @@ class VectorIndexTests(unittest.TestCase):
         self.assertIn(f"-LiteralPath '{expected_root}'", command)
         self.assertNotIn("-LiteralPath ''", command)
         self.assertIn(r"& '.\InstallRuntime.ps1'", command)
-        self.assertIn('-WaitForProcessName OmniClipRAG', command)
+        self.assertIn('-WaitForProcessName Caelune', command)
         self.assertIn('-Component semantic-core', command)
 
     def test_build_runtime_install_command_injects_runtime_root_override_once(self) -> None:
@@ -575,8 +575,8 @@ class VectorIndexTests(unittest.TestCase):
         with patch('omniclip_rag.vector_index._application_root_dir', return_value=expected_root), \
              patch('omniclip_rag.vector_index._install_runtime_script_relative', return_value=r'.\InstallRuntime.ps1'):
             command = build_runtime_install_command('cpu', source='official', component='all', runtime_root=runtime_root)
-        self.assertIn(f"$env:OMNICLIP_RUNTIME_ROOT = '{runtime_root}'", command)
-        self.assertEqual(command.count('OMNICLIP_RUNTIME_ROOT'), 1)
+        self.assertIn(f"$env:CAELUNE_RUNTIME_ROOT = '{runtime_root}'", command)
+        self.assertEqual(command.count('CAELUNE_RUNTIME_ROOT'), 1)
 
     def test_runtime_dependency_issue_returns_guidance_when_imports_are_missing(self) -> None:
         config = AppConfig(

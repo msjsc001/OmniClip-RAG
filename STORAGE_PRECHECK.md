@@ -1,6 +1,6 @@
 # Storage Precheck
 
-OmniClip RAG performs a real preflight estimation before model bootstrap and full indexing.
+Caelune performs a real preflight estimation before model bootstrap and full indexing.
 
 The goal is simple: **fail early when disk space or local model prerequisites are not ready**, instead of letting a long indexing run die halfway through.
 

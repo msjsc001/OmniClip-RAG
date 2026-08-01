@@ -146,7 +146,7 @@ def runtime_probe_environment(*, data_root: str = '') -> dict[str, str]:
     environment = dict(os.environ)
     normalized_root = str(data_root or '').strip()
     if normalized_root:
-        environment['OMNICLIP_DATA_ROOT'] = normalized_root
+        environment['CAELUNE_DATA_ROOT'] = normalized_root
     environment['OMNICLIP_INTERNAL_WORKER'] = '1'
     return environment
 
@@ -165,7 +165,7 @@ def run_runtime_probe_worker(*, probe_kind: str, output_path: str, data_root: st
     target = Path(output_path).expanduser()
     normalized_kind = str(probe_kind or '').strip().lower()
     if str(data_root or '').strip():
-        os.environ['OMNICLIP_DATA_ROOT'] = str(data_root).strip()
+        os.environ['CAELUNE_DATA_ROOT'] = str(data_root).strip()
     payload: dict[str, object]
     exit_code = 0
     try:
@@ -176,7 +176,7 @@ def run_runtime_probe_worker(*, probe_kind: str, output_path: str, data_root: st
             root = Path(str(data_root or '')).expanduser().resolve()
             config = load_config(build_data_paths(root))
             if config is None:
-                raise RuntimeError(f'No OmniClip config found under {root}')
+                raise RuntimeError(f'No Caelune config found under {root}')
             paths = build_data_paths(root, vault_path=config.vault_path)
             service = OmniClipService(config, paths)
             try:
