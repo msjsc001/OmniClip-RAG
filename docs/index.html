@@ -6,7 +6,7 @@
   <title>Caelune | Private Knowledge, Local Retrieval</title>
   <meta name="description" content="Search private Markdown, PDF, and Tika-backed documents locally on Windows. Use hybrid retrieval in the desktop app or connect AI clients through a read-only MCP server.">
   <meta name="robots" content="index,follow">
-  <meta name="theme-color" content="#123B4A">
+  <meta name="theme-color" content="#071a2e">
   <meta name="color-scheme" content="light">
 
   <meta property="og:title" content="Caelune | Private Knowledge, Local Retrieval">
@@ -68,81 +68,45 @@
   </header>
 
   <main id="main-content">
-    <section class="hero" id="top">
-      <div class="container hero-grid">
-        <div class="hero-copy">
-          <p class="eyebrow">
-            <span class="status-dot" aria-hidden="true"></span>
-            <span data-i18n="hero_eyebrow">Windows · Local-first · Read-only MCP</span>
-          </p>
-          <h1 data-i18n="hero_title">Private knowledge.<br>Local retrieval.</h1>
-          <p class="hero-lead" data-i18n="hero_lead">
-            Search Markdown, PDF, and Tika-supported documents with hybrid lexical and semantic retrieval—without uploading your knowledge base.
-          </p>
-          <div class="hero-actions">
-            <a class="button button-primary" href="https://github.com/EllisMorrow/Caelune/releases/latest" target="_blank" rel="noopener noreferrer">
-              <span data-i18n="download_windows">Download Windows (WIN-EXE)</span>
-              <span aria-hidden="true">↗</span>
-            </a>
-            <a class="button button-secondary" href="https://github.com/EllisMorrow/Caelune" target="_blank" rel="noopener noreferrer">
-              <span data-i18n="view_source">View source</span>
-            </a>
+    <div class="hero-stage" id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-scene" aria-hidden="true"></div>
+        <div class="hero-shade" aria-hidden="true"></div>
+        <div class="container hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span data-i18n="hero_eyebrow">Windows · Local-first · Read-only MCP</span>
+            </p>
+            <h1 id="hero-title" data-i18n="hero_title">Private knowledge.<br>Local retrieval.</h1>
+            <p class="hero-lead" data-i18n="hero_lead">
+              Search Markdown, PDF, and Tika-supported documents with hybrid lexical and semantic retrieval—without uploading your knowledge base.
+            </p>
+            <div class="hero-actions">
+              <a class="button button-primary" href="https://github.com/EllisMorrow/Caelune/releases/latest" target="_blank" rel="noopener noreferrer">
+                <span data-i18n="download_windows">Download Windows (WIN-EXE)</span>
+                <span aria-hidden="true">↓</span>
+              </a>
+              <a class="button button-secondary" href="https://github.com/EllisMorrow/Caelune" target="_blank" rel="noopener noreferrer">
+                <span data-i18n="view_source">View source</span>
+                <span aria-hidden="true">↗</span>
+              </a>
+            </div>
+            <ul class="hero-facts" aria-label="Product highlights" data-aria-zh="产品特点">
+              <li data-i18n="fact_local">Indexing and queries stay on this device</li>
+              <li data-i18n="fact_models">CPU and NVIDIA CUDA supported</li>
+              <li data-i18n="fact_license">Open source under the MIT License</li>
+            </ul>
           </div>
-          <ul class="hero-facts" aria-label="Product highlights" data-aria-zh="产品特点">
-            <li data-i18n="fact_local">Indexing and queries stay on this device</li>
-            <li data-i18n="fact_models">CPU and NVIDIA CUDA supported</li>
-            <li data-i18n="fact_license">Open source under the MIT License</li>
-          </ul>
         </div>
+        <p class="hero-scroll-hint" data-i18n="hero_scroll_hint">Explore the system below</p>
+      </section>
+    </div>
 
-        <div class="hero-product" aria-label="Illustration of the Caelune query workflow" data-aria-zh="Caelune 查询流程示意">
-          <div class="app-window app-window-hero">
-            <div class="window-bar">
-              <div class="window-brand">
-                <img src="./assets/favicon.svg" alt="" width="28" height="28">
-                <strong>Caelune</strong>
-              </div>
-              <span class="window-runtime"><i aria-hidden="true"></i><span data-i18n="runtime_ready">Runtime ready</span></span>
-            </div>
-            <div class="window-tabs" aria-hidden="true">
-              <span class="is-active" data-i18n="tab_query">Query</span>
-              <span data-i18n="tab_results">Results</span>
-              <span data-i18n="tab_config">Config</span>
-              <span data-i18n="tab_log">Activity log</span>
-            </div>
-            <div class="query-shell">
-              <div class="query-heading">
-                <div>
-                  <small data-i18n="query_label">QUERY DESK</small>
-                  <strong data-i18n="query_question">What matters most in these notes?</strong>
-                </div>
-                <span class="stage-badge"><i aria-hidden="true"></i><span data-i18n="stage_rerank">Reranking · 4/6</span></span>
-              </div>
-              <div class="search-field">
-                <span data-i18n="query_placeholder">Search your local knowledge base</span>
-                <b data-i18n="search_button">Search</b>
-              </div>
-              <div class="source-row">
-                <span>Markdown</span>
-                <span>PDF</span>
-                <span>Tika</span>
-                <em data-i18n="hybrid_cuda">Hybrid · CUDA</em>
-              </div>
-              <div class="result-preview">
-                <div class="result-score">92</div>
-                <div>
-                  <strong data-i18n="result_title">Decision principles</strong>
-                  <p data-i18n="result_excerpt">The best match is grounded in the original note and keeps its source path.</p>
-                </div>
-                <span class="result-source">Markdown</span>
-              </div>
-            </div>
-          </div>
-          <div class="hero-orbit hero-orbit-one" aria-hidden="true"></div>
-          <div class="hero-orbit hero-orbit-two" aria-hidden="true"></div>
-        </div>
-      </div>
-    </section>
+    <div class="page-content">
+      <svg class="page-wave" viewBox="0 0 1440 120" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+        <path d="M0 51C175 5 306 109 522 66C746 21 856 108 1055 78C1229 52 1322 19 1440 44V120H0Z"></path>
+      </svg>
 
     <section class="signal-strip" aria-label="Core capabilities" data-aria-zh="核心能力">
       <div class="container signal-grid">
@@ -519,6 +483,7 @@
         </div>
       </div>
     </section>
+    </div>
   </main>
 
   <footer class="site-footer">

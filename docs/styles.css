@@ -1621,6 +1621,263 @@ html[lang="zh"] .hero h1 {
   color: var(--navy);
 }
 
+/* The opening scene stays pinned while the paper surface rises over it. */
+.site-header {
+  position: fixed;
+  width: 100%;
+  border-bottom-color: rgba(181, 208, 225, 0.14);
+  background: linear-gradient(180deg, rgba(5, 20, 37, 0.86), rgba(5, 20, 37, 0.42) 72%, transparent);
+  box-shadow: none;
+  transition: background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.site-header .brand {
+  color: #f7dfb6;
+}
+
+.site-header .site-nav a {
+  color: #d6e0e7;
+}
+
+.site-header .site-nav a:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: #fff1d3;
+}
+
+.site-header .language-switch {
+  border-color: rgba(224, 234, 240, 0.22);
+  background: rgba(5, 20, 37, 0.42);
+}
+
+.site-header .language-switch button {
+  color: #b8c7d2;
+}
+
+.site-header .language-switch button[aria-pressed="true"] {
+  background: #f3d6a5;
+  color: #09223a;
+}
+
+.site-header.is-past-hero {
+  border-bottom-color: rgba(18, 59, 74, 0.1);
+  background: rgba(248, 250, 249, 0.92);
+  box-shadow: 0 8px 28px rgba(18, 59, 74, 0.07);
+}
+
+.site-header.is-past-hero .brand {
+  color: var(--navy-deep);
+}
+
+.site-header.is-past-hero .site-nav a {
+  color: #445a64;
+}
+
+.site-header.is-past-hero .site-nav a:hover {
+  background: rgba(18, 59, 74, 0.06);
+  color: var(--navy);
+}
+
+.site-header.is-past-hero .language-switch {
+  border-color: var(--line);
+  background: var(--paper);
+}
+
+.site-header.is-past-hero .language-switch button {
+  color: var(--muted);
+}
+
+.site-header.is-past-hero .language-switch button[aria-pressed="true"] {
+  background: var(--navy);
+  color: #fff;
+}
+
+.hero-stage {
+  position: relative;
+  z-index: 0;
+  height: 200svh;
+  min-height: 1240px;
+  background: #06182b;
+}
+
+.hero-stage .hero {
+  position: sticky;
+  top: 0;
+  height: 100svh;
+  min-height: 620px;
+  display: grid;
+  overflow: hidden;
+  padding: 0;
+  isolation: isolate;
+  background: #06182b;
+}
+
+.hero-scene,
+.hero-shade {
+  position: absolute;
+  inset: 0;
+}
+
+.hero-scene {
+  z-index: -3;
+  background-image: url("./assets/caelune-knowledge-universe.jpg");
+  background-position: center center;
+  background-size: cover;
+  transform: scale(1.012);
+}
+
+.hero-shade {
+  z-index: -2;
+  background:
+    linear-gradient(90deg, rgba(3, 16, 30, 0.96) 0%, rgba(4, 18, 33, 0.86) 25%, rgba(4, 18, 33, 0.28) 52%, rgba(4, 18, 33, 0.04) 74%),
+    linear-gradient(180deg, rgba(4, 17, 31, 0.32), transparent 46%, rgba(3, 15, 27, 0.28));
+}
+
+.hero-stage .hero-grid {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 540px) minmax(0, 1fr);
+  align-items: center;
+  gap: 0;
+  padding-top: 74px;
+  padding-bottom: clamp(92px, 10vh, 138px);
+}
+
+.hero-stage .hero-copy {
+  position: relative;
+  z-index: 1;
+  max-width: 540px;
+}
+
+.hero-stage .eyebrow {
+  border-color: rgba(177, 207, 224, 0.24);
+  background: rgba(6, 28, 49, 0.58);
+  color: #bdcbd5;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.hero-stage .status-dot {
+  background: #f7c56e;
+  box-shadow: 0 0 0 4px rgba(247, 197, 110, 0.13), 0 0 16px rgba(247, 197, 110, 0.55);
+}
+
+.hero-stage .hero h1,
+html[lang="zh"] .hero-stage .hero h1 {
+  max-width: 8.5em;
+  margin-bottom: 24px;
+  color: #f7dfb6;
+  text-wrap: balance;
+  text-shadow: 0 4px 32px rgba(0, 0, 0, 0.28);
+}
+
+.hero-stage .hero h1 {
+  font-size: clamp(4.2rem, 7vw, 6.4rem);
+}
+
+html[lang="zh"] .hero-stage .hero h1 {
+  font-size: clamp(4rem, 6.6vw, 5.9rem);
+}
+
+.hero-stage .hero-lead {
+  max-width: 520px;
+  color: #b8c6d0;
+  font-size: clamp(1.02rem, 1.45vw, 1.18rem);
+}
+
+.hero-stage .button-primary {
+  background: #f5d9aa;
+  color: #0b2237;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.24), 0 0 34px rgba(247, 197, 110, 0.12);
+}
+
+.hero-stage .button-primary:hover {
+  background: #ffe8c1;
+}
+
+.hero-stage .button-secondary {
+  border-color: rgba(207, 223, 233, 0.34);
+  background: rgba(4, 20, 36, 0.36);
+  color: #edf3f6;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.hero-stage .button-secondary:hover {
+  border-color: rgba(247, 223, 182, 0.72);
+  background: rgba(9, 32, 53, 0.68);
+}
+
+.hero-stage .hero-facts {
+  color: #aebdc8;
+}
+
+.hero-stage .hero-facts li::before {
+  background: #f4c46e;
+}
+
+.hero-scroll-hint {
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  bottom: clamp(104px, 10vw, 144px);
+  margin: 0;
+  transform: translateX(-50%);
+  color: rgba(231, 237, 241, 0.74);
+  font-size: 0.76rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.hero-scroll-hint::after {
+  width: 9px;
+  height: 9px;
+  display: block;
+  margin: 7px auto 0;
+  transform: rotate(45deg);
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  content: "";
+  animation: hero-nudge 1.8s ease-in-out infinite;
+}
+
+@keyframes hero-nudge {
+  0%, 100% { transform: translateY(0) rotate(45deg); opacity: 0.45; }
+  50% { transform: translateY(5px) rotate(45deg); opacity: 1; }
+}
+
+.page-content {
+  position: relative;
+  z-index: 2;
+  margin-top: -100svh;
+  background: var(--page);
+  box-shadow: 0 -28px 80px rgba(3, 14, 25, 0.08);
+}
+
+.page-wave {
+  position: absolute;
+  z-index: 0;
+  left: 0;
+  top: 1px;
+  width: 100%;
+  height: clamp(72px, 8vw, 120px);
+  display: block;
+  transform: translateY(-99%);
+  color: var(--page);
+  pointer-events: none;
+}
+
+.page-wave path {
+  fill: currentColor;
+}
+
+.page-content > section {
+  position: relative;
+  z-index: 1;
+}
+
 @media (max-width: 1040px) {
   .header-inner {
     grid-template-columns: auto auto;
@@ -2137,6 +2394,113 @@ html[lang="zh"] .hero h1 {
   }
 }
 
+@media (min-width: 701px) and (max-width: 1040px) {
+  .hero-stage .hero-grid {
+    grid-template-columns: minmax(0, 560px) minmax(0, 1fr);
+    padding-top: 132px;
+  }
+
+  .hero-scene {
+    background-position: 58% center;
+  }
+}
+
+@media (max-width: 700px) {
+  .site-header:not(.is-past-hero) .site-nav a[href="#download"] {
+    border-color: rgba(247, 223, 182, 0.42);
+    background: #f3d6a5;
+    color: #09223a;
+  }
+
+  .site-header:not(.is-past-hero) .language-switch {
+    background: rgba(5, 20, 37, 0.62);
+  }
+
+  .hero-stage {
+    height: 170svh;
+    min-height: 1020px;
+  }
+
+  .hero-stage .hero {
+    min-height: 600px;
+  }
+
+  .hero-scene {
+    background-position: 67% center;
+    transform: scale(1.02);
+  }
+
+  .hero-shade {
+    background:
+      linear-gradient(180deg, rgba(3, 16, 30, 0.86) 0%, rgba(3, 16, 30, 0.7) 51%, rgba(3, 16, 30, 0.22) 78%, rgba(3, 15, 27, 0.48) 100%),
+      linear-gradient(90deg, rgba(3, 16, 30, 0.78), rgba(3, 16, 30, 0.16));
+  }
+
+  .hero-stage .hero-grid {
+    grid-template-columns: 1fr;
+    align-items: start;
+    padding-top: 112px;
+    padding-bottom: 128px;
+  }
+
+  .hero-stage .hero-copy {
+    max-width: 100%;
+  }
+
+  .hero-stage .eyebrow {
+    margin-bottom: 18px;
+    padding: 7px 10px;
+    font-size: 0.68rem;
+  }
+
+  .hero-stage .hero h1,
+  html[lang="zh"] .hero-stage .hero h1 {
+    max-width: 7.5em;
+    margin-bottom: 18px;
+    font-size: clamp(2.85rem, 14vw, 4rem);
+    line-height: 1.02;
+  }
+
+  .hero-stage .hero-lead {
+    max-width: 30em;
+    margin-bottom: 22px;
+    color: #c5d0d8;
+    font-size: 0.96rem;
+    line-height: 1.55;
+  }
+
+  .hero-stage .hero-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 9px;
+  }
+
+  .hero-stage .hero-actions .button {
+    width: min(100%, 320px);
+    min-height: 46px;
+  }
+
+  .hero-stage .hero-facts {
+    max-width: 330px;
+    margin-top: 19px;
+    color: #bdc9d1;
+    font-size: 0.76rem;
+  }
+
+  .hero-scroll-hint {
+    bottom: 88px;
+    font-size: 0.68rem;
+  }
+
+  .page-content {
+    margin-top: -70svh;
+  }
+
+  .page-wave {
+    height: 62px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
@@ -2147,5 +2511,9 @@ html[lang="zh"] .hero h1 {
   *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .hero-scroll-hint::after {
+    animation: none;
   }
 }

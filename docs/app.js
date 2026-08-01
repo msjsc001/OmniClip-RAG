@@ -14,6 +14,7 @@
       hero_eyebrow: "Windows · Local-first · Read-only MCP",
       hero_title: "Private knowledge.<br>Local retrieval.",
       hero_lead: "Search Markdown, PDF, and Tika-supported documents with hybrid lexical and semantic retrieval—without uploading your knowledge base.",
+      hero_scroll_hint: "Explore the system below",
       download_windows: "Download Windows (WIN-EXE)",
       view_source: "View source",
       fact_local: "Indexing and queries stay on this device",
@@ -144,6 +145,7 @@
       hero_eyebrow: "Windows · 本地优先 · 只读 MCP",
       hero_title: "私人知识。<br>本地检索。",
       hero_lead: "在本机混合检索 Markdown、PDF 与 Tika 支持的文档，无需上传你的知识库。",
+      hero_scroll_hint: "继续向下了解",
       download_windows: "下载 Windows 版（WIN-EXE）",
       view_source: "查看源代码",
       fact_local: "索引和查询都在当前设备完成",
@@ -350,5 +352,26 @@
     button.addEventListener("click", () => applyLanguage(button.dataset.language));
   });
 
+  const siteHeader = document.querySelector(".site-header");
+  const pageContent = document.querySelector(".page-content");
+  let headerFramePending = false;
+
+  function syncHeaderTheme() {
+    headerFramePending = false;
+    if (!siteHeader || !pageContent) return;
+    const contentHasReachedHeader = pageContent.getBoundingClientRect().top <= siteHeader.offsetHeight + 12;
+    siteHeader.classList.toggle("is-past-hero", contentHasReachedHeader);
+  }
+
+  function requestHeaderSync() {
+    if (headerFramePending) return;
+    headerFramePending = true;
+    window.requestAnimationFrame(syncHeaderTheme);
+  }
+
+  window.addEventListener("scroll", requestHeaderSync, { passive: true });
+  window.addEventListener("resize", requestHeaderSync);
+
   applyLanguage(preferredLanguage());
+  syncHeaderTheme();
 })();
