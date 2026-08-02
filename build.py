@@ -46,6 +46,13 @@ FORBIDDEN_BUNDLE_PACKAGE_PREFIXES = (
 )
 RELEASE_COPY_IGNORE = shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo')
 _VERSION_PATTERN = re.compile(r"__version__\s*=\s*'([^']+)'")
+SHIBOKEN_PORTABLE_FILES = (
+    'MSVCP140.dll',
+    'Shiboken.pyd',
+    'shiboken6.abi3.dll',
+    'VCRUNTIME140.dll',
+    'VCRUNTIME140_1.dll',
+)
 
 
 def _read_app_version() -> str:
@@ -249,6 +256,27 @@ def _prepare_bundled_python(target: BuildTarget) -> None:
         raise RuntimeError(f'Bundled Python executable is missing after extraction: {python_exe}')
 
 
+def _prepare_qt_portability_fallback(target: BuildTarget) -> None:
+    if target.exe_basename != 'Caelune':
+        return
+    payload_root = _bundle_payload_root(target.output_dir)
+    source_dir = payload_root / 'shiboken6'
+    missing = [name for name in SHIBOKEN_PORTABLE_FILES if not (source_dir / name).is_file()]
+    if missing:
+        raise RuntimeError(f'Packaged Shiboken payload is incomplete: {", ".join(missing)}')
+
+    # Some Windows extraction/copy tools have been observed to omit the small
+    # nested shiboken6 directory while leaving the rest of a PyInstaller onedir
+    # bundle intact. Keep one compact recovery copy outside _internal so the
+    # runtime hook can restore the required binaries before PySide6 imports.
+    fallback_dir = target.output_dir / 'runtime_support' / 'qt_fallback' / 'shiboken6'
+    if fallback_dir.exists():
+        _remove_path(fallback_dir)
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    for name in SHIBOKEN_PORTABLE_FILES:
+        shutil.copy2(source_dir / name, fallback_dir / name)
+
+
 def _is_forbidden_bundle_package(part: str) -> bool:
     normalized = part.strip().lower().replace('-', '_')
     for prefix in FORBIDDEN_BUNDLE_PACKAGE_PREFIXES:
@@ -275,6 +303,10 @@ def _audit_bundle(target: BuildTarget) -> None:
                 payload_root / 'resources' / 'app_icon.ico',
                 payload_root / 'resources' / 'app_icon.png',
             )
+        )
+        required_resources.extend(
+            target.output_dir / 'runtime_support' / 'qt_fallback' / 'shiboken6' / name
+            for name in SHIBOKEN_PORTABLE_FILES
         )
     for required in required_resources:
         if not required.exists():
@@ -351,6 +383,7 @@ def main(argv: list[str] | None = None) -> int:
         _install_staged_bundle(target)
         _copy_support_files(target)
         _prepare_bundled_python(target)
+        _prepare_qt_portability_fallback(target)
         if not args.skip_audit:
             _audit_bundle(target)
         _build_release_zip(target)

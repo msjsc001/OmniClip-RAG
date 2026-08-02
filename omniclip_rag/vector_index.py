@@ -228,6 +228,12 @@ def _query_memory_pressure_snapshot() -> dict[str, object]:
     }
 
 
+def query_memory_pressure_snapshot() -> dict[str, object]:
+    """Return the privacy-safe memory values used by query resource guards."""
+
+    return dict(_query_memory_pressure_snapshot())
+
+
 _RUNTIME_STDLIB_SUPPORT_READY: set[str] = set()
 _RUNTIME_STDLIB_SUPPORT_LOCK = threading.Lock()
 _RUNTIME_STDLIB_SUPPORT_LOGGED = False
@@ -1461,6 +1467,8 @@ _RUNTIME_REQUIRED_MARKERS = {
     'pandas': 'pandas',
     'scipy': 'scipy',
 }
+_REQUIRED_TRANSFORMERS_VERSION = '4.57.6'
+_KNOWN_INCOMPATIBLE_TRANSFORMERS_VERSIONS = {'4.57.2'}
 _CUDA_SETUP_GUIDE_URL = 'https://pytorch.org/get-started/locally/'
 _RUNTIME_PACKAGE_SOURCE_URLS = {
     'official': 'https://pypi.org/simple',
@@ -1640,6 +1648,13 @@ def runtime_component_status(component_id: str) -> dict[str, object]:
     pending_match = bool(set(layout.get('runtime_pending_components') or []).intersection(pending_aliases | {'all'}))
     if pending_match and not live_ready:
         status = 'pending'
+    package_versions = _runtime_component_package_versions(runtime_dir, normalized_component)
+    compatibility_issues: list[str] = []
+    transformers_version = str(package_versions.get('transformers') or '')
+    if normalized_component == 'semantic-core' and transformers_version in _KNOWN_INCOMPATIBLE_TRANSFORMERS_VERSIONS:
+        compatibility_issues.append(
+            f'transformers {transformers_version} 与本地 Reranker 不兼容；需要 {_REQUIRED_TRANSFORMERS_VERSION}'
+        )
     return {
         'component_id': component_id,
         'status': status,
@@ -1649,7 +1664,39 @@ def runtime_component_status(component_id: str) -> dict[str, object]:
         'total_count': total_count,
         'cleanup_patterns': tuple(component.get('cleanup_patterns', ())),
         'profile': component_profile,
+        'package_versions': package_versions,
+        'compatible': not compatibility_issues,
+        'compatibility_issues': compatibility_issues,
     }
+
+
+def _runtime_component_package_versions(runtime_dir: Path, component_id: str) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    roots = runtime_component_live_roots(runtime_dir, component_id)
+    for root in roots:
+        manifest_path = Path(root) / '_runtime_manifest.json'
+        if manifest_path.exists():
+            try:
+                payload = json.loads(manifest_path.read_text(encoding='utf-8'))
+            except Exception:
+                payload = {}
+            for entry in [*(payload.get('requirements') or []), *(payload.get('artifacts') or [])]:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get('name') or '').strip().lower().replace('_', '-')
+                version = str(entry.get('version') or '').strip()
+                if name and version:
+                    versions[name] = version
+        for package_name in ('transformers', 'sentence-transformers', 'tokenizers', 'torch'):
+            if package_name in versions:
+                continue
+            normalized = package_name.replace('-', '_')
+            for dist_info in Path(root).glob(f'{normalized}-*.dist-info'):
+                match = re.match(rf'^{re.escape(normalized)}-(.+)\.dist-info$', dist_info.name, re.IGNORECASE)
+                if match:
+                    versions[package_name] = match.group(1)
+                    break
+    return dict(sorted(versions.items()))
 
 
 def build_runtime_install_command(
@@ -1795,6 +1842,7 @@ def runtime_trace_metadata() -> dict[str, object]:
         },
         'runtime-instance',
     )
+    package_versions = _runtime_component_package_versions(runtime_dir, 'semantic-core') if runtime_dir.exists() else {}
     return {
         'runtime_root': _safe_realpath(runtime_dir),
         'runtime_preferred_root': _safe_realpath(runtime_state.get('preferred_runtime_dir') or ''),
@@ -1802,7 +1850,21 @@ def runtime_trace_metadata() -> dict[str, object]:
         'live_runtime_id': live_runtime_id,
         'pending_runtime_id': pending_runtime_id,
         'runtime_instance_id': runtime_instance_id,
+        'runtime_package_versions': package_versions,
+        'transformers_version': str(package_versions.get('transformers') or ''),
+        'sentence_transformers_version': str(package_versions.get('sentence-transformers') or ''),
+        'tokenizers_version': str(package_versions.get('tokenizers') or ''),
     }
+
+
+def runtime_transformers_compatibility_issue() -> str:
+    version = str(runtime_trace_metadata().get('transformers_version') or '')
+    if version in _KNOWN_INCOMPATIBLE_TRANSFORMERS_VERSIONS:
+        return (
+            f'Runtime transformers {version} has a known local Reranker loading regression; '
+            f'install {_REQUIRED_TRANSFORMERS_VERSION} through Runtime repair.'
+        )
+    return ''
 
 _RUNTIME_REQUIRED_IMPORTS = (
     ('torch', 'torch'),

@@ -1615,6 +1615,16 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _selected_markdown_vaults(self) -> list[str]:
         return list(self._normalize_md_selected_vaults(self._md_selected_vaults, active_vault=self.vault_edit.text().strip()))
 
+    @staticmethod
+    def _source_directory_exists(path: str) -> bool:
+        normalized = normalize_vault_path(path)
+        if not normalized:
+            return False
+        try:
+            return Path(normalized).is_dir()
+        except OSError:
+            return False
+
     def _is_md_vault_selected(self, vault: str) -> bool:
         normalized = normalize_vault_path(vault).lower()
         return any(normalize_vault_path(item).lower() == normalized for item in self._selected_markdown_vaults())
@@ -1627,23 +1637,26 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 ready.append(snapshot)
         return ready
 
-    def _md_vault_status_text(self, vault: str, snapshot: dict[str, object] | None) -> str:
+    def _md_vault_index_status_text(self, vault: str, snapshot: dict[str, object] | None, *, path_ready: bool) -> str:
         if normalize_vault_path(vault) in self._md_watch_stopping:
             return self._tr('md_vault_state_watch_stopping')
-        if normalize_vault_path(vault) == normalize_vault_path(self.vault_edit.text().strip()):
-            if self._watch_active and vault in self._md_watch_workers:
-                return self._tr('md_vault_state_watching')
-        if vault in self._md_watch_workers:
+        if normalize_vault_path(vault) in self._md_watch_workers:
             return self._tr('md_vault_state_watching')
         if not isinstance(snapshot, dict):
             return self._tr('md_vault_state_unknown')
         if snapshot.get('pending_rebuild'):
             return self._tr('md_vault_state_pending')
         if snapshot.get('index_ready'):
-            return self._tr('md_vault_state_ready')
+            return self._tr('md_vault_state_ready_offline' if not path_ready else 'md_vault_state_ready')
         if snapshot.get('index_state') == 'checking':
             return self._tr('md_vault_state_checking')
         return self._tr('md_vault_state_missing')
+
+    def _md_vault_status_text(self, vault: str, snapshot: dict[str, object] | None) -> str:
+        path_ready = self._source_directory_exists(vault)
+        path_text = self._tr('source_path_ready' if path_ready else 'source_path_missing')
+        index_text = self._md_vault_index_status_text(vault, snapshot, path_ready=path_ready)
+        return self._tr('source_and_index_status', path=path_text, index=index_text)
 
     def _md_vault_stats_text(self, snapshot: dict[str, object] | None) -> str:
         if not isinstance(snapshot, dict):
@@ -1662,6 +1675,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         normalized = normalize_vault_path(vault)
+        source_ready = self._source_directory_exists(normalized)
 
         def _add_button(
             text_key: str,
@@ -1680,8 +1694,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             button.setEnabled(not self._busy and enabled)
             layout.addWidget(button)
 
-        _add_button('md_vault_row_preflight', 'secondary', lambda _checked=False, v=normalized: self._run_markdown_preflight_for_vault(v))
-        _add_button('md_vault_row_rebuild', 'primary', lambda _checked=False, v=normalized: self._run_markdown_rebuild_for_vault(v))
+        _add_button('md_vault_row_preflight', 'secondary', lambda _checked=False, v=normalized: self._run_markdown_preflight_for_vault(v), enabled=source_ready)
+        _add_button('md_vault_row_rebuild', 'primary', lambda _checked=False, v=normalized: self._run_markdown_rebuild_for_vault(v), enabled=source_ready)
         watch_stopping = normalized in self._md_watch_stopping
         if watch_stopping:
             watch_key = 'md_vault_row_watch_stopping'
@@ -1691,7 +1705,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             watch_key,
             'secondary',
             lambda _checked=False, v=normalized: self._toggle_watch_for_vault(v),
-            enabled=not watch_stopping,
+            enabled=not watch_stopping and (source_ready or normalized in self._md_watch_workers),
         )
         _add_button(
             'remove_saved_vault',
@@ -1731,6 +1745,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 directory_item = QtWidgets.QTableWidgetItem(normalized)
                 directory_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
                 directory_item.setToolTip(normalized)
+                if not self._source_directory_exists(normalized):
+                    directory_item.setForeground(QtGui.QBrush(QtGui.QColor(self._theme.colors['chip_warn_fg'])))
                 table.setItem(row, 2, directory_item)
                 status_item = QtWidgets.QTableWidgetItem(self._md_vault_status_text(normalized, snapshot))
                 status_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
@@ -1966,13 +1982,15 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self.bootstrap_reranker_button.setEnabled(not self._busy)
 
     def _refresh_overview_chips(self) -> None:
-        try:
-            vault_path = Path(self.vault_edit.text().strip()).expanduser()
-            vault_ready = bool(self.vault_edit.text().strip()) and vault_path.exists() and vault_path.is_dir()
-        except OSError:
-            vault_ready = False
-        self.vault_chip.setText(self._tr('vault_ready') if vault_ready else self._tr('vault_missing'))
-        self._set_chip_style(self.vault_chip, ok=vault_ready)
+        configured_vault = normalize_vault_path(self.vault_edit.text().strip())
+        vault_ready = self._source_directory_exists(configured_vault)
+        if vault_ready:
+            self.vault_chip.setText(self._tr('vault_ready'))
+        elif configured_vault:
+            self.vault_chip.setText(self._tr('vault_source_missing'))
+        else:
+            self.vault_chip.setText(self._tr('vault_missing'))
+        self._set_chip_style(self.vault_chip, ok=vault_ready, warn=bool(configured_vault) and not vault_ready)
         model_ready = self._is_model_ready()
         model_name = self._current_model_name()
         self.model_chip.setText(self._tr('model_ready_named', model=model_name) if model_ready else self._tr('model_missing_named', model=model_name))
@@ -2573,7 +2591,18 @@ class ConfigWorkspace(QtWidgets.QWidget):
         pending_status = str(state.get('status') or '').strip().lower() == 'pending'
         extra_failures: list[str] = []
         base_ready = bool(state.get('ready'))
-        deferred_semantic_probe = normalized_component == 'semantic-core' and runtime_probe_deferred and base_ready
+        compatibility_issues = [
+            str(item).strip()
+            for item in list(state.get('compatibility_issues') or [])
+            if str(item).strip()
+        ]
+        extra_failures.extend(compatibility_issues)
+        deferred_semantic_probe = (
+            normalized_component == 'semantic-core'
+            and runtime_probe_deferred
+            and base_ready
+            and not compatibility_issues
+        )
         if normalized_component == 'semantic-core' and not pending_status and not deferred_semantic_probe:
             if 'torch_available' in context and not bool(context.get('torch_available')):
                 detail = str(context.get('torch_error') or self._tr('runtime_missing_unknown')).strip()
@@ -2600,7 +2629,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             state['status'] = 'missing' if int(state.get('installed_count', 0) or 0) <= 0 else 'incomplete'
         usage = runtime_component_usage(component_id, str(context.get('recommended_profile') or 'cpu'))
         state['disk_usage'] = usage.get('disk_usage', '')
-        state['download_usage'] = usage.get('download_usage', '')
+        state['download_usage'] = '约 12 MB' if compatibility_issues and base_ready else usage.get('download_usage', '')
         return state
 
     def _runtime_component_install_target(self, component_id: str, *, context: dict[str, object] | None = None) -> tuple[str, str]:
@@ -3196,7 +3225,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
             layout.addWidget(button, row, column)
             buttons.append(button)
 
-        source_ready = source.state not in {ExtensionDirectoryState.MISSING_TEMPORARILY, ExtensionDirectoryState.REMOVED_CONFIRMED}
+        source_ready = self._extension_source_path_exists(source)
         source_path = source.path
         _add_button(0, 0, 'extensions_row_preflight', 'secondary', lambda _checked=False, p=pipeline, s=source_path: self._run_extension_source_preflight(p, s), enabled=source_ready)
         _add_button(0, 1, 'extensions_row_scan_once', 'secondary', lambda _checked=False, p=pipeline, s=source_path: self._run_extension_source_scan_once(p, s), enabled=source_ready)
@@ -3233,7 +3262,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 status_item = QtWidgets.QTableWidgetItem(self._extension_source_status_text(pipeline, source))
                 status_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
                 status_item.setData(QtCore.Qt.ItemDataRole.UserRole, source.path)
-                if source.state in {ExtensionDirectoryState.MISSING_TEMPORARILY, ExtensionDirectoryState.REMOVED_CONFIRMED}:
+                if not self._extension_source_path_exists(source):
                     status_item.setForeground(QtGui.QBrush(QtGui.QColor(self._theme.colors['chip_warn_fg'])))
                 table.setItem(row, 2, status_item)
 
@@ -3248,19 +3277,18 @@ class ConfigWorkspace(QtWidgets.QWidget):
         finally:
             table.blockSignals(False)
 
-    def _extension_source_status_text(self, pipeline: str, source: ExtensionSourceDirectory) -> str:
-        if source.state == ExtensionDirectoryState.MISSING_TEMPORARILY:
-            return self._tr('extensions_source_state_missing')
+    def _extension_source_path_exists(self, source: ExtensionSourceDirectory) -> bool:
         if source.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
-            return self._tr('extensions_source_state_removed')
-        if not source.selected:
-            return self._tr('extensions_source_state_unselected_kept')
+            return False
+        return self._source_directory_exists(source.path)
+
+    def _extension_source_index_status_key(self, pipeline: str, source: ExtensionSourceDirectory) -> str:
         if source.last_error:
-            return self._tr('extensions_status_error')
+            return 'extensions_status_error'
         if source.state == ExtensionDirectoryState.ERROR:
-            return self._tr('extensions_status_error')
+            return 'extensions_status_error'
         if source.state == ExtensionDirectoryState.STALE:
-            return self._tr('extensions_status_stale')
+            return 'extensions_status_stale'
         pipeline_status = self._extension_status_for_pipeline(pipeline)
         index_state = getattr(pipeline_status, 'index_state', ExtensionIndexState.NOT_BUILT)
         status_keys = {
@@ -3273,29 +3301,47 @@ class ConfigWorkspace(QtWidgets.QWidget):
             ExtensionIndexState.ERROR: 'extensions_status_error',
         }
         if bool(getattr(pipeline_status, 'build_in_progress', False)):
-            return self._tr('extensions_status_building')
+            return 'extensions_status_building'
         if index_state in status_keys:
-            return self._tr(status_keys[index_state])
+            return status_keys[index_state]
         summary = self._extension_source_summaries.get((pipeline, normalize_vault_path(source.path)))
         if summary is not None:
-            return self._tr(
-                'extensions_status_ready'
-                if bool(summary.get('has_indexed_data'))
-                else 'extensions_source_state_enabled_unbuilt'
-            )
+            return 'extensions_source_index_ready' if bool(summary.get('has_indexed_data')) else 'extensions_source_index_not_built'
         if index_state in {ExtensionIndexState.READY, ExtensionIndexState.WATCHING}:
-            return self._tr('extensions_source_state_enabled_checking')
-        return self._tr('extensions_source_state_enabled_unbuilt')
+            return 'extensions_source_index_checking'
+        return 'extensions_source_index_not_built'
+
+    def _extension_source_status_text(self, pipeline: str, source: ExtensionSourceDirectory) -> str:
+        if source.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
+            return self._tr(
+                'source_and_index_status',
+                path=self._tr('extensions_source_path_removed'),
+                index=self._tr('extensions_progress_pending_cleanup'),
+            )
+        path_ready = self._extension_source_path_exists(source)
+        path_text = self._tr('source_path_ready' if path_ready else 'source_path_missing')
+        index_key = self._extension_source_index_status_key(pipeline, source)
+        if not path_ready and index_key == 'extensions_source_index_ready':
+            index_key = 'extensions_source_index_ready_offline'
+        index_text = self._tr(index_key)
+        if not source.selected:
+            return self._tr(
+                'extensions_source_status_with_scope',
+                path=path_text,
+                index=index_text,
+                scope=self._tr('extensions_source_state_unselected_kept'),
+            )
+        return self._tr('source_and_index_status', path=path_text, index=index_text)
 
     def _extension_source_progress_text(self, pipeline: str, source: ExtensionSourceDirectory) -> str:
         key = (pipeline, source.path)
         cached = self._extension_source_progress.get(key, '').strip()
         if cached:
             return cached
-        if source.state == ExtensionDirectoryState.MISSING_TEMPORARILY:
-            return self._tr('extensions_progress_missing')
         if source.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
             return self._tr('extensions_progress_pending_cleanup')
+        if not self._extension_source_path_exists(source):
+            return self._tr('extensions_progress_missing')
         summary = self._extension_source_summaries.get((pipeline, normalize_vault_path(source.path)))
         if summary and bool(summary.get('has_indexed_data')):
             return self._tr(
@@ -4150,12 +4196,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
         source_path = normalize_vault_path(str(payload.get('source_path') or ''))
         action = str(payload.get('action') or 'rebuild')
         report = payload.get('report')
-        self._request_extension_state_reload()
         if bool(getattr(report, 'cancelled', False)):
             message = self._tr('extensions_task_cancelled_resume_available' if bool(getattr(report, 'resume_available', False)) else 'extensions_task_cancelled')
             self._set_extension_source_progress(pipeline, source_path, message)
             self.statusMessageChanged.emit(message)
             self._append_log(message)
+            self._request_extension_state_reload()
             return
         if action == 'delete' and source_path:
             removed = self._remove_extension_source_directory(pipeline, source_path)
@@ -4194,6 +4240,10 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._discard_extension_source_runtime_state(pipeline, source_path)
         self.statusMessageChanged.emit(message)
         self._append_log(message)
+        # Reload only after any row-level removal has been persisted. Starting
+        # the reload before the mutation can race and write the deleted source
+        # back from a stale registry snapshot.
+        self._request_extension_state_reload()
 
     def _load_extension_state(self, paths, vault_path: str, *, defer_source_summaries: bool = False) -> None:
         try:
@@ -4524,17 +4574,17 @@ class ConfigWorkspace(QtWidgets.QWidget):
     def _extension_source_text(self, source: ExtensionSourceDirectory) -> str:
         label = source.source_label or (Path(source.path).name or source.path)
         suffix = ''
-        if source.state == ExtensionDirectoryState.MISSING_TEMPORARILY:
-            suffix = self._tr('extensions_source_state_missing')
-        elif source.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
+        if source.state == ExtensionDirectoryState.REMOVED_CONFIRMED:
             suffix = self._tr('extensions_source_state_removed')
+        elif not self._extension_source_path_exists(source):
+            suffix = self._tr('extensions_source_state_missing')
         elif not source.selected:
             suffix = self._tr('extensions_source_state_disabled')
         return f'{label}{(" · " + suffix) if suffix else ""}\n{source.path}'
 
     def _refresh_extension_overview(self) -> None:
-        pdf_status, pdf_ok, pdf_warn = self._extension_pipeline_status(self._extension_state.pdf_config, self._extension_state.snapshot.pdf)
-        tika_status, tika_ok, tika_warn = self._extension_pipeline_status(self._extension_state.tika_config, self._extension_state.snapshot.tika)
+        pdf_status, pdf_ok, pdf_warn = self._extension_pipeline_status('pdf', self._extension_state.pdf_config, self._extension_state.snapshot.pdf)
+        tika_status, tika_ok, tika_warn = self._extension_pipeline_status('tika', self._extension_state.tika_config, self._extension_state.snapshot.tika)
         self.ext_pdf_chip.setText(self._tr('extensions_pdf_chip', status=pdf_status))
         self._set_chip_style(self.ext_pdf_chip, ok=pdf_ok, warn=pdf_warn)
         self.ext_tika_chip.setText(self._tr('extensions_tika_chip', status=tika_status))
@@ -4543,13 +4593,23 @@ class ConfigWorkspace(QtWidgets.QWidget):
         self.ext_tika_formats_chip.setText(self._tr('extensions_tika_formats_chip', count=tika_count))
         self._set_chip_style(self.ext_tika_formats_chip, ok=tika_count > 0, warn=self._extension_state.tika_config.enabled and tika_count == 0)
 
-    def _extension_pipeline_status(self, config, status) -> tuple[str, bool, bool]:
+    def _extension_pipeline_status(self, pipeline: str, config, status) -> tuple[str, bool, bool]:
         selected_sources = [item for item in config.source_directories if item.selected]
         if not config.enabled:
             return self._tr('extensions_status_not_enabled'), False, False
         if not selected_sources:
             return self._tr('extensions_status_not_configured'), False, True
-        if any(item.state == ExtensionDirectoryState.MISSING_TEMPORARILY for item in selected_sources):
+        missing_sources = [item for item in selected_sources if not self._extension_source_path_exists(item)]
+        if missing_sources:
+            summaries = [
+                self._extension_source_summaries.get((pipeline, normalize_vault_path(item.path)))
+                for item in missing_sources
+            ]
+            known = [item for item in summaries if isinstance(item, dict)]
+            if known and any(bool(item.get('has_indexed_data')) for item in known):
+                return self._tr('extensions_status_missing_index_ready'), False, True
+            if len(known) == len(missing_sources):
+                return self._tr('extensions_status_missing_index_unready'), False, True
             return self._tr('extensions_status_missing'), False, True
         index_state = getattr(status, 'index_state', ExtensionIndexState.NOT_BUILT)
         if index_state == ExtensionIndexState.CANCELLING:

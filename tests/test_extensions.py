@@ -310,15 +310,14 @@ class ExtensionSkeletonTests(unittest.TestCase):
         try:
             workspace._extension_state.snapshot.pdf.index_state = ExtensionIndexState.NOT_BUILT
             workspace._extension_source_summaries = {}
-            self.assertEqual(
-                workspace._extension_source_status_text('pdf', source),
-                text('zh-CN', 'extensions_source_state_enabled_unbuilt'),
-            )
+            status_text = workspace._extension_source_status_text('pdf', source)
+            self.assertIn(text('zh-CN', 'source_path_ready'), status_text)
+            self.assertIn(text('zh-CN', 'extensions_source_index_not_built'), status_text)
 
             workspace._extension_state.snapshot.pdf.index_state = ExtensionIndexState.READY
-            self.assertEqual(
+            self.assertIn(
+                text('zh-CN', 'extensions_source_index_checking'),
                 workspace._extension_source_status_text('pdf', source),
-                text('zh-CN', 'extensions_source_state_enabled_checking'),
             )
 
             workspace._extension_source_summaries[('pdf', str(SAMPLE_ROOT))] = {
@@ -326,16 +325,56 @@ class ExtensionSkeletonTests(unittest.TestCase):
                 'indexed_files': 0,
                 'indexed_chunks': 0,
             }
-            self.assertEqual(
+            self.assertIn(
+                text('zh-CN', 'extensions_source_index_not_built'),
                 workspace._extension_source_status_text('pdf', source),
-                text('zh-CN', 'extensions_source_state_enabled_unbuilt'),
             )
 
             workspace._extension_source_summaries[('pdf', str(SAMPLE_ROOT))]['has_indexed_data'] = True
-            self.assertEqual(
+            self.assertIn(
+                text('zh-CN', 'extensions_source_index_ready'),
                 workspace._extension_source_status_text('pdf', source),
-                text('zh-CN', 'extensions_status_ready'),
             )
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_pdf_and_tika_missing_sources_show_path_and_existing_index_independently(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        missing_source = TEST_ROOT / 'missing-extension-source'
+        paths = ensure_data_paths(str(TEST_ROOT / 'data_missing_extension_source'), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        source = ExtensionSourceDirectory(
+            path=str(missing_source),
+            selected=True,
+            # Simulate a directory disappearing after the registry snapshot was
+            # loaded; the live UI check must not rely on a stale ENABLED state.
+            state=ExtensionDirectoryState.ENABLED,
+        )
+        try:
+            for pipeline in ('pdf', 'tika'):
+                with self.subTest(pipeline=pipeline):
+                    workspace._extension_source_summaries[(pipeline, str(missing_source))] = {
+                        'has_indexed_data': True,
+                        'indexed_files': 3,
+                        'indexed_chunks': 9,
+                    }
+                    status_text = workspace._extension_source_status_text(pipeline, source)
+                    self.assertIn(text('zh-CN', 'source_path_missing'), status_text)
+                    self.assertIn(text('zh-CN', 'extensions_source_index_ready_offline'), status_text)
+
+            workspace._extension_state.pdf_config.enabled = True
+            workspace._extension_state.pdf_config.source_directories = [source]
+            overview, ok, warn = workspace._extension_pipeline_status(
+                'pdf',
+                workspace._extension_state.pdf_config,
+                workspace._extension_state.snapshot.pdf,
+            )
+            self.assertEqual(overview, text('zh-CN', 'extensions_status_missing_index_ready'))
+            self.assertFalse(ok)
+            self.assertTrue(warn)
         finally:
             workspace.deleteLater()
             app.processEvents()

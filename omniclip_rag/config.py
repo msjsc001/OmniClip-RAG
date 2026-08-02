@@ -422,6 +422,17 @@ def save_config(config: AppConfig, paths: DataPaths) -> None:
         saved_vaults=config.vault_paths,
         active_vault=config.vault_path,
     )
+    config.vault_path = _resolve_active_vault_path(
+        config.vault_path,
+        selected_vaults=config.md_selected_vault_paths,
+        saved_vaults=config.vault_paths,
+    )
+    config.vault_paths = _clean_vault_paths(config.vault_paths, active_vault=config.vault_path)
+    config.md_selected_vault_paths = _clean_selected_vault_paths(
+        config.md_selected_vault_paths,
+        saved_vaults=config.vault_paths,
+        active_vault=config.vault_path,
+    )
     config.data_root = str(paths.global_root)
     payload = asdict(config)
     payload["ui_language"] = normalize_language(payload.get("ui_language"))
@@ -454,6 +465,17 @@ def load_config(paths: DataPaths) -> AppConfig | None:
         saved_vaults=cleaned["vault_paths"],
         active_vault=cleaned["vault_path"],
     )
+    cleaned["vault_path"] = _resolve_active_vault_path(
+        cleaned["vault_path"],
+        selected_vaults=cleaned["md_selected_vault_paths"],
+        saved_vaults=cleaned["vault_paths"],
+    )
+    cleaned["vault_paths"] = _clean_vault_paths(cleaned["vault_paths"], active_vault=cleaned["vault_path"])
+    cleaned["md_selected_vault_paths"] = _clean_selected_vault_paths(
+        cleaned["md_selected_vault_paths"],
+        saved_vaults=cleaned["vault_paths"],
+        active_vault=cleaned["vault_path"],
+    )
     cleaned["data_root"] = str(paths.global_root)
     cleaned["ui_language"] = normalize_language(cleaned.get("ui_language"))
     cleaned["ui_theme"] = normalize_ui_theme(cleaned.get("ui_theme"))
@@ -483,6 +505,30 @@ def _clean_vault_paths(vault_paths: list[str], active_vault: str | None = None) 
         seen.add(normalized)
         ordered.append(normalized)
     return ordered
+
+
+def _resolve_active_vault_path(
+    active_vault: str | None,
+    *,
+    selected_vaults: list[str],
+    saved_vaults: list[str],
+) -> str:
+    """Keep the single active workspace aligned with the multi-vault selection.
+
+    Query scope is stored in ``md_selected_vault_paths`` while the Start page and
+    workspace-specific paths use ``vault_path``.  Older configurations could
+    therefore retain a valid selection with an empty active path, making the UI
+    claim that no vault was selected even though queries still used that vault.
+    """
+
+    normalized_active = normalize_vault_path(active_vault)
+    if normalized_active:
+        return normalized_active
+    for candidate in [*(selected_vaults or []), *(saved_vaults or [])]:
+        normalized = normalize_vault_path(candidate)
+        if normalized:
+            return normalized
+    return ""
 
 
 def _clean_selected_vault_paths(

@@ -227,6 +227,82 @@ class RuntimeInstallDriverTests(unittest.TestCase):
         attempts = diagnostics.get('download_attempts') or []
         self.assertGreaterEqual(len(attempts), 2)
 
+    def test_driver_repairs_one_package_by_inheriting_existing_semantic_runtime(self) -> None:
+        local_repo = TEST_ROOT / 'repair_repo'
+        patch_wheel = _build_pure_python_wheel(
+            local_repo,
+            package_name='patch-demo',
+            import_name='patch_demo',
+            version='2.0.0',
+        )
+        runtime_root = TEST_ROOT / 'runtime'
+        live_root = runtime_root / 'components' / 'semantic-core-live'
+        (live_root / 'base_demo').mkdir(parents=True, exist_ok=True)
+        (live_root / 'base_demo' / '__init__.py').write_text("VALUE = 'preserved'\n", encoding='utf-8')
+        (live_root / 'patch_demo').mkdir(parents=True, exist_ok=True)
+        (live_root / 'patch_demo' / '__init__.py').write_text("__version__ = '1.0.0'\n", encoding='utf-8')
+        (live_root / 'patch_demo-1.0.0.dist-info').mkdir(parents=True, exist_ok=True)
+        (live_root / '_runtime_validation.json').write_text('{"validated":true}', encoding='utf-8')
+        (runtime_root / '_runtime_components.json').write_text(
+            json.dumps({'semantic-core': {'path': str(live_root)}}),
+            encoding='utf-8',
+        )
+        manifest_path = TEST_ROOT / 'repair_manifest.json'
+        patch_artifact = {
+            'name': 'patch-demo',
+            'version': '2.0.0',
+            'requirement': 'patch-demo==2.0.0',
+            'filename': patch_wheel.name,
+            'sha256': _sha256(patch_wheel),
+            'source_key': 'local',
+        }
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    'schema_version': 2,
+                    'profile': 'cpu',
+                    'component': 'semantic-core',
+                    'requirements': [
+                        {'name': 'base-demo', 'version': '1.0.0', 'requirement': 'base-demo==1.0.0', 'source_key': 'local'},
+                        {'name': 'patch-demo', 'version': '2.0.0', 'requirement': 'patch-demo==2.0.0', 'source_key': 'local'},
+                    ],
+                    'artifacts': [patch_artifact],
+                    'source_profiles': {
+                        'official': {'local': {'find_links': [str(local_repo)]}},
+                        'mirror': {'local': {'find_links': [str(local_repo)]}},
+                    },
+                    'cleanup_patterns': ['base_demo', 'patch_demo', '*-demo-*.dist-info'],
+                    'required_modules': ['base_demo', 'patch_demo'],
+                    'validation_probes': ['base_demo', 'patch_demo'],
+                    'repair': {
+                        'inherit_component': 'semantic-core',
+                        'require_validated_existing': True,
+                        'minimum_existing_modules': ['base_demo', 'patch_demo'],
+                        'cleanup_patterns': ['patch_demo', 'patch_demo-*.dist-info'],
+                        'artifacts': [patch_artifact],
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding='utf-8',
+        )
+
+        completed, payload_target, diagnostics_path, result_path = self._run_driver(manifest_path)
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stdout + '\n' + completed.stderr)
+        self.assertEqual((payload_target / 'base_demo' / '__init__.py').read_text(encoding='utf-8'), "VALUE = 'preserved'\n")
+        self.assertIn("2.0.0", (payload_target / 'patch_demo' / '__init__.py').read_text(encoding='utf-8'))
+        self.assertFalse((payload_target / 'patch_demo-1.0.0.dist-info').exists())
+        diagnostics = json.loads(diagnostics_path.read_text(encoding='utf-8'))
+        result = json.loads(result_path.read_text(encoding='utf-8'))
+        self.assertEqual(diagnostics['install_mode'], 'repair')
+        self.assertEqual(result['install_mode'], 'repair')
+        self.assertEqual(
+            [item['filename'] for item in result['downloaded_artifacts']],
+            [patch_wheel.name],
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

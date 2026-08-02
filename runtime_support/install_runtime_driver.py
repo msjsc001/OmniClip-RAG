@@ -159,6 +159,132 @@ def _load_manifest(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _registered_component_root(runtime_root: Path, component_name: str) -> Path | None:
+    registry_path = runtime_root / '_runtime_components.json'
+    if registry_path.exists():
+        try:
+            registry = json.loads(registry_path.read_text(encoding='utf-8'))
+        except Exception:
+            registry = {}
+        entry = registry.get(component_name) if isinstance(registry, dict) else None
+        if isinstance(entry, dict):
+            raw_path = str(entry.get('path') or '').strip()
+            if raw_path:
+                candidate = Path(raw_path)
+                if not candidate.is_absolute():
+                    candidate = runtime_root / candidate
+                if candidate.exists() and candidate.is_dir():
+                    return candidate.resolve()
+
+    components_root = runtime_root / 'components'
+    canonical = components_root / component_name
+    if canonical.exists() and canonical.is_dir():
+        return canonical.resolve()
+    candidates = sorted(
+        (
+            item
+            for item in components_root.glob(f'{component_name}-*')
+            if item.exists() and item.is_dir()
+        ),
+        key=lambda item: (item.stat().st_mtime_ns, item.name),
+        reverse=True,
+    )
+    if candidates:
+        return candidates[0].resolve()
+    return None
+
+
+def _runtime_payload_has_modules(root: Path, module_names: list[str]) -> bool:
+    return bool(module_names) and all((root / module_name).exists() for module_name in module_names)
+
+
+def _runtime_payload_was_validated(root: Path) -> bool:
+    marker = root / '_runtime_validation.json'
+    if not marker.exists():
+        return False
+    try:
+        payload = json.loads(marker.read_text(encoding='utf-8'))
+    except Exception:
+        return False
+    return isinstance(payload, dict) and bool(payload.get('validated'))
+
+
+def _copy_or_link_file(source: str, destination: str) -> str:
+    try:
+        os.link(source, destination)
+        return destination
+    except OSError:
+        return shutil.copy2(source, destination)
+
+
+def _clone_runtime_payload(source_root: Path, payload_target: Path) -> None:
+    excluded = {'.pending', 'components', '_downloads', '_runtime_components.json'}
+    payload_target.mkdir(parents=True, exist_ok=True)
+    for source in source_root.iterdir():
+        if source.name in excluded:
+            continue
+        destination = payload_target / source.name
+        if source.is_dir():
+            shutil.copytree(
+                source,
+                destination,
+                dirs_exist_ok=True,
+                copy_function=_copy_or_link_file,
+            )
+        else:
+            _copy_or_link_file(str(source), str(destination))
+
+
+def _clear_payload_patterns(payload_target: Path, patterns: list[str]) -> None:
+    for raw_pattern in patterns:
+        pattern = str(raw_pattern or '').strip()
+        if not pattern:
+            continue
+        for candidate in list(payload_target.glob(pattern)):
+            if candidate.is_dir():
+                shutil.rmtree(candidate, ignore_errors=False)
+            else:
+                candidate.unlink(missing_ok=True)
+
+
+def _prepare_repair_payload(
+    manifest: dict[str, Any],
+    *,
+    runtime_root: Path,
+    payload_target: Path,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    repair = manifest.get('repair')
+    if not isinstance(repair, dict):
+        return manifest, {'install_mode': 'full'}
+    inherit_component = str(repair.get('inherit_component') or '').strip().lower()
+    repair_artifacts = [entry for entry in (repair.get('artifacts') or []) if isinstance(entry, dict)]
+    minimum_modules = [str(item).strip() for item in (repair.get('minimum_existing_modules') or []) if str(item).strip()]
+    if not inherit_component or not repair_artifacts:
+        return manifest, {'install_mode': 'full'}
+    source_root = _registered_component_root(runtime_root, inherit_component)
+    if source_root is None and _runtime_payload_has_modules(runtime_root, minimum_modules):
+        source_root = runtime_root.resolve()
+    if source_root is None or source_root.resolve() == payload_target.resolve():
+        return manifest, {'install_mode': 'full'}
+    if not _runtime_payload_has_modules(source_root, minimum_modules):
+        return manifest, {'install_mode': 'full'}
+    if bool(repair.get('require_validated_existing')) and not _runtime_payload_was_validated(source_root):
+        return manifest, {'install_mode': 'full'}
+
+    _clone_runtime_payload(source_root, payload_target)
+    _clear_payload_patterns(
+        payload_target,
+        [str(item) for item in (repair.get('cleanup_patterns') or [])],
+    )
+    effective_manifest = dict(manifest)
+    effective_manifest['artifacts'] = repair_artifacts
+    return effective_manifest, {
+        'install_mode': 'repair',
+        'inherited_component': inherit_component,
+        'inherited_root': str(source_root),
+    }
+
+
 def _source_sequence(manifest: dict[str, Any], requested_source: str) -> list[str]:
     profiles = dict(manifest.get('source_profiles') or {})
     normalized = (requested_source or 'official').strip().lower() or 'official'
@@ -652,6 +778,14 @@ def main(argv: list[str] | None = None) -> int:
         if payload_target.exists():
             shutil.rmtree(payload_target, ignore_errors=True)
         payload_target.mkdir(parents=True, exist_ok=True)
+
+        manifest, install_context = _prepare_repair_payload(
+            manifest,
+            runtime_root=runtime_root,
+            payload_target=payload_target,
+        )
+        diagnostics.update(install_context)
+        tracker.flush()
         wheelhouse.mkdir(parents=True, exist_ok=True)
 
         artifacts, selected_source = _prepare_exact_wheelhouse(
@@ -704,6 +838,7 @@ def main(argv: list[str] | None = None) -> int:
             'required_modules': list(manifest.get('required_modules') or []),
             'downloaded_artifacts': artifacts,
             'bootstrap': bootstrap_payload,
+            **install_context,
         }
         tracker.finish_ok()
         _write_json(result_path, result_payload)

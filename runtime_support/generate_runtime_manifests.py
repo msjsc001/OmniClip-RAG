@@ -300,11 +300,11 @@ ARTIFACTS: dict[str, dict[str, str]] = {
         "tqdm-4.67.3-py3-none-any.whl",
         "ee1e4c0e59148062281c49d80b25b67771a127c85fc9676d3be5f243206826bf",
     ),
-    "transformers_4_57_2": pkg(
+    "transformers_4_57_6": pkg(
         "transformers",
-        "4.57.2",
-        "transformers-4.57.2-py3-none-any.whl",
-        "0918df354853c9931a637792cec519e137aceb150effd4c7924d6b8d36918fab",
+        "4.57.6",
+        "transformers-4.57.6-py3-none-any.whl",
+        "4c9e9de11333ddfe5114bc872c9f370509198acf0b87a832a0ab9458e2bd0550",
     ),
     "typing_extensions_4_15_0": pkg(
         "typing-extensions",
@@ -361,7 +361,7 @@ SEMANTIC_BASE: list[str] = [
     "threadpoolctl_3_6_0",
     "tokenizers_0_22_2",
     "tqdm_4_67_3",
-    "transformers_4_57_2",
+    "transformers_4_57_6",
     "typing_extensions_4_15_0",
     "urllib3_2_6_3",
 ]
@@ -457,7 +457,7 @@ SEMANTIC_REQUIREMENTS_CPU = [
     {"name": "numpy", "version": "2.1.3", "requirement": "numpy==2.1.3", "source_key": "pypi"},
     {"name": "scipy", "version": "1.15.2", "requirement": "scipy==1.15.2", "source_key": "pypi"},
     {"name": "sentence-transformers", "version": "5.1.2", "requirement": "sentence-transformers==5.1.2", "source_key": "pypi"},
-    {"name": "transformers", "version": "4.57.2", "requirement": "transformers==4.57.2", "source_key": "pypi"},
+    {"name": "transformers", "version": "4.57.6", "requirement": "transformers==4.57.6", "source_key": "pypi"},
     {"name": "huggingface-hub", "version": "0.36.0", "requirement": "huggingface-hub==0.36.0", "source_key": "pypi"},
     {"name": "safetensors", "version": "0.6.2", "requirement": "safetensors==0.6.2", "source_key": "pypi"},
 ]
@@ -499,6 +499,13 @@ MANIFESTS: dict[tuple[str, str], dict[str, object]] = {
         "cleanup_patterns": SEMANTIC_CLEANUP,
         "required_modules": SEMANTIC_REQUIRED,
         "validation_probes": SEMANTIC_REQUIRED,
+        "repair": {
+            "inherit_component": "semantic-core",
+            "require_validated_existing": True,
+            "minimum_existing_modules": SEMANTIC_REQUIRED,
+            "cleanup_patterns": ["transformers", "transformers-*dist-info"],
+            "artifacts": ["transformers_4_57_6"],
+        },
     },
     ("cpu", "compute-core"): {
         "requirements": SEMANTIC_REQUIREMENTS_CPU[:3],
@@ -539,6 +546,13 @@ MANIFESTS: dict[tuple[str, str], dict[str, object]] = {
         "cleanup_patterns": SEMANTIC_CLEANUP,
         "required_modules": SEMANTIC_REQUIRED,
         "validation_probes": SEMANTIC_REQUIRED,
+        "repair": {
+            "inherit_component": "semantic-core",
+            "require_validated_existing": True,
+            "minimum_existing_modules": SEMANTIC_REQUIRED,
+            "cleanup_patterns": ["transformers", "transformers-*dist-info"],
+            "artifacts": ["transformers_4_57_6"],
+        },
     },
     ("cuda", "compute-core"): {
         "requirements": SEMANTIC_REQUIREMENTS_CUDA[:3],
@@ -595,6 +609,12 @@ def write_manifest(profile: str, component: str, payload: dict[str, object]) -> 
         "required_modules": payload["required_modules"],
         "validation_probes": payload["validation_probes"],
     }
+    repair = payload.get("repair")
+    if isinstance(repair, dict):
+        data["repair"] = {
+            **repair,
+            "artifacts": materialize_artifacts(list(repair.get("artifacts") or [])),
+        }
     manifest_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 

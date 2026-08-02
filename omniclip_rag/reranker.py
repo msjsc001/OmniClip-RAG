@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import sys
 import time
 import weakref
@@ -29,6 +30,7 @@ from .vector_index import (
     mark_semantic_query_cuda_memory_failure,
     mark_semantic_query_reranker_failure,
     resolve_vector_device,
+    runtime_transformers_compatibility_issue,
     semantic_query_reranker_failure_message,
     semantic_query_reranker_failure_reason,
 )
@@ -44,6 +46,24 @@ _RERANKER_PHYSICAL_RESERVE_BYTES = 512 * MIB
 _RERANKER_CUDA_RESERVE_BYTES = 512 * MIB
 _RERANKER_MIN_ACTIVATION_BYTES = 256 * MIB
 _RERANKER_MAX_ACTIVATION_BYTES = 1 * GIB
+LOGGER = logging.getLogger(__name__)
+
+
+def _classify_reranker_exception(exc: Exception) -> tuple[str, str, str]:
+    error_class = type(exc).__name__
+    error_message = str(exc).strip()
+    compatibility_issue = runtime_transformers_compatibility_issue()
+    if (
+        error_class == 'AttributeError'
+        and "'dict' object has no attribute 'model_type'" in error_message
+        and compatibility_issue
+    ):
+        return (
+            'reranker_runtime_incompatible',
+            'RuntimeCompatibilityError',
+            f'{compatibility_issue} Original error: {error_message}',
+        )
+    return 'reranker_execution_failed', error_class, error_message
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,8 +396,9 @@ class CrossEncoderReranker:
                         degraded_to_cpu = True
                         batch_size = self._initial_batch_size('cpu')
                         continue
-                error_message = str(exc).strip()
-                mark_semantic_query_reranker_failure(exc.__class__.__name__, error_message)
+                fallback_reason, error_class, error_message = _classify_reranker_exception(exc)
+                LOGGER.warning('Reranker execution failed: %s: %s', error_class, error_message, exc_info=True)
+                mark_semantic_query_reranker_failure(error_class, error_message)
                 return hits, RerankOutcome(
                     enabled=True,
                     applied=False,
@@ -390,9 +411,9 @@ class CrossEncoderReranker:
                     elapsed_ms=max(int((time.perf_counter() - started_at) * 1000), 0),
                     degraded_to_cpu=degraded_to_cpu,
                     oom_recovered=oom_recovered,
-                    skipped_reason=type(exc).__name__,
-                    fallback_reason='reranker_execution_failed',
-                    error_class=exc.__class__.__name__,
+                    skipped_reason=error_class,
+                    fallback_reason=fallback_reason,
+                    error_class=error_class,
                     error_message=error_message,
                     resource_snapshot=resource_decision.current if resource_decision else {},
                     resource_requirements=resource_decision.required if resource_decision else {},
@@ -576,6 +597,9 @@ class CanaryTorchReranker:
                 cuda_after = 0
                 cuda_delta = 0
         except Exception as exc:
+            fallback_reason, error_class, error_message = _classify_reranker_exception(exc)
+            LOGGER.warning('Canary reranker execution failed: %s: %s', error_class, error_message, exc_info=True)
+            mark_semantic_query_reranker_failure(error_class, error_message)
             return hits, RerankOutcome(
                 enabled=True,
                 applied=False,
@@ -584,10 +608,10 @@ class CanaryTorchReranker:
                 resolved_device=resolved_device,
                 candidate_count=limit,
                 reranked_count=0,
-                skipped_reason=exc.__class__.__name__,
-                fallback_reason='reranker_execution_failed',
-                error_class=exc.__class__.__name__,
-                error_message=str(exc).strip(),
+                skipped_reason=error_class,
+                fallback_reason=fallback_reason,
+                error_class=error_class,
+                error_message=error_message,
             )
         normalized_scores = _normalize_rerank_scores(scores)
         rescored: list[SearchHit] = []

@@ -1075,6 +1075,12 @@ class QueryWorkspace(QtWidgets.QWidget):
                 error_class = str(requirement.get('error_class') or '').strip()
                 error_message = str(requirement.get('error_message') or '').strip()
                 detail = ': '.join(part for part in (error_class, error_message) if part) or self._tr('none_value')
+                if reason == 'reranker_runtime_incompatible':
+                    messages.append(self._tr(
+                        'query_runtime_requirement_reranker_runtime_incompatible',
+                        scope=scope,
+                    ))
+                    continue
                 if reason == 'reranker_query_circuit_open':
                     messages.append(self._tr(
                         'query_runtime_requirement_reranker_circuit',

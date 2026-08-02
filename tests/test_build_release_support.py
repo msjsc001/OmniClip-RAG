@@ -8,7 +8,14 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from build import GUI_TARGET, BuildTarget, _copy_support_files, _prepare_bundled_python
+from build import (
+    GUI_TARGET,
+    SHIBOKEN_PORTABLE_FILES,
+    BuildTarget,
+    _copy_support_files,
+    _prepare_bundled_python,
+    _prepare_qt_portability_fallback,
+)
 from omniclip_rag import __version__
 
 
@@ -83,6 +90,28 @@ class BuildReleaseSupportTests(unittest.TestCase):
 
         self.assertTrue((output_dir / 'runtime_support' / 'install.py').exists())
         self.assertFalse((output_dir / 'runtime_support' / '__pycache__').exists())
+
+    def test_prepare_qt_portability_fallback_copies_required_shiboken_files(self) -> None:
+        output_dir = TEST_ROOT / 'Caelune-vtest'
+        source_dir = output_dir / '_internal' / 'shiboken6'
+        source_dir.mkdir(parents=True, exist_ok=True)
+        for name in SHIBOKEN_PORTABLE_FILES:
+            (source_dir / name).write_bytes(f'test-{name}'.encode('utf-8'))
+        target = BuildTarget(
+            exe_basename='Caelune',
+            spec_path=ROOT / 'Caelune.spec',
+            output_name='Caelune-vtest',
+            output_dir=output_dir,
+            release_zip_path=TEST_ROOT / 'Caelune-vtest.zip',
+            support_files={},
+            protected_runtime_dir=None,
+        )
+
+        _prepare_qt_portability_fallback(target)
+
+        fallback = output_dir / 'runtime_support' / 'qt_fallback' / 'shiboken6'
+        for name in SHIBOKEN_PORTABLE_FILES:
+            self.assertEqual((fallback / name).read_bytes(), f'test-{name}'.encode('utf-8'))
 
     def test_current_release_metadata_uses_package_version(self) -> None:
         project = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))

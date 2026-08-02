@@ -17,7 +17,7 @@ from PySide6 import QtCore, QtWidgets
 from omniclip_rag.app_entry.desktop import launch_desktop, main as desktop_main
 from omniclip_rag.ui_next_qt import app as qt_app
 from omniclip_rag.ui_next_qt.app import StartupProgressDialog
-from omniclip_rag.config import AppConfig, ensure_data_paths, load_config, save_config
+from omniclip_rag.config import AppConfig, ensure_data_paths, load_config, normalize_vault_path, save_config
 from omniclip_rag.data_root_bootstrap import write_bootstrap_pointer
 from omniclip_rag.errors import BuildCancelledError
 from omniclip_rag.extensions.models import ExtensionDirectoryState, ExtensionSourceDirectory
@@ -1241,6 +1241,60 @@ class QtUiTests(unittest.TestCase):
             ]
             self.assertEqual(len(remove_buttons), 1)
             self.assertEqual(remove_buttons[0].toolTip(), tooltip('zh-CN', 'remove_saved_vault'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_markdown_missing_source_keeps_index_status_and_does_not_look_unconfigured(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        missing_vault = TEST_SANDBOX / 'missing-md-source'
+        paths = ensure_data_paths(str(TEST_ROOT), str(missing_vault))
+        config = AppConfig(
+            vault_path=str(missing_vault),
+            data_root=str(paths.global_root),
+            vault_paths=[str(missing_vault)],
+            md_selected_vault_paths=[str(missing_vault)],
+        )
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            normalized = normalize_vault_path(str(missing_vault))
+            workspace._md_vault_snapshots[normalized] = {
+                'vault_path': normalized,
+                'index_ready': True,
+                'index_state': 'ready',
+                'stats': {'files': 12, 'chunks': 34, 'refs': 5},
+            }
+            workspace._status_snapshot = workspace._md_vault_snapshots[normalized]
+            workspace._refresh_md_vault_table()
+            workspace._refresh_overview_chips()
+
+            self.assertEqual(workspace.vault_chip.text(), text('zh-CN', 'vault_source_missing'))
+            status_text = workspace.md_vault_table.item(0, 3).text()
+            self.assertIn(text('zh-CN', 'source_path_missing'), status_text)
+            self.assertIn(text('zh-CN', 'md_vault_state_ready_offline'), status_text)
+            self.assertNotEqual(workspace.vault_chip.text(), text('zh-CN', 'vault_missing'))
+
+            actions = workspace.md_vault_table.cellWidget(0, 5)
+            states = {button.text(): button.isEnabled() for button in actions.findChildren(QtWidgets.QPushButton)}
+            self.assertFalse(states[text('zh-CN', 'md_vault_row_preflight')])
+            self.assertFalse(states[text('zh-CN', 'md_vault_row_rebuild')])
+            self.assertFalse(states[text('zh-CN', 'md_vault_row_watch_start')])
+            self.assertTrue(states[text('zh-CN', 'remove_saved_vault')])
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
+    def test_markdown_available_source_shows_path_and_index_status_separately(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='en', theme=theme)
+        try:
+            status_text = workspace._md_vault_status_text(str(SAMPLE_ROOT), {'index_ready': True, 'index_state': 'ready'})
+            self.assertIn(text('en', 'source_path_ready'), status_text)
+            self.assertIn(text('en', 'md_vault_state_ready'), status_text)
         finally:
             workspace.deleteLater()
             app.processEvents()
