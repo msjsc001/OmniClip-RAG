@@ -175,7 +175,7 @@ SOLARIZED_LIGHT_THEME_COLORS = {
     'soft': '#EEE8D5',
     'soft_2': '#F7F0DD',
     'ink': '#586E75',
-    'muted': '#7B8B8F',
+    'muted': '#607277',
     'accent': '#268BD2',
     'accent_dark': '#1C6CA4',
     'accent_soft': '#E9F3FB',
@@ -302,6 +302,115 @@ THEME_COLOR_MAP = {
     'graphite': GRAPHITE_THEME_COLORS,
 }
 
+# Interaction and hierarchy colors are kept separate from the classic palette
+# definitions above.  This lets every theme retain its identity while all
+# controls share the same visual language (focus, hover, status and emphasis).
+THEME_SEMANTIC_COLORS = {
+    'light': {
+        'accent': '#087C99',
+        'accent_dark': '#08657D',
+        'accent_soft': '#E2F5F9',
+        'accent_contrast': '#FFFFFF',
+        'focus': '#22A6C3',
+        'brand_gold': '#E6A817',
+        'brand_gold_soft': '#FFF6D8',
+        'brand_gold_fg': '#7A5200',
+        'hover': '#F1F6F9',
+        'pressed': '#E3ECF2',
+        'disabled_bg': '#EDF1F4',
+        'disabled_fg': '#98A2B3',
+        'table_alt': '#F8FAFC',
+        'table_hover': '#EAF6F8',
+    },
+    'dark': {
+        'accent': '#35BFD4',
+        'accent_dark': '#79D8E5',
+        'accent_soft': '#123945',
+        'accent_contrast': '#071B24',
+        'focus': '#58CFE0',
+        'brand_gold': '#F1B84B',
+        'brand_gold_soft': '#43361B',
+        'brand_gold_fg': '#FFD983',
+        'hover': '#1B3040',
+        'pressed': '#223B4E',
+        'disabled_bg': '#17242E',
+        'disabled_fg': '#6E8292',
+        'table_alt': '#111D27',
+        'table_hover': '#183743',
+    },
+    'sepia': {
+        'accent_contrast': '#FFFFFF',
+        'focus': '#A87443',
+        'brand_gold': '#C88B22',
+        'brand_gold_soft': '#F7E6BD',
+        'brand_gold_fg': '#70470B',
+        'hover': '#F4EADB',
+        'pressed': '#E8D9C3',
+        'disabled_bg': '#E9DDCB',
+        'disabled_fg': '#9A897A',
+        'table_alt': '#F8EFE2',
+        'table_hover': '#F2E1CA',
+    },
+    'nord': {
+        'accent': '#4D7099',
+        'accent_dark': '#3E5D82',
+        'accent_soft': '#E3EAF3',
+        'accent_contrast': '#FFFFFF',
+        'focus': '#6A91C0',
+        'brand_gold': '#D6A84A',
+        'brand_gold_soft': '#F6EBCF',
+        'brand_gold_fg': '#72551D',
+        'hover': '#EFF3F8',
+        'pressed': '#DCE4EE',
+        'disabled_bg': '#E4E8EE',
+        'disabled_fg': '#8993A2',
+        'table_alt': '#F2F5F9',
+        'table_hover': '#E4ECF5',
+    },
+    'solarized-light': {
+        'accent': '#1477B8',
+        'accent_dark': '#105F93',
+        'accent_soft': '#E5F0F7',
+        'accent_contrast': '#FFFFFF',
+        'focus': '#3A9DDD',
+        'brand_gold': '#B58900',
+        'brand_gold_soft': '#F7EBC4',
+        'brand_gold_fg': '#6F5200',
+        'hover': '#F8F1DE',
+        'pressed': '#EAE2CD',
+        'disabled_bg': '#EFE8D5',
+        'disabled_fg': '#99A2A1',
+        'table_alt': '#FAF4E5',
+        'table_hover': '#EAF2EE',
+    },
+    'solarized-dark': {
+        'accent_contrast': '#04282D',
+        'focus': '#4CC4BA',
+        'brand_gold': '#D8A824',
+        'brand_gold_soft': '#413B1C',
+        'brand_gold_fg': '#F1D16E',
+        'hover': '#0D414C',
+        'pressed': '#124B57',
+        'disabled_bg': '#0A333D',
+        'disabled_fg': '#668487',
+        'table_alt': '#07313B',
+        'table_hover': '#104650',
+    },
+    'graphite': {
+        'accent_contrast': '#0B1425',
+        'focus': '#8AB0FA',
+        'brand_gold': '#E5B552',
+        'brand_gold_soft': '#453A24',
+        'brand_gold_fg': '#F4D58A',
+        'hover': '#2A3038',
+        'pressed': '#343B45',
+        'disabled_bg': '#23272D',
+        'disabled_fg': '#727B87',
+        'table_alt': '#1B1F24',
+        'table_hover': '#293446',
+    },
+}
+
 
 @dataclass(slots=True)
 class ThemeState:
@@ -363,6 +472,7 @@ def build_theme(theme_code: str, scale_percent: int) -> ThemeState:
     effective_theme = detect_system_theme_mode() if normalized_theme == 'system' else normalized_theme
     resolved_theme = detect_system_theme_mode() if normalized_theme == 'system' else normalized_theme
     colors = dict(THEME_COLOR_MAP.get(resolved_theme, LIGHT_THEME_COLORS))
+    colors.update(THEME_SEMANTIC_COLORS.get(resolved_theme, THEME_SEMANTIC_COLORS['light']))
     return ThemeState(
         theme_code=normalized_theme,
         effective_theme=effective_theme,
@@ -416,8 +526,9 @@ def apply_application_style(
 def build_stylesheet(theme: ThemeState) -> str:
     colors = theme.colors
     radius = scaled(theme, 10, minimum=8)
-    padding_y = scaled(theme, 8, minimum=6)
-    padding_x = scaled(theme, 14, minimum=10)
+    control_radius = max(radius - 2, 7)
+    padding_y = scaled(theme, 7, minimum=6)
+    padding_x = scaled(theme, 13, minimum=10)
     header_padding = 0
     font_size = max(int(round(10 * theme.scale_percent / 100.0)), 9)
     title_size = max(int(round(17 * theme.scale_percent / 100.0)), 12)
@@ -427,6 +538,9 @@ def build_stylesheet(theme: ThemeState) -> str:
         color: {colors['ink']};
         font-family: 'Segoe UI';
         font-size: {font_size}pt;
+    }}
+    QWidget:disabled {{
+        color: {colors['disabled_fg']};
     }}
     QToolTip {{
         background: {colors['card']};
@@ -442,6 +556,14 @@ def build_stylesheet(theme: ThemeState) -> str:
         background: {colors['card']};
         border: 1px solid {colors['border']};
         border-radius: {radius}px;
+    }}
+    QFrame[card='true'][emphasis='true'] {{
+        border: 1px solid {colors['focus']};
+    }}
+    QLabel[role='appTitle'] {{
+        color: {colors['ink']};
+        font-size: {max(title_size + 1, 14)}pt;
+        font-weight: 700;
     }}
     QLabel[role='title'] {{
         font-size: {title_size}pt;
@@ -476,25 +598,58 @@ def build_stylesheet(theme: ThemeState) -> str:
         padding: {scaled(theme, 5, minimum=4)}px {scaled(theme, 10, minimum=8)}px;
         font-weight: 600;
     }}
+    QLabel[role='versionBadge'] {{
+        background: {colors['brand_gold_soft']};
+        color: {colors['brand_gold_fg']};
+        border: 1px solid {colors['brand_gold']};
+        border-radius: {max(radius - 2, 6)}px;
+        padding: {scaled(theme, 3, minimum=3)}px {scaled(theme, 8, minimum=6)}px;
+        font-weight: 600;
+    }}
     QPushButton, QToolButton {{
         border: 1px solid {colors['border']};
-        border-radius: {radius}px;
+        border-radius: {control_radius}px;
         padding: {padding_y}px {padding_x}px;
-        background: {colors['soft']};
+        background: {colors['card']};
         color: {colors['ink']};
+        min-height: {scaled(theme, 20, minimum=18)}px;
     }}
     QPushButton:hover, QToolButton:hover {{
-        background: {colors['secondary_active']};
+        background: {colors['hover']};
+        border-color: {colors['focus']};
+    }}
+    QPushButton:pressed, QToolButton:pressed {{
+        background: {colors['pressed']};
+    }}
+    QPushButton:focus, QToolButton:focus {{
+        border: 2px solid {colors['focus']};
+        padding: {max(padding_y - 1, 4)}px {max(padding_x - 1, 8)}px;
+    }}
+    QPushButton:disabled, QToolButton:disabled {{
+        background: {colors['disabled_bg']};
+        border-color: {colors['border']};
+        color: {colors['disabled_fg']};
+    }}
+    QPushButton[variant='secondary'], QToolButton[variant='secondary'] {{
+        background: {colors['soft_2']};
+    }}
+    QPushButton[variant='ghost'], QToolButton[variant='ghost'] {{
+        background: transparent;
+        border-color: transparent;
     }}
     QPushButton[variant='primary'] {{
         background: {colors['accent']};
         border-color: {colors['accent']};
-        color: #FFFFFF;
+        color: {colors['accent_contrast']};
         font-weight: 600;
     }}
     QPushButton[variant='primary']:hover {{
         background: {colors['accent_dark']};
         border-color: {colors['accent_dark']};
+    }}
+    QPushButton[variant='primary']:pressed {{
+        background: {colors['accent_dark']};
+        border-color: {colors['focus']};
     }}
     QPushButton[variant='danger'] {{
         background: {colors['danger']};
@@ -506,14 +661,22 @@ def build_stylesheet(theme: ThemeState) -> str:
         background: {colors['danger_dark']};
         border-color: {colors['danger_dark']};
     }}
-    QLineEdit, QComboBox, QPlainTextEdit, QTableView {{
+    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit, QTableView, QListView, QTreeView {{
         background: {colors['input_bg']};
         color: {colors['input_fg']};
         border: 1px solid {colors['input_border']};
-        border-radius: {radius}px;
+        border-radius: {control_radius}px;
     }}
-    QLineEdit, QComboBox {{
+    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
         padding: {scaled(theme, 7, minimum=5)}px;
+        min-height: {scaled(theme, 20, minimum=18)}px;
+    }}
+    QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{
+        border: 2px solid {colors['focus']};
+    }}
+    QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QPlainTextEdit:disabled, QTextEdit:disabled {{
+        background: {colors['disabled_bg']};
+        color: {colors['disabled_fg']};
     }}
     QComboBox QAbstractItemView {{
         background: {colors['input_bg']};
@@ -541,12 +704,53 @@ def build_stylesheet(theme: ThemeState) -> str:
         selection-background-color: {colors['select']};
         selection-color: {colors['ink']};
     }}
+    QPlainTextEdit#SearchableTextBody {{
+        padding: {scaled(theme, 10, minimum=8)}px;
+    }}
+    QScrollArea {{
+        background: transparent;
+        border: none;
+    }}
+    QScrollArea > QWidget > QWidget {{
+        background: transparent;
+    }}
+    QCheckBox, QRadioButton {{
+        spacing: {scaled(theme, 7, minimum=5)}px;
+    }}
+    QGroupBox {{
+        border: 1px solid {colors['border']};
+        border-radius: {radius}px;
+        margin-top: {scaled(theme, 10, minimum=8)}px;
+        padding-top: {scaled(theme, 8, minimum=6)}px;
+        font-weight: 600;
+    }}
+    QGroupBox::title {{
+        color: {colors['accent_dark']};
+        subcontrol-origin: margin;
+        left: {scaled(theme, 10, minimum=8)}px;
+        padding: 0px {scaled(theme, 5, minimum=4)}px;
+    }}
+    QMenu {{
+        background: {colors['card']};
+        color: {colors['ink']};
+        border: 1px solid {colors['border']};
+        border-radius: {control_radius}px;
+        padding: {scaled(theme, 5, minimum=4)}px;
+    }}
+    QMenu::item {{
+        border-radius: {max(control_radius - 2, 5)}px;
+        padding: {scaled(theme, 7, minimum=5)}px {scaled(theme, 18, minimum=14)}px;
+    }}
+    QMenu::item:selected {{
+        background: {colors['accent_soft']};
+        color: {colors['accent_dark']};
+    }}
     QHeaderView::section {{
         background: {colors['tree_heading_bg']};
         color: {colors['ink']};
         border: none;
         border-bottom: 1px solid {colors['border']};
-        padding: {scaled(theme, 8, minimum=6)}px;
+        padding: {scaled(theme, 9, minimum=7)}px;
         font-weight: 600;
     }}
     QTableView {{
@@ -554,6 +758,15 @@ def build_stylesheet(theme: ThemeState) -> str:
         gridline-color: {colors['border']};
         selection-background-color: {colors['select']};
         selection-color: {colors['ink']};
+        alternate-background-color: {colors['table_alt']};
+        outline: none;
+    }}
+    QTableView::item {{
+        padding: {scaled(theme, 7, minimum=5)}px;
+        border-bottom: 1px solid {colors['border']};
+    }}
+    QTableView::item:hover {{
+        background: {colors['table_hover']};
     }}
     QTableCornerButton::section {{
         background: {colors['tree_heading_bg']};
@@ -578,8 +791,33 @@ def build_stylesheet(theme: ThemeState) -> str:
     QTabBar::tab:selected {{
         background: {colors['card']};
     }}
+    QTabBar::tab:hover:!selected {{
+        background: {colors['hover']};
+        color: {colors['accent_dark']};
+    }}
+    QTabBar#PrimaryTabBar::tab {{
+        background: transparent;
+        color: {colors['muted']};
+        border: none;
+        border-bottom: 3px solid transparent;
+        border-radius: 0px;
+        padding: {scaled(theme, 11, minimum=8)}px {scaled(theme, 18, minimum=12)}px;
+        margin-right: {scaled(theme, 4, minimum=3)}px;
+        font-weight: 600;
+    }}
+    QTabBar#PrimaryTabBar::tab:selected {{
+        color: {colors['accent_dark']};
+        background: {colors['accent_soft']};
+        border-bottom: 3px solid {colors['accent']};
+    }}
+    QTabBar#SecondaryTabBar::tab:selected {{
+        color: {colors['accent_dark']};
+        background: {colors['accent_soft']};
+        border-color: {colors['focus']};
+        font-weight: 600;
+    }}
     QStatusBar {{
-        background: {colors['card']};
+        background: {colors['soft_2']};
         border-top: 1px solid {colors['border']};
     }}
     QSplitter::handle {{
@@ -599,8 +837,87 @@ def build_stylesheet(theme: ThemeState) -> str:
         border-radius: {max(radius - 4, 4)}px;
         min-height: 24px;
     }}
+    QScrollBar:horizontal {{
+        background: {colors['soft_2']};
+        height: {scaled(theme, 12, minimum=10)}px;
+        margin: 2px;
+        border-radius: {max(radius - 4, 4)}px;
+    }}
+    QScrollBar::handle:horizontal {{
+        background: {colors['border']};
+        border-radius: {max(radius - 4, 4)}px;
+        min-width: 24px;
+    }}
+    QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+        background: {colors['focus']};
+    }}
+    QScrollBar::add-line, QScrollBar::sub-line,
+    QScrollBar::add-page, QScrollBar::sub-page {{
+        background: transparent;
+        border: none;
+    }}
     QFrame#HeaderCard {{
+        background: {colors['card']};
+        border: 1px solid {colors['border']};
+        border-left: 4px solid {colors['accent']};
         padding: {header_padding}px;
+    }}
+    QFrame#ConfigHeaderCard {{
+        background: {colors['soft_2']};
+        border-left: 3px solid {colors['brand_gold']};
+    }}
+    QFrame#SearchCard {{
+        border-top: 3px solid {colors['accent']};
+    }}
+    QFrame#ResultsCard {{
+        border-top: 3px solid {colors['brand_gold']};
+    }}
+    QFrame#ActivityLogCard {{
+        border-top: 3px solid {colors['muted']};
+    }}
+    QToolButton#HeaderToggleButton {{
+        color: {colors['muted']};
+        padding-left: {scaled(theme, 9, minimum=7)}px;
+        padding-right: {scaled(theme, 9, minimum=7)}px;
+    }}
+    QLineEdit#QueryInput {{
+        padding: {scaled(theme, 10, minimum=8)}px {scaled(theme, 12, minimum=10)}px;
+        min-height: {scaled(theme, 24, minimum=22)}px;
+        font-size: {max(font_size + 1, 10)}pt;
+    }}
+    QPushButton#QueryStatusButton {{
+        font-weight: 600;
+    }}
+    QPushButton#QueryStatusButton[mode='idle'] {{
+        background: {colors['query_idle_bg']};
+        color: {colors['query_idle_fg']};
+        border-color: {colors['query_idle_border']};
+    }}
+    QPushButton#QueryStatusButton[mode='running'] {{
+        background: {colors['brand_gold_soft']};
+        color: {colors['brand_gold_fg']};
+        border-color: {colors['brand_gold']};
+    }}
+    QPushButton#QueryStatusButton[mode='blocked'], QPushButton#QueryStatusButton[mode='error'] {{
+        background: {colors['query_blocked_bg']};
+        color: {colors['query_blocked_fg']};
+        border-color: {colors['query_blocked_border']};
+    }}
+    QPushButton#QueryStatusButton[mode='done'] {{
+        background: {colors['query_done_bg']};
+        color: {colors['query_done_fg']};
+        border-color: {colors['query_done_border']};
+    }}
+    QProgressBar {{
+        background: {colors['soft']};
+        border: 1px solid {colors['border']};
+        border-radius: {max(control_radius - 2, 5)}px;
+        text-align: center;
+        min-height: {scaled(theme, 16, minimum=14)}px;
+    }}
+    QProgressBar::chunk {{
+        background: {colors['accent']};
+        border-radius: {max(control_radius - 3, 4)}px;
     }}
     QFrame#QueryStatusBanner[mode='idle'] {{
         background: {colors['query_idle_bg']};

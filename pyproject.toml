@@ -1,6 +1,6 @@
 [project]
 name = "caelune"
-version = "0.5.0"
+version = "0.5.1"
 description = "Caelune is a local-first desktop RAG for private Markdown, PDF, and Tika-backed knowledge bases."
 readme = "README.md"
 requires-python = ">=3.13"

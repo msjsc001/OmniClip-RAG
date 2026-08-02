@@ -26,6 +26,7 @@ class SearchableTextPanel(QtWidgets.QWidget):
         root_layout.addWidget(self.header_widget)
 
         self.text_edit = QtWidgets.QPlainTextEdit(self)
+        self.text_edit.setObjectName('SearchableTextBody')
         self.text_edit.setReadOnly(True)
         self.text_edit.setPlainText(empty_text)
         self.text_edit.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
@@ -44,6 +45,7 @@ class SearchableTextPanel(QtWidgets.QWidget):
         footer_layout.addWidget(self.search_status_label)
 
         self.search_edit = QtWidgets.QLineEdit(footer)
+        self.search_edit.setObjectName('InlineSearchInput')
         self.search_edit.setMinimumWidth(220)
         self.search_edit.returnPressed.connect(self.find_text)
         footer_layout.addWidget(self.search_edit)

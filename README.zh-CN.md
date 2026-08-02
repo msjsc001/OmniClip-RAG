@@ -7,7 +7,7 @@
 **面向 Windows 的本地优先知识检索工具与只读 MCP Server，用来搜索私有 Markdown、PDF 和 Tika 扩展资料库。**
 
 [![最新版本](https://img.shields.io/github/v/release/EllisMorrow/Caelune?style=flat-square&label=release)](https://github.com/EllisMorrow/Caelune/releases/latest)
-[![版本](https://img.shields.io/badge/version-v0.5.0-0b7285?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/tag/v0.5.0)
+[![版本](https://img.shields.io/badge/version-v0.5.1-0b7285?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/tag/v0.5.1)
 [![Windows](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/latest)
 [![本地优先](https://img.shields.io/badge/local--first-yes-1d7467?style=flat-square)](#隐私边界)
 [![下载量](https://img.shields.io/github/downloads/EllisMorrow/Caelune/total?label=downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/Caelune/releases)
@@ -49,11 +49,21 @@
 查询台集中放置问题输入、检索范围、查询设置与实时阶段状态；“结果与详情”使用独立页面展示带来源标签的命中结果、片段详情、完整上下文选择和页面过滤。
 
 <div align="center">
-  <a href="docs/assets/readme-ui-zh-CN.png">
-    <img src="docs/assets/readme-ui-zh-CN.png" alt="星野查询台与结果和详情界面" width="900" />
+  <a href="docs/assets/readme-query-console-zh-CN.png">
+    <img src="docs/assets/readme-query-console-zh-CN.png" alt="星野查询台界面" width="100%" />
   </a>
   <br />
-  <sub>查询台与结果和详情 · 点击图片可查看原始尺寸</sub>
+  <sub>查询台 · 点击图片可查看原始尺寸</sub>
+</div>
+
+<br />
+
+<div align="center">
+  <a href="docs/assets/readme-results-details-zh-CN.png">
+    <img src="docs/assets/readme-results-details-zh-CN.png" alt="星野结果与详情界面" width="100%" />
+  </a>
+  <br />
+  <sub>结果与详情 · 点击图片可查看原始尺寸</sub>
 </div>
 
 ## 下载

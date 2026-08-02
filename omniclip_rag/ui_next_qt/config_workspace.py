@@ -305,6 +305,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(8)
         header_card = QtWidgets.QFrame(self)
+        header_card.setObjectName('ConfigHeaderCard')
         header_card.setProperty('card', True)
         header_layout = QtWidgets.QHBoxLayout(header_card)
         header_layout.setContentsMargins(12, 12, 12, 12)
@@ -327,6 +328,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
         help_button.clicked.connect(self._open_help_and_updates)
         header_layout.addWidget(help_button, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         self.sub_tabs = QtWidgets.QTabWidget(self)
+        self.sub_tabs.setObjectName('ConfigTabs')
+        self.sub_tabs.tabBar().setObjectName('SecondaryTabBar')
         root.addWidget(self.sub_tabs, 1)
         self.start_page, self.start_body = self._make_scroll_tab()
         self.settings_page, self.settings_body = self._make_scroll_tab()
@@ -895,6 +898,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         browse_data.clicked.connect(self._browse_data_root)
         form.addWidget(browse_data, 0, 2)
         self.remove_data_root_button = QtWidgets.QPushButton(self._tr('remove_saved_data_root'), workspace_card)
+        self.remove_data_root_button.setToolTip(self._tip('remove_saved_data_root'))
         self._set_button_variant(self.remove_data_root_button, 'secondary')
         self.remove_data_root_button.clicked.connect(self._remove_selected_data_root)
         form.addWidget(self.remove_data_root_button, 0, 3)
@@ -905,6 +909,7 @@ class ConfigWorkspace(QtWidgets.QWidget):
         md_toolbar.setSpacing(8)
         form.addLayout(md_toolbar, 1, 1, 1, 3)
         self.add_md_vault_button = QtWidgets.QPushButton(self._tr('add_md_vault_button'), workspace_card)
+        self.add_md_vault_button.setToolTip(self._tip('browse_vault'))
         self._set_button_variant(self.add_md_vault_button, 'secondary')
         self.add_md_vault_button.clicked.connect(self._browse_vault)
         md_toolbar.addWidget(self.add_md_vault_button)
@@ -1658,8 +1663,17 @@ class ConfigWorkspace(QtWidgets.QWidget):
         layout.setSpacing(6)
         normalized = normalize_vault_path(vault)
 
-        def _add_button(text_key: str, variant: str, handler, *, enabled: bool = True) -> None:
+        def _add_button(
+            text_key: str,
+            variant: str,
+            handler,
+            *,
+            enabled: bool = True,
+            tooltip_key: str = '',
+        ) -> None:
             button = QtWidgets.QPushButton(self._tr(text_key), container)
+            if tooltip_key:
+                button.setToolTip(self._tip(tooltip_key))
             self._set_button_variant(button, variant)
             button.setMinimumHeight(scaled(self._theme, 28, minimum=26))
             button.clicked.connect(handler)
@@ -1679,7 +1693,12 @@ class ConfigWorkspace(QtWidgets.QWidget):
             lambda _checked=False, v=normalized: self._toggle_watch_for_vault(v),
             enabled=not watch_stopping,
         )
-        _add_button('remove_saved_vault', 'danger', lambda _checked=False, v=normalized: self._remove_vault_path(v))
+        _add_button(
+            'remove_saved_vault',
+            'danger',
+            lambda _checked=False, v=normalized: self._remove_vault_path(v),
+            tooltip_key='remove_saved_vault',
+        )
         layout.addStretch(1)
         return container
 

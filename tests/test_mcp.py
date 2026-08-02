@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from omniclip_rag import __version__
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.app_entry.mcp import run_mcp_selfcheck
 from omniclip_rag.mcp.core import MCP_SEARCH_TOOL, MCP_STATUS_TOOL, OmniClipMcpApplication
@@ -90,6 +91,12 @@ class McpTests(unittest.TestCase):
                 if name in removed:
                     sys.modules.pop(name, None)
             sys.modules.update(removed)
+
+    def test_mcp_initialize_reports_caelune_release_version(self) -> None:
+        app = OmniClipMcpApplication(_make_context())
+        options = app.server._mcp_server.create_initialization_options()
+        self.assertEqual(options.server_name, 'Caelune MCP Server')
+        self.assertEqual(options.server_version, __version__)
 
     def test_status_tool_schema_is_read_only(self) -> None:
         context = _make_context()

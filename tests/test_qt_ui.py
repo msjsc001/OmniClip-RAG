@@ -116,6 +116,24 @@ class QtUiTests(unittest.TestCase):
             qt_app._normalize_qpa_platform()
             self.assertNotEqual(os.environ.get('QT_QPA_PLATFORM'), 'offscreen')
 
+    def test_qt_app_identity_uses_version_as_native_title_suffix(self) -> None:
+        app = get_app()
+        previous_name = app.applicationName()
+        previous_display_name = app.applicationDisplayName()
+        previous_version = app.applicationVersion()
+        previous_organization = app.organizationName()
+        try:
+            qt_app._apply_app_identity(app)
+            self.assertEqual(app.applicationName(), 'Caelune')
+            self.assertEqual(app.applicationDisplayName(), f'v{omniclip_rag.__version__}')
+            self.assertEqual(app.applicationVersion(), omniclip_rag.__version__)
+            self.assertEqual(app.organizationName(), 'EllisMorrow')
+        finally:
+            app.setApplicationName(previous_name)
+            app.setApplicationDisplayName(previous_display_name)
+            app.setApplicationVersion(previous_version)
+            app.setOrganizationName(previous_organization)
+
     def test_startup_progress_dialog_marks_source_mode_in_title(self) -> None:
         app = get_app()
         dialog = StartupProgressDialog()
@@ -139,6 +157,21 @@ class QtUiTests(unittest.TestCase):
             dialog.close()
             dialog.deleteLater()
             app.processEvents()
+
+    def test_startup_ui_preferences_are_loaded_before_the_dialog_is_shown(self) -> None:
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(
+            vault_path=str(SAMPLE_ROOT),
+            data_root=str(paths.global_root),
+            ui_language='en',
+            ui_theme='sepia',
+            ui_scale_percent=125,
+            ui_tooltips_enabled=False,
+        )
+        save_config(config, paths)
+        write_bootstrap_pointer(paths.global_root)
+
+        self.assertEqual(qt_app._load_startup_ui_preferences(), ('sepia', 125, False, 'en'))
 
     def test_config_roundtrip_keeps_qt_layout_fields(self) -> None:
         vault = SAMPLE_ROOT
@@ -1070,6 +1103,11 @@ class QtUiTests(unittest.TestCase):
         window = MainWindow(config=config, paths=paths, language_code='zh-CN', theme=theme, version='0.2.0')
         try:
             self.assertIsInstance(window.config_workspace, ConfigWorkspace)
+            self.assertEqual(window.main_tabs.tabBar().objectName(), 'PrimaryTabBar')
+            self.assertEqual(window.config_workspace.sub_tabs.tabBar().objectName(), 'SecondaryTabBar')
+            self.assertEqual(window.title_label.property('role'), 'appTitle')
+            self.assertEqual(window.version_label.property('role'), 'versionBadge')
+            self.assertEqual(window.minimumSize(), QtCore.QSize(1320, 860))
             window.show()
             app.processEvents()
             window.query_workspace.query_splitter.setSizes([260, 700])
@@ -1192,6 +1230,17 @@ class QtUiTests(unittest.TestCase):
             self.assertTrue(workspace.md_vault_table.horizontalHeaderItem(1).toolTip())
             self.assertEqual(workspace.md_vault_table.item(0, 0).toolTip(), tooltip('zh-CN', 'md_primary_vault'))
             self.assertEqual(workspace.md_vault_table.item(0, 1).toolTip(), tooltip('zh-CN', 'md_selected_scope'))
+            self.assertEqual(workspace.add_md_vault_button.toolTip(), tooltip('zh-CN', 'browse_vault'))
+            self.assertEqual(workspace.remove_data_root_button.toolTip(), tooltip('zh-CN', 'remove_saved_data_root'))
+            actions = workspace.md_vault_table.cellWidget(0, 5)
+            self.assertIsNotNone(actions)
+            remove_buttons = [
+                button
+                for button in actions.findChildren(QtWidgets.QPushButton)
+                if button.text() == text('zh-CN', 'remove_saved_vault')
+            ]
+            self.assertEqual(len(remove_buttons), 1)
+            self.assertEqual(remove_buttons[0].toolTip(), tooltip('zh-CN', 'remove_saved_vault'))
         finally:
             workspace.deleteLater()
             app.processEvents()
@@ -1207,6 +1256,49 @@ class QtUiTests(unittest.TestCase):
         apply_application_style(app, theme, tooltips_enabled=True)
         self.assertTrue(bool(app.property('_omniclip_tooltips_enabled')))
 
+    def test_all_themes_expose_shared_visual_hierarchy_tokens(self) -> None:
+        required_tokens = {
+            'accent_contrast',
+            'focus',
+            'brand_gold',
+            'brand_gold_soft',
+            'brand_gold_fg',
+            'hover',
+            'pressed',
+            'disabled_bg',
+            'disabled_fg',
+            'table_alt',
+            'table_hover',
+        }
+        for theme_code in ('light', 'dark', 'sepia', 'nord', 'solarized-light', 'solarized-dark', 'graphite'):
+            with self.subTest(theme=theme_code):
+                theme = build_theme(theme_code, 100)
+                self.assertTrue(required_tokens.issubset(theme.colors))
+                stylesheet = build_stylesheet(theme)
+                self.assertIn('QTabBar#PrimaryTabBar::tab:selected', stylesheet)
+                self.assertIn('QPushButton#QueryStatusButton[mode=', stylesheet)
+                self.assertIn('QLineEdit#QueryInput', stylesheet)
+
+    def test_query_workspace_applies_visual_identity_hooks(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        paths = ensure_data_paths(str(TEST_ROOT), str(SAMPLE_ROOT))
+        config = AppConfig(vault_path=str(SAMPLE_ROOT), data_root=str(paths.global_root), vector_backend='lancedb')
+        workspace = QueryWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        try:
+            self.assertEqual(workspace.search_card.objectName(), 'SearchCard')
+            self.assertEqual(workspace.results_card.objectName(), 'ResultsCard')
+            self.assertEqual(workspace.query_edit.objectName(), 'QueryInput')
+            self.assertTrue(workspace.query_edit.isClearButtonEnabled())
+            self.assertEqual(workspace.search_button.property('variant'), 'primary')
+            self.assertEqual(workspace.query_status_button.objectName(), 'QueryStatusButton')
+            self.assertTrue(workspace.table_view.alternatingRowColors())
+            self.assertFalse(workspace.table_view.showGrid())
+            self.assertEqual(workspace.detail_tabs.tabBar().objectName(), 'SecondaryTabBar')
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_query_workspace_migrates_key_tooltips(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)
@@ -1220,6 +1312,9 @@ class QtUiTests(unittest.TestCase):
             self.assertTrue(workspace.context_jump_combo.toolTip())
             self.assertTrue(workspace.preview_panel.search_edit.toolTip())
             self.assertTrue(workspace.context_panel.next_button.toolTip())
+            self.assertEqual(workspace.source_markdown_check.toolTip(), tooltip('zh-CN', 'query_source_markdown'))
+            self.assertEqual(workspace.source_pdf_check.toolTip(), tooltip('zh-CN', 'query_source_pdf'))
+            self.assertEqual(workspace.source_tika_check.toolTip(), tooltip('zh-CN', 'query_source_tika'))
         finally:
             workspace.deleteLater()
             app.processEvents()
