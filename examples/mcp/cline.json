@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "caelune": {
-      "command": "D:\\Apps\\Caelune\\dist\\Caelune-MCP-v0.5.0\\Caelune-MCP.exe",
+      "command": "D:\\Apps\\Caelune\\dist\\Caelune-MCP-v0.5.1\\Caelune-MCP.exe",
       "args": [],
       "env": {}
     }

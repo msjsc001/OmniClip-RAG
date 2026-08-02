@@ -7,7 +7,7 @@
 **A local-first Windows desktop app and read-only MCP server for searching private Markdown, PDF, and Tika-backed knowledge bases.**
 
 [![Latest Release](https://img.shields.io/github/v/release/EllisMorrow/Caelune?style=flat-square&label=release)](https://github.com/EllisMorrow/Caelune/releases/latest)
-[![Version](https://img.shields.io/badge/version-v0.5.0-0b7285?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/tag/v0.5.0)
+[![Version](https://img.shields.io/badge/version-v0.5.1-0b7285?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/tag/v0.5.1)
 [![Windows](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/latest)
 [![Local-first](https://img.shields.io/badge/local--first-yes-1d7467?style=flat-square)](#privacy-boundary)
 [![Downloads](https://img.shields.io/github/downloads/EllisMorrow/Caelune/total?label=downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/Caelune/releases)
@@ -49,11 +49,21 @@ The desktop app manages data roots, Runtime components, models, knowledge-base b
 The Query Console keeps input, scope, retrieval settings, and live query state together. Results and Details uses a separate page for source-labelled hits, snippet review, full-context selection, and page filtering.
 
 <div align="center">
-  <a href="docs/assets/readme-ui-en.png">
-    <img src="docs/assets/readme-ui-en.png" alt="Caelune Query Console and Results and Details interface" width="900" />
+  <a href="docs/assets/readme-query-console-en.png">
+    <img src="docs/assets/readme-query-console-en.png" alt="Caelune Query Console" width="100%" />
   </a>
   <br />
-  <sub>Query Console and Results and Details · click the image to open it at full size</sub>
+  <sub>Query Console · click the image to open it at full size</sub>
+</div>
+
+<br />
+
+<div align="center">
+  <a href="docs/assets/readme-results-details-en.png">
+    <img src="docs/assets/readme-results-details-en.png" alt="Caelune Results and Details" width="100%" />
+  </a>
+  <br />
+  <sub>Results and Details · click the image to open it at full size</sub>
 </div>
 
 ## Download

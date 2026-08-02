@@ -16,7 +16,8 @@ if TYPE_CHECKING:
 
 from .. import __version__
 from ..app_logging import configure_file_logging, install_exception_logging
-from ..config import APP_NAME, AppConfig, build_data_paths, default_data_root
+from ..config import APP_NAME, AppConfig, build_data_paths, default_data_root, load_config
+from ..data_root_bootstrap import resolve_active_data_root
 from ..errors import ActiveDataRootUnavailableError
 from ..headless.bootstrap import RuntimeBundle, apply_runtime_layout_if_needed, load_runtime_bundle
 from ..runtime_recovery import mark_session_clean_exit, mark_session_running, mark_session_started, prepare_startup_recovery
@@ -172,6 +173,34 @@ def _prepare_startup_bundle() -> tuple[RuntimeBundle, list[str]]:
     return bundle, applied_components
 
 
+def _load_startup_ui_preferences() -> tuple[str, int, bool, str]:
+    """Read only the small UI preference subset before showing the splash dialog.
+
+    Why: the full startup bundle belongs on the background worker, but showing the
+    dialog before its saved theme is known makes the same window visibly switch
+    from the Windows theme to the Caelune theme. This best-effort read does not
+    validate, create, or migrate the data root and falls back safely when the
+    bootstrap pointer or config is unavailable.
+    """
+
+    system_language = detect_system_language()
+    try:
+        resolved = resolve_active_data_root()
+        paths = build_data_paths(resolved.path)
+        loaded = load_config(paths)
+    except Exception as exc:
+        _trace_startup(f'initial UI preference read skipped: {exc}')
+        loaded = None
+    if loaded is None:
+        return 'system', 100, True, system_language
+    return (
+        str(loaded.ui_theme or 'system'),
+        int(loaded.ui_scale_percent or 100),
+        bool(getattr(loaded, 'ui_tooltips_enabled', True)),
+        str(loaded.ui_language or system_language),
+    )
+
+
 def main() -> int:
     QtCore, QtGui, QtWidgets = _ensure_qt()
     StartupProgressDialog = _startup_progress_dialog_class()
@@ -320,6 +349,10 @@ def main() -> int:
     QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     _apply_app_identity(app)
+    startup_theme_code, startup_scale_percent, startup_tooltips_enabled, startup_language = _load_startup_ui_preferences()
+    from .theme import apply_application_style, build_theme
+    startup_theme = build_theme(startup_theme_code, startup_scale_percent)
+    apply_application_style(app, startup_theme, tooltips_enabled=startup_tooltips_enabled)
     startup_dialog = StartupProgressDialog()
     icon = _load_app_icon()
     if icon is not None:
@@ -350,7 +383,11 @@ def _set_windows_app_user_model_id() -> None:
 def _apply_app_identity(app) -> None:
     try:
         app.setApplicationName(APP_NAME)
-        app.setApplicationDisplayName(APP_NAME)
+        # On Windows, Qt appends applicationDisplayName to top-level window
+        # captions. Use the release version there so the native title bar adds
+        # useful information instead of repeating the product name.
+        app.setApplicationDisplayName(f'v{__version__}')
+        app.setApplicationVersion(__version__)
         app.setOrganizationName('EllisMorrow')
     except Exception:
         pass

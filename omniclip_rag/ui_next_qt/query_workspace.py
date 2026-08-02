@@ -134,6 +134,7 @@ class QueryWorkspace(QtWidgets.QWidget):
             self._tr('search_title'),
             self._tr('search_subtitle'),
         )
+        self.search_card.setObjectName('SearchCard')
         self._search_card_default_margins = self.search_card_layout.getContentsMargins()
         self._search_card_default_spacing = self.search_card_layout.spacing()
 
@@ -169,17 +170,21 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.search_card_layout.addWidget(self.query_row_host)
 
         self.query_edit = QtWidgets.QLineEdit(self.search_card)
+        self.query_edit.setObjectName('QueryInput')
+        self.query_edit.setClearButtonEnabled(True)
         self.query_edit.setToolTip(self._tip('query'))
         self.query_edit.returnPressed.connect(self.search)
         query_row.addWidget(self.query_edit, 1)
 
         self.search_button = QtWidgets.QPushButton(self._tr('search_button'), self.search_card)
         self.search_button.setToolTip(self._tip('search'))
-        self._set_button_variant(self.search_button, 'secondary')
+        self._set_button_variant(self.search_button, 'primary')
         self.search_button.clicked.connect(self.search)
         query_row.addWidget(self.search_button)
 
         self.query_status_button = QtWidgets.QPushButton(self._tr('query_status_chip_idle'), self.search_card)
+        self.query_status_button.setObjectName('QueryStatusButton')
+        self.query_status_button.setProperty('mode', 'idle')
         self.query_status_button.setEnabled(False)
         self.query_status_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
         self.query_status_button.setMinimumWidth(scaled(self._theme, 92, minimum=84))
@@ -188,7 +193,7 @@ class QueryWorkspace(QtWidgets.QWidget):
 
         self.search_controls_toggle_button = QtWidgets.QPushButton(self._tr('search_controls_collapse'), self.search_card)
         self.search_controls_toggle_button.setToolTip(self._tip('search'))
-        self._set_button_variant(self.search_controls_toggle_button, 'secondary')
+        self._set_button_variant(self.search_controls_toggle_button, 'ghost')
         self.search_controls_toggle_button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
         self.search_controls_toggle_button.clicked.connect(self._toggle_search_controls_collapsed)
         query_row.addWidget(self.search_controls_toggle_button)
@@ -258,6 +263,9 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.source_markdown_check = QtWidgets.QCheckBox(self._tr('query_source_markdown'), self.search_card)
         self.source_pdf_check = QtWidgets.QCheckBox(self._tr('query_source_pdf'), self.search_card)
         self.source_tika_check = QtWidgets.QCheckBox(self._tr('query_source_tika'), self.search_card)
+        self.source_markdown_check.setToolTip(self._tip('query_source_markdown'))
+        self.source_pdf_check.setToolTip(self._tip('query_source_pdf'))
+        self.source_tika_check.setToolTip(self._tip('query_source_tika'))
         for widget in (self.source_markdown_check, self.source_pdf_check, self.source_tika_check):
             source_row.addWidget(widget)
         source_row.addStretch(1)
@@ -277,6 +285,7 @@ class QueryWorkspace(QtWidgets.QWidget):
             self._tr('results_title'),
             self._tr('results_subtitle'),
         )
+        self.results_card.setObjectName('ResultsCard')
 
         results_actions = QtWidgets.QHBoxLayout()
         results_actions.setSpacing(8)
@@ -332,12 +341,18 @@ class QueryWorkspace(QtWidgets.QWidget):
         self.results_model.selectionChanged.connect(self._on_context_selection_changed)
         self.results_model.orderingChanged.connect(self._on_results_ordering_changed)
         self.table_view = QtWidgets.QTableView(table_host)
+        self.table_view.setObjectName('ResultsTable')
         self.table_view.setModel(self.results_model)
+        self.table_view.setAlternatingRowColors(True)
+        self.table_view.setShowGrid(False)
+        self.table_view.setWordWrap(False)
         self.table_view.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.table_view.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table_view.setSortingEnabled(False)
         self.table_view.verticalHeader().setVisible(False)
+        self.table_view.verticalHeader().setDefaultSectionSize(scaled(self._theme, 40, minimum=34))
+        self.table_view.horizontalHeader().setMinimumHeight(scaled(self._theme, 38, minimum=34))
         self.table_view.horizontalHeader().sectionClicked.connect(self._sort_by_column)
         self.table_view.clicked.connect(self._handle_table_clicked)
         self.table_view.selectionModel().selectionChanged.connect(self._on_table_selection_changed)
@@ -349,6 +364,8 @@ class QueryWorkspace(QtWidgets.QWidget):
         details_layout.setContentsMargins(0, 0, 0, 0)
         details_layout.setSpacing(0)
         self.detail_tabs = QtWidgets.QTabWidget(details_host)
+        self.detail_tabs.setObjectName('DetailTabs')
+        self.detail_tabs.tabBar().setObjectName('SecondaryTabBar')
         self.detail_tabs.setMinimumHeight(0)
         details_layout.addWidget(self.detail_tabs)
 
@@ -364,6 +381,7 @@ class QueryWorkspace(QtWidgets.QWidget):
             self._tr('activity_log_title'),
             self._tr('activity_log_subtitle'),
         )
+        self.activity_log_page.setObjectName('ActivityLogCard')
         self.log_panel = SearchableTextPanel(
             empty_text=self._tr('log_empty'),
             theme=self._theme,

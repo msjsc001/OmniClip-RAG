@@ -53,6 +53,10 @@ class OmniClipMcpApplication:
             ),
             log_level='WARNING',
         )
+        # The current FastMCP constructor does not expose the low-level server
+        # version. Without setting it here, initialize reports the MCP SDK
+        # version instead of the Caelune release version.
+        self.server._mcp_server.version = __version__
         self._register_tools()
 
     def _register_tools(self) -> None:

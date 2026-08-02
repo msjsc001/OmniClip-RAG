@@ -90,6 +90,19 @@ class MainWindow(QtWidgets.QMainWindow):
         header_layout.setSpacing(12)
         root_layout.addWidget(self.header_card)
 
+        self.brand_icon_label = QtWidgets.QLabel(self.header_card)
+        self.brand_icon_label.setObjectName('BrandIcon')
+        icon_size = max(int(round(40 * self._theme.scale_percent / 100.0)), 34)
+        self.brand_icon_label.setFixedSize(icon_size, icon_size)
+        self.brand_icon_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        app = QtWidgets.QApplication.instance()
+        app_icon = app.windowIcon() if app is not None else QtGui.QIcon()
+        if app_icon.isNull():
+            self.brand_icon_label.hide()
+        else:
+            self.brand_icon_label.setPixmap(app_icon.pixmap(icon_size, icon_size))
+        header_layout.addWidget(self.brand_icon_label, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+
         title_layout = QtWidgets.QVBoxLayout()
         title_layout.setContentsMargins(0, 0, 0, 0)
         title_layout.setSpacing(6)
@@ -101,7 +114,7 @@ class MainWindow(QtWidgets.QMainWindow):
         title_layout.addLayout(title_row)
 
         self.title_label = QtWidgets.QLabel(self._window_title_text(), self.header_card)
-        self.title_label.setProperty('role', 'title')
+        self.title_label.setProperty('role', 'appTitle')
         title_row.addWidget(self.title_label)
 
         self.tagline_label = QtWidgets.QLabel(self._tr('tagline'), self.header_card)
@@ -134,7 +147,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header_layout.addLayout(controls_layout)
 
         self.version_label = QtWidgets.QLabel(self._tr('version', version=self._version), self.header_card)
-        self.version_label.setProperty('role', 'muted')
+        self.version_label.setProperty('role', 'versionBadge')
         controls_layout.addWidget(self.version_label, 0, QtCore.Qt.AlignmentFlag.AlignRight)
         controls_layout.addStretch(1)
 
@@ -156,8 +169,12 @@ class MainWindow(QtWidgets.QMainWindow):
         controls_bottom.addWidget(self.language_combo, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
 
         self.main_tabs = QtWidgets.QTabWidget(central)
+        self.main_tabs.setObjectName('MainTabs')
+        self.main_tabs.tabBar().setObjectName('PrimaryTabBar')
         self.main_tabs.currentChanged.connect(self._sync_status_bar)
         self.header_toggle_button = QtWidgets.QToolButton(self.main_tabs)
+        self.header_toggle_button.setObjectName('HeaderToggleButton')
+        self.header_toggle_button.setProperty('variant', 'ghost')
         self.header_toggle_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.header_toggle_button.setAutoRaise(False)
         self.header_toggle_button.setToolTip(self._tip('header_toggle'))
@@ -225,6 +242,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.result_label = QtWidgets.QLabel(self._config_result_summary if self._recovery_mode else self._query_result_summary, self)
         self.result_label.setProperty('role', 'muted')
         status_bar = QtWidgets.QStatusBar(self)
+        status_bar.setObjectName('AppStatusBar')
         status_bar.addWidget(self.status_label, 1)
         status_bar.addPermanentWidget(self.result_label)
         self.setStatusBar(status_bar)

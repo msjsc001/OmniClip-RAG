@@ -1,5 +1,7 @@
 import unittest
+from string import Formatter
 
+from omniclip_rag import ui_i18n
 from omniclip_rag.config import AppConfig
 from omniclip_rag.ui_i18n import language_code_from_label, language_label, normalize_language, text, tooltip
 
@@ -17,6 +19,23 @@ class UiI18nTests(unittest.TestCase):
         self.assertIn('Caelune', text('en', 'title'))
         self.assertIn('星野', text('zh-CN', 'title'))
         self.assertIn('Caelune', text('zh-CN', 'title'))
+
+    def test_chinese_and_english_catalogs_have_matching_keys(self) -> None:
+        self.assertEqual(set(ui_i18n._TEXTS['zh-CN']), set(ui_i18n._TEXTS['en']))
+        self.assertEqual(set(ui_i18n._TOOLTIPS['zh-CN']), set(ui_i18n._TOOLTIPS['en']))
+
+    def test_chinese_and_english_templates_use_matching_placeholders(self) -> None:
+        def placeholders(template: str) -> set[str]:
+            return {
+                field_name.split('.')[0].split('[')[0]
+                for _literal, field_name, _format_spec, _conversion in Formatter().parse(template)
+                if field_name
+            }
+
+        for catalog in (ui_i18n._TEXTS, ui_i18n._TOOLTIPS):
+            for key, chinese_template in catalog['zh-CN'].items():
+                with self.subTest(key=key):
+                    self.assertEqual(placeholders(chinese_template), placeholders(catalog['en'][key]))
 
     def test_app_config_has_ui_language_default(self) -> None:
         config = AppConfig(vault_path='.', data_root='.')
@@ -38,10 +57,12 @@ class UiI18nTests(unittest.TestCase):
         self.assertIn('查询', text('zh-CN', 'query_status_running_title', percent=52))
         self.assertIn('few seconds', text('en', 'task_eta_query'))
         self.assertIn('单字查询', tooltip('zh-CN', 'query'))
+        self.assertIn('直接阅读结果', tooltip('zh-CN', 'query'))
+        self.assertIn('read the results directly', tooltip('en', 'query'))
         self.assertIn('平均相关性', tooltip('zh-CN', 'page_sort'))
         self.assertIn('theme', tooltip('en', 'ui_theme').lower())
         self.assertIn('建议范围', text('zh-CN', 'query_limit_hint_ready', current=15, minimum=8, maximum=24, preferred=15, device='CPU', elapsed='520 毫秒', samples=3, reason='当前设置基本稳定'))
-        self.assertIn('candidate pool', tooltip('en', 'limit'))
+        self.assertIn('second-pass ranking', tooltip('en', 'limit'))
 
 
 if __name__ == '__main__':
