@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -6,6 +7,33 @@ from pathlib import Path
 _handles = []
 base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
 app_dir = Path(getattr(sys, "executable", base_dir)).resolve().parent if getattr(sys, "frozen", False) else base_dir
+
+
+def _repair_packaged_shiboken() -> None:
+    required = (
+        "MSVCP140.dll",
+        "Shiboken.pyd",
+        "shiboken6.abi3.dll",
+        "VCRUNTIME140.dll",
+        "VCRUNTIME140_1.dll",
+    )
+    destination = base_dir / "shiboken6"
+    if all((destination / name).is_file() for name in required):
+        return
+    fallback = app_dir / "runtime_support" / "qt_fallback" / "shiboken6"
+    if not all((fallback / name).is_file() for name in required):
+        return
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        for name in required:
+            shutil.copy2(fallback / name, destination / name)
+    except OSError:
+        # PySide6 will raise its normal import error if the application folder
+        # is read-only or both copies are damaged; do not mask that traceback.
+        return
+
+
+_repair_packaged_shiboken()
 
 for candidate in (base_dir / ".packages", base_dir / ".vendor"):
     if candidate.exists():
@@ -18,6 +46,7 @@ search_dirs = [
     base_dir / "PySide6",
     base_dir / "PySide6" / "plugins",
     base_dir / "shiboken6",
+    app_dir / "runtime_support" / "qt_fallback" / "shiboken6",
     base_dir / ".vendor",
     base_dir / ".vendor" / "PySide6",
     base_dir / ".vendor" / "PySide6" / "plugins",

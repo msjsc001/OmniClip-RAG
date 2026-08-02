@@ -35,7 +35,7 @@ from .preflight import estimate_storage_for_vault
 from .runtime_recovery import record_runtime_incident
 from .storage import MetadataStore, _build_fts_query
 from .timing import BuildEtaTracker, append_build_history, build_history_file, estimate_remaining_build_seconds, find_matching_history
-from .vector_index import cached_acceleration_snapshot, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, prepare_local_model_snapshot, query_cuda_memory_requirements, release_process_vector_resources, resolve_vector_device, resolve_vector_device_cached, runtime_dependency_issue, runtime_trace_metadata, semantic_query_session
+from .vector_index import cached_acceleration_snapshot, create_vector_index, detect_acceleration, inspect_runtime_environment, is_local_model_ready, prepare_local_model_snapshot, query_cuda_memory_requirements, query_memory_pressure_snapshot, release_process_vector_resources, resolve_vector_device, resolve_vector_device_cached, runtime_dependency_issue, runtime_trace_metadata, semantic_query_session
 from .runtime_layout import list_pending_runtime_updates, load_runtime_component_registry, runtime_component_registry_path
 
 try:
@@ -1120,9 +1120,23 @@ class OmniClipService:
             'live_runtime_id': runtime_meta['live_runtime_id'],
             'pending_runtime_id': runtime_meta['pending_runtime_id'],
             'runtime_instance_id': runtime_meta['runtime_instance_id'],
+            'transformers_version': str(runtime_meta.get('transformers_version') or ''),
+            'sentence_transformers_version': str(runtime_meta.get('sentence_transformers_version') or ''),
+            'tokenizers_version': str(runtime_meta.get('tokenizers_version') or ''),
+            'runtime_package_versions': dict(runtime_meta.get('runtime_package_versions') or {}),
             'appdata_root': self._safe_realpath(self.paths.global_root),
             'workspace_id': index_meta['workspace_id'],
             'workspace_realpath': str(self.config.vault_dir) if self.config.vault_path else '',
+            'configured_vault_count': len(list(getattr(self.config, 'vault_paths', ()) or ())),
+            'selected_vault_count': len(list(getattr(self.config, 'md_selected_vault_paths', ()) or ())),
+            'active_vault_in_selected': bool(
+                self.config.vault_path
+                and str(self.config.vault_path).lower()
+                in {
+                    str(item).lower()
+                    for item in (getattr(self.config, 'md_selected_vault_paths', ()) or ())
+                }
+            ),
             'index_generation_id': index_meta['index_generation_id'],
             'index_built_for_workspace': index_meta['index_built_for_workspace'],
             'index_built_at': index_meta['index_built_at'],
@@ -1137,6 +1151,7 @@ class OmniClipService:
             'cuda_is_available': bool(acceleration_payload.get('cuda_available')),
             'gpu_execution_state': str(acceleration_payload.get('gpu_execution_state') or ''),
             'gpu_execution_runtime_instance_id': str(acceleration_payload.get('gpu_execution_runtime_instance_id') or ''),
+            'system_memory_snapshot': query_memory_pressure_snapshot(),
             'build_id': self._trace_digest(build_payload, 'build'),
             'exe_version': __version__,
         }
@@ -1249,6 +1264,7 @@ class OmniClipService:
         reranker_skip = str(getattr(reranker_outcome, 'skipped_reason', '') or '')
         if reranker_fallback in {
             'reranker_execution_failed',
+            'reranker_runtime_incompatible',
             'reranker_query_circuit_open',
             'reranker_system_memory_guard',
             'reranker_resource_guard',

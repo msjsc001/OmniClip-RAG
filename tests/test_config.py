@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import os
 import shutil
 import unittest
@@ -158,6 +159,47 @@ class ConfigTests(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.vault_paths, [str(vault_a.resolve()), str(vault_b.resolve())])
         self.assertEqual(loaded.md_selected_vault_paths, [str(vault_b.resolve())])
+
+    def test_load_promotes_selected_vault_when_active_vault_is_empty(self) -> None:
+        vault_a = ROOT / 'vault_promoted_a'
+        vault_b = ROOT / 'vault_promoted_b'
+        paths = config_module.ensure_data_paths(str(CUSTOM_ROOT), None)
+        paths.config_file.write_text(
+            json.dumps(
+                {
+                    'vault_path': '',
+                    'vault_paths': [str(vault_a), str(vault_b)],
+                    'md_selected_vault_paths': [str(vault_b)],
+                }
+            ),
+            encoding='utf-8',
+        )
+
+        loaded = config_module.load_config(paths)
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.vault_path, str(vault_b.resolve()))
+        self.assertEqual(loaded.vault_paths, [str(vault_b.resolve()), str(vault_a.resolve())])
+        self.assertEqual(loaded.md_selected_vault_paths, [str(vault_b.resolve())])
+
+    def test_save_promotes_first_saved_vault_when_active_vault_is_empty(self) -> None:
+        vault = ROOT / 'vault_promoted_saved'
+        paths = config_module.ensure_data_paths(str(CUSTOM_ROOT), None)
+        config = config_module.AppConfig(
+            vault_path='',
+            data_root=str(paths.global_root),
+            vault_paths=[str(vault)],
+            md_selected_vault_paths=[],
+        )
+
+        config_module.save_config(config, paths)
+        loaded = config_module.load_config(paths)
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.vault_path, str(vault.resolve()))
+        self.assertEqual(loaded.md_selected_vault_paths, [str(vault.resolve())])
 
     def test_probe_data_root_tolerates_shared_logs_only_trace(self) -> None:
         partial_root = CUSTOM_ROOT / 'shared_logs_only'

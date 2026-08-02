@@ -161,6 +161,34 @@ class RerankerTests(unittest.TestCase):
         self.assertEqual(second.error_class, 'OSError')
         self.assertEqual(second.error_message, 'model shard cannot be opened')
 
+    def test_known_transformers_regression_is_reported_as_runtime_incompatibility(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'transformers_runtime_incompatible'))
+        model_dir = paths.cache_dir / 'models' / 'BAAI__bge-reranker-v2-m3'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / 'config.json').write_text('{"model_type":"xlm-roberta"}', encoding='utf-8')
+        (model_dir / 'pytorch_model.bin').write_text('x', encoding='utf-8')
+        config = AppConfig(vault_path='.', data_root=str(paths.global_root), reranker_enabled=True, vector_device='cpu')
+        reranker = CrossEncoderReranker(
+            config,
+            paths,
+            loader=Mock(side_effect=AttributeError("'dict' object has no attribute 'model_type'")),
+        )
+        hits = [
+            SearchHit(score=40.0, title='A', anchor='A', source_path='a.md', rendered_text='alpha', chunk_id='a'),
+            SearchHit(score=30.0, title='B', anchor='B', source_path='b.md', rendered_text='beta', chunk_id='b'),
+        ]
+
+        with patch(
+            'omniclip_rag.reranker.runtime_transformers_compatibility_issue',
+            return_value='Runtime transformers 4.57.2 is incompatible.',
+        ):
+            _reranked, outcome = reranker.rerank('test', hits, 2)
+
+        self.assertFalse(outcome.applied)
+        self.assertEqual(outcome.fallback_reason, 'reranker_runtime_incompatible')
+        self.assertEqual(outcome.error_class, 'RuntimeCompatibilityError')
+        self.assertIn('4.57.2', outcome.error_message)
+
     def test_auto_uses_model_specific_resource_budget_instead_of_fixed_ten_gib(self) -> None:
         paths = ensure_data_paths(str(TEST_DATA_ROOT / 'adaptive_resource_allow'))
         model_dir = paths.cache_dir / 'models' / 'BAAI__bge-reranker-v2-m3'

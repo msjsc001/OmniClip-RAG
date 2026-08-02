@@ -60,6 +60,10 @@ class RuntimeInstallScriptTests(unittest.TestCase):
         self.assertTrue(str(manifest['manifest_path']).endswith('runtime_support\\manifests\\cpu\\semantic-core.json'))
         bundled = bundled_python_executable(ROOT)
         self.assertTrue(str(bundled).endswith(str(Path('runtime_support') / 'python' / 'tools' / 'python.exe')))
+        transformers = next(item for item in manifest['artifacts'] if item['name'] == 'transformers')
+        self.assertEqual(transformers['version'], '4.57.6')
+        self.assertEqual(manifest['repair']['inherit_component'], 'semantic-core')
+        self.assertEqual([item['name'] for item in manifest['repair']['artifacts']], ['transformers'])
 
     def test_runtime_probe_ignores_installer_stdlib_entries_from_bootstrap_metadata(self) -> None:
         app_root = TEST_ROOT / 'bootstrap_ignore_stdlib' / 'app'
@@ -107,6 +111,40 @@ class RuntimeInstallScriptTests(unittest.TestCase):
         self.assertIn('-ApplyPendingOnly', text)
         self.assertIn('Restart Caelune.exe after the download finishes.', text)
         self.assertIn('The new runtime component has been registered and the next launch will use it automatically.', text)
+
+    def test_runtime_status_detects_known_incompatible_transformers_version(self) -> None:
+        app_root = TEST_ROOT / 'known_bad_transformers' / 'app'
+        runtime_dir = app_root / 'runtime'
+        semantic_root = runtime_dir / 'components' / 'semantic-core'
+        for package_name in ('torch', 'sentence_transformers', 'transformers', 'huggingface_hub', 'safetensors'):
+            (semantic_root / package_name).mkdir(parents=True, exist_ok=True)
+            (semantic_root / package_name / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / 'transformers' / 'utils').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'huggingface_hub' / 'hf_api.py').write_text('', encoding='utf-8')
+        (semantic_root / 'numpy' / '_core').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'numpy' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / 'scipy' / 'linalg').mkdir(parents=True, exist_ok=True)
+        (semantic_root / 'scipy' / '__init__.py').write_text('', encoding='utf-8')
+        (semantic_root / '_runtime_bootstrap.json').write_text('{}', encoding='utf-8')
+        (semantic_root / '_runtime_manifest.json').write_text(
+            json.dumps(
+                {
+                    'requirements': [
+                        {'name': 'transformers', 'version': '4.57.2'},
+                        {'name': 'sentence-transformers', 'version': '5.1.2'},
+                    ]
+                }
+            ),
+            encoding='utf-8',
+        )
+
+        with _runtime_root_patches(app_root):
+            state = runtime_component_status('semantic-core')
+
+        self.assertTrue(state['ready'])
+        self.assertFalse(state['compatible'])
+        self.assertEqual(state['package_versions']['transformers'], '4.57.2')
+        self.assertIn('4.57.6', state['compatibility_issues'][0])
 
     def test_pending_runtime_payload_stays_staged_until_restart(self) -> None:
         app_root = TEST_ROOT / 'pending_detect' / 'app'
