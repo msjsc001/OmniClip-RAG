@@ -52,13 +52,19 @@
         <span>Caelune</span>
       </a>
 
-      <nav class="site-nav" aria-label="Primary navigation" data-aria-zh="主要导航">
+      <nav class="site-nav" id="site-nav" aria-label="Primary navigation" data-aria-zh="主要导航">
         <a href="#features" data-i18n="nav_features">Features</a>
         <a href="#workflow" data-i18n="nav_workflow">Workflow</a>
         <a href="#mcp">MCP</a>
         <a href="#interface" data-i18n="nav_interface">Interface</a>
         <a href="#download" data-i18n="nav_download">Download</a>
       </nav>
+
+      <a class="mobile-download" href="#download" data-i18n="nav_download">Download</a>
+
+      <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Open navigation menu">
+        <span></span><span></span><span></span>
+      </button>
 
       <div class="language-switch" role="group" aria-label="Language switch" data-aria-zh="语言切换">
         <button type="button" data-language="en" aria-pressed="true">EN</button>
@@ -72,16 +78,6 @@
       <section class="hero" aria-labelledby="hero-title">
         <div class="hero-scene" aria-hidden="true"></div>
         <div class="hero-shade" aria-hidden="true"></div>
-        <div class="hero-motion-layer" aria-hidden="true">
-          <i class="hero-beam"></i>
-          <i class="hero-star hero-star-one"></i>
-          <i class="hero-star hero-star-two"></i>
-          <i class="hero-star hero-star-three"></i>
-          <i class="hero-star hero-star-four"></i>
-          <span class="hero-float-document hero-float-document-one"><i></i><i></i><i></i></span>
-          <span class="hero-float-document hero-float-document-two"><i></i><i></i><i></i></span>
-          <span class="hero-float-document hero-float-document-three"><i></i><i></i><i></i></span>
-        </div>
         <div class="container hero-grid">
           <div class="hero-copy">
             <p class="eyebrow">
@@ -251,7 +247,7 @@
           <p class="section-kicker" data-i18n="boundary_kicker">CLEAR PRIVACY BOUNDARY</p>
           <h2 data-i18n="boundary_title">Local by default, explicit when data moves.</h2>
           <p data-i18n="boundary_body">
-            Indexing and search run on your machine. Model and Runtime downloads occur only when you start installation. Context leaves only when you copy it or an MCP client requests a result.
+            Indexing and search run on your machine. Context leaves only when you copy it or a read-only MCP client requests a result.
           </p>
         </div>
         <dl class="boundary-list">
@@ -277,7 +273,7 @@
           <p class="section-kicker section-kicker-light" data-i18n="mcp_kicker">READ-ONLY MCP BRIDGE</p>
           <h2 data-i18n="mcp_title">One local index, available to compatible AI clients.</h2>
           <p class="mcp-lead" data-i18n="mcp_body">
-            Caelune exposes status and search through a narrow stdio surface. It does not provide write, delete, or file-editing tools.
+            Caelune exposes only status and search over stdio—no write, delete, or file-editing tools.
           </p>
           <div class="mcp-actions">
             <a class="button button-light" href="https://github.com/EllisMorrow/Caelune/blob/main/MCP_SETUP.md" target="_blank" rel="noopener noreferrer" data-i18n="mcp_setup">Read MCP setup</a>
@@ -299,7 +295,7 @@
         <div class="section-heading">
           <p class="section-kicker" data-i18n="interface_kicker">DESKTOP INTERFACE</p>
           <h2 data-i18n="interface_title">Every stage stays visible.</h2>
-          <p data-i18n="interface_intro">Follow a question from transparent retrieval stages to source-linked results you can inspect before use.</p>
+          <p data-i18n="interface_intro">Stage status, source paths, and match reasons stay visible.</p>
         </div>
 
         <div class="real-interface">

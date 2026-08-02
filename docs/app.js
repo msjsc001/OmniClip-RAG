@@ -11,6 +11,8 @@
       nav_workflow: "Workflow",
       nav_interface: "Interface",
       nav_download: "Download",
+      nav_menu_open: "Open navigation menu",
+      nav_menu_close: "Close navigation menu",
       hero_eyebrow: "Windows · Local-first · Read-only MCP",
       hero_title: "Private knowledge.<br>Local retrieval.",
       hero_lead: "Search Markdown, PDF, and Tika-supported documents with hybrid lexical and semantic retrieval—without uploading your knowledge base.",
@@ -64,7 +66,7 @@
       workflow_three_body: "Search in the desktop app, copy selected context, or expose results through read-only MCP.",
       boundary_kicker: "CLEAR PRIVACY BOUNDARY",
       boundary_title: "Local by default, explicit when data moves.",
-      boundary_body: "Indexing and search run on your machine. Model and Runtime downloads occur only when you start installation. Context leaves only when you copy it or an MCP client requests a result.",
+      boundary_body: "Indexing and search run on your machine. Context leaves only when you copy it or a read-only MCP client requests a result.",
       boundary_stays: "Stays local",
       boundary_stays_body: "Source files, indexes, embeddings, configuration, and query execution.",
       boundary_moves: "Moves only by action",
@@ -73,7 +75,7 @@
       boundary_network_body: "Used for user-initiated downloads of the app, Runtime, or models—not for telemetry.",
       mcp_kicker: "READ-ONLY MCP BRIDGE",
       mcp_title: "One local index, available to compatible AI clients.",
-      mcp_body: "Caelune exposes status and search through a narrow stdio surface. It does not provide write, delete, or file-editing tools.",
+      mcp_body: "Caelune exposes only status and search over stdio—no write, delete, or file-editing tools.",
       mcp_setup: "Read MCP setup",
       mcp_registry: "Open MCP Registry",
       mcp_ready: "ready · hybrid",
@@ -81,7 +83,7 @@
       mcp_note: "Your client receives selected evidence. Your archive remains local.",
       interface_kicker: "DESKTOP INTERFACE",
       interface_title: "See the work behind every result.",
-      interface_intro: "Stage status, source paths, and match reasons stay visible from query to context.",
+      interface_intro: "Stage status, source paths, and match reasons stay visible.",
       real_interface_badge: "PRODUCT INTERFACE",
       real_interface_title: "Query Console and Results and Details",
       real_interface_body: "Ask in natural language, follow each retrieval stage, and review the evidence before preparing context.",
@@ -142,6 +144,8 @@
       nav_workflow: "使用流程",
       nav_interface: "软件界面",
       nav_download: "下载",
+      nav_menu_open: "打开导航菜单",
+      nav_menu_close: "关闭导航菜单",
       hero_eyebrow: "Windows · 本地优先 · 只读 MCP",
       hero_title: "私人知识。<br>本地检索。",
       hero_lead: "在本机混合检索 Markdown、PDF 与 Tika 支持的文档，无需上传你的知识库。",
@@ -195,7 +199,7 @@
       workflow_three_body: "在桌面端查询、复制选定上下文，或通过只读 MCP 返回检索结果。",
       boundary_kicker: "清楚的隐私边界",
       boundary_title: "默认留在本地，移动必须明确。",
-      boundary_body: "索引与查询都在你的电脑执行。只有当你主动安装时才下载 Runtime 或模型；只有复制内容或 MCP 请求结果时，上下文才会离开程序。",
+      boundary_body: "索引与查询都在你的电脑执行；只有复制内容或只读 MCP 请求结果时，上下文才会离开程序。",
       boundary_stays: "始终留在本机",
       boundary_stays_body: "源文件、索引、向量、配置与查询执行过程。",
       boundary_moves: "主动操作才移动",
@@ -204,7 +208,7 @@
       boundary_network_body: "仅用于用户主动下载软件、Runtime 或模型，不用于遥测。",
       mcp_kicker: "只读 MCP 桥接",
       mcp_title: "一个本地索引，供兼容的 AI 客户端调用。",
-      mcp_body: "Caelune 通过精简的 stdio 接口提供状态和搜索，不提供写入、删除或修改文件的工具。",
+      mcp_body: "Caelune 只通过 stdio 提供状态和搜索，不提供写入、删除或修改文件的工具。",
       mcp_setup: "阅读 MCP 接入指南",
       mcp_registry: "打开 MCP Registry",
       mcp_ready: "已就绪 · 混合模式",
@@ -212,7 +216,7 @@
       mcp_note: "客户端得到选定证据，完整知识库继续留在本地。",
       interface_kicker: "桌面端界面",
       interface_title: "查询做到哪一步，为什么命中，都摆在明面上。",
-      interface_intro: "从查询到上下文，阶段状态、来源路径和命中原因始终清楚可查。",
+      interface_intro: "阶段状态、来源路径和命中原因始终清楚可查。",
       real_interface_badge: "软件界面",
       real_interface_title: "查询台与结果和详情",
       real_interface_body: "输入自然语言问题，查看每个检索阶段，并在准备上下文前核对命中依据。",
@@ -276,6 +280,9 @@
   const ogDescription = document.querySelector('meta[property="og:description"]');
   const twitterTitle = document.querySelector('meta[name="twitter:title"]');
   const twitterDescription = document.querySelector('meta[name="twitter:description"]');
+  const siteHeader = document.querySelector(".site-header");
+  const siteNav = document.querySelector(".site-nav");
+  const menuToggle = document.querySelector(".menu-toggle");
 
   function storedLanguage() {
     try {
@@ -340,6 +347,8 @@
       button.setAttribute("aria-pressed", String(button.dataset.language === nextLanguage));
     });
 
+    syncMenuToggleLabel(dictionary);
+
     if (descriptionMeta) descriptionMeta.content = dictionary.page_description;
     if (ogTitle) ogTitle.content = dictionary.page_title;
     if (ogDescription) ogDescription.content = dictionary.page_description;
@@ -352,7 +361,38 @@
     button.addEventListener("click", () => applyLanguage(button.dataset.language));
   });
 
-  const siteHeader = document.querySelector(".site-header");
+  function syncMenuToggleLabel(dictionary = translations[document.documentElement.lang] || translations.en) {
+    if (!menuToggle) return;
+    const isOpen = menuToggle.getAttribute("aria-expanded") === "true";
+    menuToggle.setAttribute("aria-label", isOpen ? dictionary.nav_menu_close : dictionary.nav_menu_open);
+  }
+
+  function setMenuOpen(isOpen) {
+    if (!siteHeader || !menuToggle) return;
+    siteHeader.classList.toggle("menu-open", isOpen);
+    menuToggle.setAttribute("aria-expanded", String(isOpen));
+    syncMenuToggleLabel();
+  }
+
+  menuToggle?.addEventListener("click", () => {
+    setMenuOpen(menuToggle.getAttribute("aria-expanded") !== "true");
+  });
+
+  siteNav?.querySelectorAll("a").forEach((link) => {
+    link.addEventListener("click", () => setMenuOpen(false));
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || menuToggle?.getAttribute("aria-expanded") !== "true") return;
+    setMenuOpen(false);
+    menuToggle.focus();
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!siteHeader?.classList.contains("menu-open") || siteHeader.contains(event.target)) return;
+    setMenuOpen(false);
+  });
+
   const pageContent = document.querySelector(".page-content");
   const heroMotionRoot = document.querySelector(".hero-stage .hero");
   const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -368,27 +408,12 @@
     if (!heroMotionRoot) return;
     const progress = Math.max(0, Math.min(1, 1 - contentTop / window.innerHeight));
     const viewportFactor = window.innerWidth <= 700 ? 0.56 : 1;
-    const accessibilityFactor = reducedMotionQuery.matches ? 0.42 : 1;
-    const motion = progress * viewportFactor * accessibilityFactor;
+    const motion = reducedMotionQuery.matches ? 0 : progress * viewportFactor;
     const baseScale = window.innerWidth <= 700 ? 1.02 : 1.012;
 
     heroMotionRoot.style.setProperty("--scene-x", `${(-4 * motion).toFixed(2)}px`);
     heroMotionRoot.style.setProperty("--scene-y", `${(-12 * motion).toFixed(2)}px`);
     heroMotionRoot.style.setProperty("--scene-scale", (baseScale + 0.018 * motion).toFixed(4));
-    heroMotionRoot.style.setProperty("--stars-y", `${(-22 * motion).toFixed(2)}px`);
-    heroMotionRoot.style.setProperty("--beam-x", `${(4 * motion).toFixed(2)}px`);
-    heroMotionRoot.style.setProperty("--beam-y", `${(-7 * motion).toFixed(2)}px`);
-    heroMotionRoot.style.setProperty("--beam-scale", (1 + 0.08 * motion).toFixed(4));
-    heroMotionRoot.style.setProperty("--beam-opacity", (0.12 + 0.1 * motion).toFixed(3));
-    heroMotionRoot.style.setProperty("--doc-one-x", `${(-10 * motion).toFixed(2)}px`);
-    heroMotionRoot.style.setProperty("--doc-one-y", `${(-28 * motion).toFixed(2)}px`);
-    heroMotionRoot.style.setProperty("--doc-one-rotation", `${(-5 + 1.2 * motion).toFixed(3)}deg`);
-    heroMotionRoot.style.setProperty("--doc-two-x", `${(8 * motion).toFixed(2)}px`);
-    heroMotionRoot.style.setProperty("--doc-two-y", `${(-18 * motion).toFixed(2)}px`);
-    heroMotionRoot.style.setProperty("--doc-two-rotation", `${(6 - motion).toFixed(3)}deg`);
-    heroMotionRoot.style.setProperty("--doc-three-x", `${(-6 * motion).toFixed(2)}px`);
-    heroMotionRoot.style.setProperty("--doc-three-y", `${(-20 * motion).toFixed(2)}px`);
-    heroMotionRoot.style.setProperty("--doc-three-rotation", `${(-2 + 0.7 * motion).toFixed(3)}deg`);
   }
 
   function requestHeaderSync() {
@@ -399,6 +424,9 @@
 
   window.addEventListener("scroll", requestHeaderSync, { passive: true });
   window.addEventListener("resize", requestHeaderSync);
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 700) setMenuOpen(false);
+  });
 
   applyLanguage(preferredLanguage());
   syncHeaderTheme();
