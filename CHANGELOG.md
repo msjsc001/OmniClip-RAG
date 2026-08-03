@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## V0.5.4 - 2026-08-03
+
+### Added
+
+- Added per-knowledge-base live-watch backlog progress and dynamically recalculated completion-time estimates for batches containing more than three pending files.
+- Added activity-log stages for offline reconciliation, live batches, retained repair work, retries, progress, and completion.
+- Added regression coverage for startup reconciliation, Watchdog add/modify/delete events, bounded repairs, fair multi-vault scheduling, and ETA updates.
+
+### Changed
+
+- Changed offline live-watch reconciliation to use bounded batches instead of allowing one large knowledge base to monopolize the semantic worker.
+- Changed live file events to take priority over historical backlog and repair work, so the note currently being edited is indexed first.
+- Changed multi-vault semantic indexing to use a fair FIFO gate, giving each knowledge base a turn instead of repeatedly favoring one source.
+- Increased only the file count of large backlog batches to amortize model-process startup cost; the existing vector encode and resource limits remain unchanged.
+- Updated package, Windows, MCP, MCPB, Registry, and setup metadata to `0.5.4`.
+
+### Fixed
+
+- Fixed live watch appearing idle after files changed while Caelune was closed.
+- Fixed stale or oversized repair queues repeatedly delaying new edits and retaining invalid paths.
+- Fixed a continuously busy knowledge base starving another selected knowledge base of incremental-indexing turns.
+- Fixed long multi-file updates providing no useful indication of completed work, remaining work, or estimated time.
+
+### Compatibility
+
+- Existing knowledge bases, indexes, Runtime components, model caches, watch settings, and UI settings remain compatible.
+- No model download, Runtime reinstall, or full index rebuild is required solely for this update.
+- The Python package remains `omniclip_rag`, and the MCP tool IDs remain `omniclip.status` and `omniclip.search`.
+
 ## V0.5.0 - 2026-08-01
 
 ### Changed

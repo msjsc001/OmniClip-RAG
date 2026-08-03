@@ -7927,6 +7927,8 @@ class ConfigWorkspace(QtWidgets.QWidget):
             self._refresh_md_vault_table()
         events = payload.get('events', []) or []
         for event in events:
+            if not isinstance(event, dict):
+                continue
             kind = str(event.get('kind') or '').strip().lower()
             if kind == 'vault_offline':
                 self._append_log(self._tr('log_watch_vault_offline', reason=str(event.get('reason') or self._tr('none_value'))), focus_log=True)
@@ -7934,6 +7936,83 @@ class ConfigWorkspace(QtWidgets.QWidget):
                 self._append_log(self._tr('log_watch_vault_recovered'))
             elif kind == 'repair':
                 self._append_log(self._tr('log_watch_repaired', paths=int(event.get('paths', 0) or 0), vector_paths=int(event.get('vector_paths', 0) or 0), vector_chunk_ids=int(event.get('vector_chunk_ids', 0) or 0)))
+            elif kind == 'repair_progress':
+                self.statusMessageChanged.emit(self._tr('status_watch_processing'))
+                self._append_log(self._tr(
+                    'log_watch_repair_progress',
+                    vault=Path(normalized).name or normalized,
+                    paths=int(event.get('paths', 0) or 0),
+                    vector_paths=int(event.get('vector_paths', 0) or 0),
+                    vector_chunk_ids=int(event.get('vector_chunk_ids', 0) or 0),
+                    pending_paths=int(event.get('pending_paths', 0) or 0),
+                    pending_vector_paths=int(event.get('pending_vector_paths', 0) or 0),
+                    pending_vector_chunk_ids=int(event.get('pending_vector_chunk_ids', 0) or 0),
+                ))
+            elif kind == 'repair_retry':
+                self.statusMessageChanged.emit(self._tr('status_watch_processing'))
+                self._append_log(self._tr(
+                    'log_watch_repair_retry',
+                    vault=Path(normalized).name or normalized,
+                    error=str(event.get('error') or self._tr('none_value')),
+                ), focus_log=True)
+            elif kind == 'reconcile_queued':
+                total = int(event.get('total', 0) or 0)
+                self.statusMessageChanged.emit(self._tr('status_watch_processing'))
+                if total > 0:
+                    self._append_log(self._tr(
+                        'log_watch_reconcile_queued',
+                        vault=Path(normalized).name or normalized,
+                        changed=int(event.get('changed', 0) or 0),
+                        deleted=int(event.get('deleted', 0) or 0),
+                    ))
+            elif kind == 'batch_started':
+                self.statusMessageChanged.emit(self._tr('status_watch_processing'))
+                source_key = f"watch_batch_source_{str(event.get('source') or 'repair').strip().lower()}"
+                self._append_log(self._tr(
+                    'log_watch_batch_started',
+                    vault=Path(normalized).name or normalized,
+                    source=self._tr(source_key),
+                    changed=int(event.get('changed', 0) or 0),
+                    deleted=int(event.get('deleted', 0) or 0),
+                    pending=int(event.get('total_pending', 0) or 0),
+                ))
+            elif kind == 'backlog_progress':
+                live_pending = int(event.get('live_pending', 0) or 0)
+                reconcile_pending = int(event.get('reconcile_pending', 0) or 0)
+                repair_pending = bool(event.get('repair_pending'))
+                eta_tracked = bool(event.get('eta_tracked')) and int(event.get('eta_total', 0) or 0) > 3
+                eta_remaining = int(event.get('eta_remaining', 0) or 0)
+                if eta_tracked and eta_remaining <= 0:
+                    self._append_log(self._tr(
+                        'log_watch_backlog_complete',
+                        vault=Path(normalized).name or normalized,
+                        completed=int(event.get('eta_completed', 0) or 0),
+                        elapsed=format_duration(int(event.get('eta_elapsed_seconds', 0) or 0)),
+                    ))
+                    self.statusMessageChanged.emit(
+                        self._tr('status_watch_processing') if repair_pending else self._tr('status_watch_running')
+                    )
+                elif eta_tracked and int(event.get('eta_seconds', 0) or 0) > 0:
+                    self.statusMessageChanged.emit(self._tr('status_watch_processing'))
+                    self._append_log(self._tr(
+                        'log_watch_backlog_progress_eta',
+                        vault=Path(normalized).name or normalized,
+                        completed=int(event.get('eta_completed', 0) or 0),
+                        total=int(event.get('eta_total', 0) or 0),
+                        remaining=eta_remaining,
+                        eta=format_duration(int(event.get('eta_seconds', 0) or 0)),
+                        samples=int(event.get('eta_samples', 0) or 0),
+                    ))
+                elif live_pending or reconcile_pending or repair_pending:
+                    self.statusMessageChanged.emit(self._tr('status_watch_processing'))
+                    self._append_log(self._tr(
+                        'log_watch_backlog_progress',
+                        vault=Path(normalized).name or normalized,
+                        live_pending=live_pending,
+                        reconcile_pending=reconcile_pending,
+                    ))
+                else:
+                    self.statusMessageChanged.emit(self._tr('status_watch_running'))
             elif kind == 'batch_retry':
                 self._append_log(self._tr('log_watch_batch_retry', changed=', '.join(event.get('changed', [])[:3]) or self._tr('none_value'), deleted=', '.join(event.get('deleted', [])[:3]) or self._tr('none_value'), error=str(event.get('error') or self._tr('none_value'))), focus_log=True)
         if not payload.get('note_only'):

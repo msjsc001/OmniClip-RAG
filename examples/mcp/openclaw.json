@@ -2,7 +2,7 @@
   "mcpServers": {
     "caelune": {
       "transport": "stdio",
-      "command": "D:\\Apps\\Caelune\\dist\\Caelune-MCP-v0.5.2\\Caelune-MCP.exe",
+      "command": "D:\\Apps\\Caelune\\dist\\Caelune-MCP-v0.5.4\\Caelune-MCP.exe",
       "args": []
     }
   }

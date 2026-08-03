@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import ensure_data_paths
 from .query_subprocess import config_from_payload, write_json_atomic
-from .service import OmniClipService
+from .service import WATCH_REPAIR_VECTOR_CHUNKS_PER_PATH, OmniClipService
 
 
 _WATCH_VECTOR_BATCH_SIZES = {
@@ -68,6 +68,9 @@ def execute_watch_reindex_request(request: dict[str, object]) -> dict[str, objec
     ]
     service = OmniClipService(config, paths)
     try:
+        # Apply the newest editor batch first. Historical repair is durable and
+        # bounded below, so it must not delay the change the user just made.
+        stats = service.reindex_paths(changed, deleted) if changed or deleted else service.store.stats()
         repair_events: list[dict[str, object]] = []
         watch_state = service._read_watch_state() or {}
         repair_needed = any(
@@ -77,8 +80,29 @@ def execute_watch_reindex_request(request: dict[str, object]) -> dict[str, objec
         if repair_needed:
             current_snapshot, _offline_reason = service._snapshot_safe()
             if current_snapshot is not None:
-                repair_events = service._repair_watch_state(current_snapshot)
-        stats = service.reindex_paths(changed, deleted) if changed or deleted else service.store.stats()
+                repair_path_limit = max(int(effective_batch_size), 1)
+                repair_chunk_limit = max(
+                    repair_path_limit * WATCH_REPAIR_VECTOR_CHUNKS_PER_PATH,
+                    WATCH_REPAIR_VECTOR_CHUNKS_PER_PATH,
+                )
+                try:
+                    repair_events = service._repair_watch_state(
+                        current_snapshot,
+                        path_limit=repair_path_limit,
+                        vector_path_limit=repair_path_limit,
+                        vector_chunk_limit=repair_chunk_limit,
+                    )
+                except Exception as exc:
+                    # A stale vector repair must not indefinitely starve a new
+                    # file edit. Keep the journal intact and let this batch
+                    # still update Markdown/FTS; a later worker can retry the
+                    # bounded repair without blocking every vault behind it.
+                    repair_events = [
+                        {
+                            'kind': 'repair_retry',
+                            'error': str(exc).strip() or exc.__class__.__name__,
+                        }
+                    ]
         return {
             'stats': stats,
             'events': repair_events,

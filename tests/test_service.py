@@ -7,12 +7,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 from omniclip_rag import parser as parser_module
+from omniclip_rag import service as service_module
 from omniclip_rag.app_logging import shutdown_logging
 from omniclip_rag.config import AppConfig, ensure_data_paths
 from omniclip_rag.errors import BuildCancelledError, RuntimeDependencyError
 from omniclip_rag.models import RerankOutcome, SearchHit
 from omniclip_rag.retrieval_policy import build_query_profile
-from omniclip_rag.service import OmniClipService, _VaultEventHandler
+from omniclip_rag.service import OmniClipService, _VaultEventHandler, _WatchBacklogEta
 from omniclip_rag.timing import load_build_history
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_ROOT = ROOT / "笔记样本"
@@ -840,6 +841,34 @@ class ServiceTests(unittest.TestCase):
             self.assertGreaterEqual(len(failing_vector.upsert_batches), 2)
         finally:
             service.close()
+
+    def test_watch_repair_clears_stale_missing_paths_instead_of_spinning(self) -> None:
+        vault_copy = ROOT / '.tmp' / 'stale_watch_repair_vault_test'
+        data_root = ROOT / '.tmp' / 'stale_watch_repair_data_test'
+        shutil.rmtree(data_root, ignore_errors=True)
+        shutil.rmtree(vault_copy, ignore_errors=True)
+        vault_copy.mkdir(parents=True, exist_ok=True)
+        data_paths = ensure_data_paths(str(data_root), str(vault_copy))
+        config = AppConfig(
+            vault_path=str(vault_copy),
+            data_root=str(data_paths.global_root),
+            vector_backend='disabled',
+        )
+        service = OmniClipService(config, data_paths)
+        try:
+            service._update_watch_state(
+                add_paths=['already-removed.md'],
+                add_vector_paths=['already-removed.md'],
+            )
+            events = service._repair_watch_state({})
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]['stale_paths'], 1)
+            self.assertEqual(events[0]['stale_vector_paths'], 1)
+            self.assertIsNone(service._read_watch_state())
+        finally:
+            service.close()
+            shutil.rmtree(data_root, ignore_errors=True)
+            shutil.rmtree(vault_copy, ignore_errors=True)
     def test_snapshot_safe_reports_vault_offline_instead_of_empty_snapshot(self) -> None:
         vault_copy = ROOT / '.tmp' / 'snapshot_offline_vault_test'
         data_root = ROOT / '.tmp' / 'snapshot_offline_data_test'
@@ -1227,6 +1256,279 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(handler.pop_due_changes(10.0), ([], []))
         with patch('omniclip_rag.service.time.time', return_value=110.1):
             self.assertEqual(handler.pop_due_changes(10.0), (['page.md'], []))
+
+    def test_watchdog_batches_offline_reconciliation_and_prioritizes_new_live_edit(self) -> None:
+        data_root = ROOT / '.tmp' / 'watchdog_priority_data_test'
+        vault = ROOT / '.tmp' / 'watchdog_priority_vault_test'
+        shutil.rmtree(data_root, ignore_errors=True)
+        shutil.rmtree(vault, ignore_errors=True)
+        vault.mkdir(parents=True, exist_ok=True)
+        offline_targets = []
+        for index in range(9):
+            target = vault / f'offline-{index}.md'
+            target.write_text(f'- original {index}\n', encoding='utf-8')
+            offline_targets.append(target)
+        live_target = vault / 'live.md'
+        live_target.write_text('- live original\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root), str(vault))
+        config = AppConfig(
+            vault_path=str(vault),
+            data_root=str(data_paths.global_root),
+            vector_backend='disabled',
+            watch_resource_peak_percent=5,
+        )
+        service = OmniClipService(config, data_paths)
+
+        class FakeObserver:
+            latest = None
+
+            def __init__(self):
+                FakeObserver.latest = self
+                self.handler = None
+
+            def schedule(self, handler, path, recursive=True):
+                self.handler = handler
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def join(self, timeout=None):
+                pass
+
+            def is_alive(self):
+                return False
+
+        try:
+            service.rebuild_index()
+            for index, target in enumerate(offline_targets):
+                target.write_text(f'- offline changed {index}\n', encoding='utf-8')
+
+            stop_event = threading.Event()
+            calls: list[tuple[list[str], list[str]]] = []
+            updates: list[dict[str, object]] = []
+
+            def runner(changed, deleted, _stop):
+                calls.append((list(changed), list(deleted)))
+                if len(calls) == 1:
+                    live_target.write_text('- newest live edit\n', encoding='utf-8')
+                    assert FakeObserver.latest is not None
+                    assert FakeObserver.latest.handler is not None
+                    FakeObserver.latest.handler.on_any_event(
+                        SimpleNamespace(
+                            is_directory=False,
+                            src_path=str(live_target),
+                            event_type='modified',
+                        )
+                    )
+                    time.sleep(0.65)
+                if len(calls) >= 3:
+                    stop_event.set()
+                return {'stats': service.store.stats(), 'events': []}
+
+            with patch('omniclip_rag.service.Observer', FakeObserver):
+                service.watch_until_stopped(
+                    stop_event=stop_event,
+                    interval=0.5,
+                    reindex_runner=runner,
+                    on_update=lambda payload: updates.append(dict(payload)),
+                )
+
+            self.assertGreaterEqual(len(calls), 2)
+            self.assertEqual(len(calls[0][0]) + len(calls[0][1]), 4)
+            self.assertEqual(calls[1], (['live.md'], []))
+            reconcile_events = [
+                event
+                for payload in updates
+                for event in payload.get('events', [])
+                if event.get('kind') == 'reconcile_queued'
+            ]
+            self.assertEqual(len(reconcile_events), 1)
+            self.assertEqual(reconcile_events[0]['total'], 9)
+        finally:
+            service.close()
+            shutil.rmtree(data_root, ignore_errors=True)
+            shutil.rmtree(vault, ignore_errors=True)
+
+    def test_watch_backlog_eta_recalculates_from_completed_batches(self) -> None:
+        now = [100.0]
+        tracker = _WatchBacklogEta(clock=lambda: now[0])
+        tracker.observe_pending(10)
+
+        now[0] = 104.0
+        first = tracker.record_batch(completed=2, remaining=8, batch_seconds=4.0)
+        self.assertTrue(first['eta_tracked'])
+        self.assertEqual(first['eta_completed'], 2)
+        self.assertEqual(first['eta_total'], 10)
+        self.assertEqual(first['eta_seconds'], 16)
+
+        now[0] = 110.0
+        second = tracker.record_batch(completed=2, remaining=6, batch_seconds=6.0)
+        self.assertEqual(second['eta_completed'], 4)
+        self.assertEqual(second['eta_samples'], 2)
+        self.assertNotEqual(second['eta_seconds'], first['eta_seconds'])
+
+        now[0] = 116.0
+        completed = tracker.record_batch(completed=6, remaining=0, batch_seconds=6.0)
+        self.assertEqual(completed['eta_completed'], 10)
+        self.assertEqual(completed['eta_remaining'], 0)
+        self.assertEqual(completed['eta_elapsed_seconds'], 16)
+
+    def test_watch_backlog_uses_larger_fair_turn_without_changing_small_live_batch(self) -> None:
+        data_root = ROOT / '.tmp' / 'watch_batch_limit_data_test'
+        vault = ROOT / '.tmp' / 'watch_batch_limit_vault_test'
+        shutil.rmtree(data_root, ignore_errors=True)
+        shutil.rmtree(vault, ignore_errors=True)
+        vault.mkdir(parents=True, exist_ok=True)
+        data_paths = ensure_data_paths(str(data_root), str(vault))
+        service = OmniClipService(
+            AppConfig(
+                vault_path=str(vault),
+                data_root=str(data_paths.global_root),
+                vector_backend='disabled',
+                watch_resource_peak_percent=15,
+            ),
+            data_paths,
+        )
+        try:
+            self.assertEqual(service._watch_batch_limit(3), 4)
+            self.assertEqual(service._watch_batch_limit(4), 16)
+            self.assertEqual(service._watch_batch_limit(1000), 16)
+        finally:
+            service.close()
+            shutil.rmtree(data_root, ignore_errors=True)
+            shutil.rmtree(vault, ignore_errors=True)
+
+    @unittest.skipUnless(service_module.WATCHDOG_AVAILABLE, 'watchdog is not installed')
+    def test_real_watchdog_applies_add_modify_delete_and_offline_restart_change(self) -> None:
+        data_root = ROOT / '.tmp' / 'watchdog_real_data_test'
+        vault = ROOT / '.tmp' / 'watchdog_real_vault_test'
+        shutil.rmtree(data_root, ignore_errors=True)
+        shutil.rmtree(vault, ignore_errors=True)
+        vault.mkdir(parents=True, exist_ok=True)
+        kept = vault / 'kept.md'
+        removed = vault / 'removed.md'
+        added = vault / 'added.md'
+        kept.write_text('- initial content\n', encoding='utf-8')
+        removed.write_text('- remove me\n', encoding='utf-8')
+        data_paths = ensure_data_paths(str(data_root), str(vault))
+        config = AppConfig(
+            vault_path=str(vault),
+            data_root=str(data_paths.global_root),
+            vector_backend='disabled',
+            watch_resource_peak_percent=90,
+        )
+        initial_service = OmniClipService(config, data_paths)
+        try:
+            initial_service.rebuild_index()
+        finally:
+            initial_service.close()
+
+        def start_watch():
+            stop_event = threading.Event()
+            observer_ready = threading.Event()
+            updates: list[dict[str, object]] = []
+            errors: list[BaseException] = []
+            real_observer = service_module.Observer
+
+            class NotifyingObserver(real_observer):
+                def start(self):
+                    super().start()
+                    observer_ready.set()
+
+            def run() -> None:
+                thread_paths = ensure_data_paths(str(data_root), str(vault))
+                thread_service = OmniClipService(config, thread_paths)
+                try:
+                    with patch('omniclip_rag.service.Observer', NotifyingObserver):
+                        thread_service.watch_until_stopped(
+                            stop_event=stop_event,
+                            interval=0.5,
+                            on_update=lambda payload: updates.append(dict(payload)),
+                        )
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    thread_service.close()
+
+            thread = threading.Thread(target=run)
+            thread.start()
+            self.assertTrue(observer_ready.wait(3.0))
+            return stop_event, thread, updates, errors
+
+        def wait_for_paths(
+            updates: list[dict[str, object]],
+            *,
+            changed: set[str],
+            deleted: set[str],
+            timeout: float = 10.0,
+        ) -> bool:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                seen_changed = {
+                    path
+                    for payload in list(updates)
+                    for path in payload.get('changed', [])
+                }
+                seen_deleted = {
+                    path
+                    for payload in list(updates)
+                    for path in payload.get('deleted', [])
+                }
+                if changed <= seen_changed and deleted <= seen_deleted:
+                    return True
+                time.sleep(0.05)
+            return False
+
+        try:
+            stop_event, watch_thread, updates, errors = start_watch()
+            kept.write_text('- live-modified-token\n', encoding='utf-8')
+            added.write_text('- live-added-token\n', encoding='utf-8')
+            removed.unlink()
+            self.assertTrue(
+                wait_for_paths(
+                    updates,
+                    changed={'kept.md', 'added.md'},
+                    deleted={'removed.md'},
+                )
+            )
+            stop_event.set()
+            watch_thread.join(timeout=5.0)
+            self.assertFalse(watch_thread.is_alive())
+            self.assertEqual(errors, [])
+
+            # The next watcher start must reconcile an edit made while the app
+            # was closed, without requiring another filesystem event.
+            kept.write_text('- offline-restart-token\n', encoding='utf-8')
+            stop_event, watch_thread, updates, errors = start_watch()
+            self.assertTrue(
+                wait_for_paths(updates, changed={'kept.md'}, deleted=set())
+            )
+            stop_event.set()
+            watch_thread.join(timeout=5.0)
+            self.assertFalse(watch_thread.is_alive())
+            self.assertEqual(errors, [])
+
+            verify_paths = ensure_data_paths(str(data_root), str(vault))
+            verify_service = OmniClipService(config, verify_paths)
+            try:
+                self.assertEqual(
+                    set(verify_service.store.fetch_file_manifest()),
+                    {'kept.md', 'added.md'},
+                )
+                self.assertTrue(verify_service.store.search_candidates('offline-restart-token', 5))
+                self.assertTrue(verify_service.store.search_candidates('live-added-token', 5))
+            finally:
+                verify_service.close()
+        finally:
+            if 'stop_event' in locals():
+                stop_event.set()
+            if 'watch_thread' in locals() and watch_thread.is_alive():
+                watch_thread.join(timeout=5.0)
+            shutil.rmtree(data_root, ignore_errors=True)
+            shutil.rmtree(vault, ignore_errors=True)
 
     def test_snapshot_ignores_logseq_generated_history_directories(self) -> None:
         vault = ROOT / '.tmp' / 'watch_ignore_generated_vault_test'

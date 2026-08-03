@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import traceback
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,7 +38,43 @@ from ..watch_subprocess import (
 
 
 LOGGER = logging.getLogger(__name__)
-_WATCH_REINDEX_PROCESS_LOCK = threading.Lock()
+
+
+class _FairWatchReindexGate:
+    """Serialize semantic workers without letting one vault reacquire forever."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._queue: deque[object] = deque()
+        self._active = False
+
+    def acquire(self, stop_event: threading.Event) -> bool:
+        token = object()
+        with self._condition:
+            self._queue.append(token)
+            while True:
+                if stop_event.is_set():
+                    try:
+                        self._queue.remove(token)
+                    except ValueError:
+                        pass
+                    self._condition.notify_all()
+                    return False
+                if not self._active and self._queue and self._queue[0] is token:
+                    self._queue.popleft()
+                    self._active = True
+                    return True
+                self._condition.wait(timeout=0.1)
+
+    def release(self) -> None:
+        with self._condition:
+            if not self._active:
+                return
+            self._active = False
+            self._condition.notify_all()
+
+
+_WATCH_REINDEX_PROCESS_GATE = _FairWatchReindexGate()
 
 
 def _safe_emit(signal, *args) -> None:
@@ -629,11 +666,7 @@ class WatchWorker(QtCore.QObject):
         deleted: list[str],
         _stop_event: threading.Event,
     ) -> dict[str, object]:
-        acquired = False
-        while not self._stop_event.is_set():
-            acquired = _WATCH_REINDEX_PROCESS_LOCK.acquire(timeout=0.1)
-            if acquired:
-                break
+        acquired = _WATCH_REINDEX_PROCESS_GATE.acquire(self._stop_event)
         if not acquired:
             raise BuildCancelledError('cancelled')
 
@@ -692,7 +725,7 @@ class WatchWorker(QtCore.QObject):
                     if self._process is process:
                         self._process = None
         finally:
-            _WATCH_REINDEX_PROCESS_LOCK.release()
+            _WATCH_REINDEX_PROCESS_GATE.release()
 
     def _run(self) -> None:
         service = OmniClipService(self._config, self._paths)

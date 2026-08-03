@@ -7,7 +7,7 @@
 **A local-first Windows desktop app and read-only MCP server for searching private Markdown, PDF, and Tika-backed knowledge bases.**
 
 [![Latest Release](https://img.shields.io/github/v/release/EllisMorrow/Caelune?style=flat-square&label=release)](https://github.com/EllisMorrow/Caelune/releases/latest)
-[![Version](https://img.shields.io/badge/version-v0.5.2-0b7285?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/tag/v0.5.2)
+[![Version](https://img.shields.io/badge/version-v0.5.4-0b7285?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/tag/v0.5.4)
 [![Windows](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/latest)
 [![Local-first](https://img.shields.io/badge/local--first-yes-1d7467?style=flat-square)](#privacy-boundary)
 [![Downloads](https://img.shields.io/github/downloads/EllisMorrow/Caelune/total?label=downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/Caelune/releases)

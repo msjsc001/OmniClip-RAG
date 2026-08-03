@@ -61,6 +61,7 @@ WATCH_DEBOUNCE_SECONDS = 0.8
 WATCH_STABLE_FILE_SECONDS = 1.2
 WATCH_DELETE_CONFIRM_SECONDS = 3.0
 WATCH_REPAIR_INTERVAL_SECONDS = 20.0
+WATCH_REPAIR_VECTOR_CHUNKS_PER_PATH = 32
 WATCH_STATE_VERSION = 1
 REBUILD_STATE_VERSION = 2
 INDEX_STATE_VERSION = 1
@@ -87,6 +88,23 @@ WATCH_READY_BATCH_LIMITS = {
     60: 24,
     70: 32,
     80: 48,
+    90: 64,
+}
+# Large backlogs need to amortize the 8-30 second semantic-model cold start
+# paid by every isolated worker. These caps only increase the number of source
+# files in one fair turn; the configured vector encode batch size still limits
+# RAM/VRAM pressure inside the worker.
+WATCH_BACKLOG_BATCH_LIMITS = {
+    5: 4,
+    10: 8,
+    15: 16,
+    20: 20,
+    30: 24,
+    40: 32,
+    50: 40,
+    60: 48,
+    70: 56,
+    80: 64,
     90: 64,
 }
 WATCH_BATCH_COOLDOWNS = {
@@ -120,6 +138,93 @@ EXTENDED_REDACTION_PATTERNS = [
 ]
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _WatchBacklogEta:
+    """Estimate one vault's backlog from observed end-to-end batch throughput."""
+
+    MIN_TRACKED_ITEMS = 4
+    RECENT_RATE_WEIGHT = 0.65
+
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        self._clock = clock or time.monotonic
+        self._started_at: float | None = None
+        self._completed = 0
+        self._total = 0
+        self._recent_rate: float | None = None
+        self._samples = 0
+
+    def observe_pending(self, pending: int) -> None:
+        safe_pending = max(int(pending), 0)
+        if safe_pending <= 0:
+            return
+        if self._started_at is None:
+            self._started_at = self._clock()
+            self._completed = 0
+            self._total = safe_pending
+            self._recent_rate = None
+            self._samples = 0
+            return
+        self._total = self._completed + safe_pending
+
+    def record_batch(
+        self,
+        *,
+        completed: int,
+        remaining: int,
+        batch_seconds: float,
+    ) -> dict[str, object]:
+        safe_completed = max(int(completed), 0)
+        safe_remaining = max(int(remaining), 0)
+        if self._started_at is None:
+            self.observe_pending(safe_completed + safe_remaining)
+        started_at = self._started_at
+        if started_at is None:
+            return {}
+
+        if safe_completed > 0:
+            sample_rate = safe_completed / max(float(batch_seconds), 0.001)
+            if self._recent_rate is None:
+                self._recent_rate = sample_rate
+            else:
+                weight = self.RECENT_RATE_WEIGHT
+                self._recent_rate = self._recent_rate * (1.0 - weight) + sample_rate * weight
+            self._completed += safe_completed
+            self._samples += 1
+
+        self._total = self._completed + safe_remaining
+        elapsed = max(self._clock() - started_at, 0.0)
+        cumulative_rate = self._completed / max(elapsed, 0.001) if self._completed > 0 else 0.0
+        if self._recent_rate is not None and cumulative_rate > 0:
+            effective_rate = self._recent_rate * 0.65 + cumulative_rate * 0.35
+        else:
+            effective_rate = self._recent_rate or cumulative_rate
+        eta_seconds = (
+            int(round(safe_remaining / effective_rate))
+            if self._total >= self.MIN_TRACKED_ITEMS and safe_remaining > 0 and effective_rate > 0
+            else 0
+        )
+        payload: dict[str, object] = {
+            'eta_tracked': self._total >= self.MIN_TRACKED_ITEMS,
+            'eta_completed': self._completed,
+            'eta_total': self._total,
+            'eta_remaining': safe_remaining,
+            'eta_seconds': max(eta_seconds, 1) if eta_seconds else 0,
+            'eta_elapsed_seconds': int(round(elapsed)),
+            'eta_batch_seconds': round(max(float(batch_seconds), 0.0), 3),
+            'eta_samples': self._samples,
+            'eta_items_per_second': round(max(float(effective_rate), 0.0), 6),
+        }
+        if safe_remaining <= 0:
+            self.reset()
+        return payload
+
+    def reset(self) -> None:
+        self._started_at = None
+        self._completed = 0
+        self._total = 0
+        self._recent_rate = None
+        self._samples = 0
 
 
 class _LazyBlockLookup:
@@ -195,8 +300,11 @@ class OmniClipService:
     def _watch_peak_percent(self) -> int:
         return normalize_watch_resource_peak_percent(getattr(self.config, 'watch_resource_peak_percent', 15), 15)
 
-    def _watch_batch_limit(self) -> int:
-        return WATCH_READY_BATCH_LIMITS.get(self._watch_peak_percent(), 16)
+    def _watch_batch_limit(self, pending_count: int = 0) -> int:
+        peak = self._watch_peak_percent()
+        if int(pending_count or 0) > 3:
+            return WATCH_BACKLOG_BATCH_LIMITS.get(peak, 24)
+        return WATCH_READY_BATCH_LIMITS.get(peak, 16)
 
     def _watch_post_batch_cooldown(self) -> float:
         return WATCH_BATCH_COOLDOWNS.get(self._watch_peak_percent(), 0.24)
@@ -865,17 +973,31 @@ class OmniClipService:
         current_snapshot: dict[str, tuple[float, int]],
         *,
         cancel_event: threading.Event | None = None,
+        path_limit: int | None = None,
+        vector_path_limit: int | None = None,
+        vector_chunk_limit: int | None = None,
     ) -> list[dict[str, object]]:
         state = self._read_watch_state()
         if state is None:
             return []
 
-        repaired_paths = sorted(path for path in state.get('dirty_paths', []) if path in current_snapshot)
-        repaired_vector_paths = sorted(path for path in state.get('dirty_vector_paths', []) if path in current_snapshot)
+        dirty_paths = sorted({path for path in state.get('dirty_paths', []) if path})
+        dirty_vector_paths = sorted({path for path in state.get('dirty_vector_paths', []) if path})
+        stale_paths = [path for path in dirty_paths if path not in current_snapshot]
+        stale_vector_paths = [path for path in dirty_vector_paths if path not in current_snapshot]
+        repaired_paths = [path for path in dirty_paths if path in current_snapshot]
+        repaired_vector_paths = [path for path in dirty_vector_paths if path in current_snapshot]
         repaired_vector_chunk_ids = sorted({item for item in state.get('dirty_vector_chunk_ids', []) if item})
+        if path_limit is not None:
+            repaired_paths = repaired_paths[:max(int(path_limit), 0)]
+        if vector_path_limit is not None:
+            repaired_vector_paths = repaired_vector_paths[:max(int(vector_path_limit), 0)]
+        if vector_chunk_limit is not None:
+            repaired_vector_chunk_ids = repaired_vector_chunk_ids[:max(int(vector_chunk_limit), 0)]
         if repaired_paths:
             self._refresh_rendered(repaired_paths, cancel_event=cancel_event)
-            self._update_watch_state(remove_paths=repaired_paths)
+        if repaired_paths or stale_paths:
+            self._update_watch_state(remove_paths=repaired_paths + stale_paths)
         if repaired_vector_chunk_ids or repaired_vector_paths:
             _wait_for_worker_controls(None, cancel_event)
             if repaired_vector_chunk_ids:
@@ -883,17 +1005,34 @@ class OmniClipService:
             if repaired_vector_paths:
                 self._upsert_vector_documents_for_paths(repaired_vector_paths, cancel_event=cancel_event)
             self._update_watch_state(
-                remove_vector_paths=repaired_vector_paths,
+                remove_vector_paths=repaired_vector_paths + stale_vector_paths,
                 remove_vector_chunk_ids=repaired_vector_chunk_ids,
             )
-        if not repaired_paths and not repaired_vector_paths and not repaired_vector_chunk_ids:
+        elif stale_vector_paths:
+            self._update_watch_state(remove_vector_paths=stale_vector_paths)
+        if not any((
+            repaired_paths,
+            repaired_vector_paths,
+            repaired_vector_chunk_ids,
+            stale_paths,
+            stale_vector_paths,
+        )):
             return []
+        remaining_state = self._read_watch_state() or {}
+        pending_paths = len(remaining_state.get('dirty_paths', []) or [])
+        pending_vector_paths = len(remaining_state.get('dirty_vector_paths', []) or [])
+        pending_vector_chunk_ids = len(remaining_state.get('dirty_vector_chunk_ids', []) or [])
         return [
             {
-                'kind': 'repair',
+                'kind': 'repair_progress' if any((pending_paths, pending_vector_paths, pending_vector_chunk_ids)) else 'repair',
                 'paths': len(repaired_paths),
                 'vector_paths': len(repaired_vector_paths),
                 'vector_chunk_ids': len(repaired_vector_chunk_ids),
+                'stale_paths': len(stale_paths),
+                'stale_vector_paths': len(stale_vector_paths),
+                'pending_paths': pending_paths,
+                'pending_vector_paths': pending_vector_paths,
+                'pending_vector_chunk_ids': pending_vector_chunk_ids,
             }
         ]
 
@@ -1918,9 +2057,73 @@ class OmniClipService:
         try:
             if stop_event.is_set():
                 return
-            # One startup reconciliation catches changes made while Caelune was
-            # closed. After that, watchdog events are the only trigger: an idle
-            # vault does not get recursively rescanned on a timer.
+            # Reconcile changes made while Caelune was closed, but queue them in
+            # the same bounded scheduler as live events. A large offline diff
+            # must not monopolize the single semantic worker and starve fresh
+            # edits from another vault for minutes.
+            reconcile_changed: dict[str, None] = {}
+            reconcile_deleted: dict[str, None] = {}
+            live_changed: dict[str, None] = {}
+            live_deleted: dict[str, None] = {}
+
+            def queue_paths(
+                changed_paths: list[str],
+                deleted_paths: list[str],
+                *,
+                live: bool,
+            ) -> None:
+                changed_target = live_changed if live else reconcile_changed
+                deleted_target = live_deleted if live else reconcile_deleted
+                for relative_path in deleted_paths:
+                    if not relative_path:
+                        continue
+                    live_changed.pop(relative_path, None)
+                    reconcile_changed.pop(relative_path, None)
+                    deleted_target[relative_path] = None
+                for relative_path in changed_paths:
+                    if not relative_path:
+                        continue
+                    live_deleted.pop(relative_path, None)
+                    reconcile_deleted.pop(relative_path, None)
+                    if live:
+                        # A newer editor event supersedes the same path in the
+                        # startup snapshot diff. Do not process that file twice.
+                        reconcile_changed.pop(relative_path, None)
+                    changed_target[relative_path] = None
+
+            def take_batch(limit: int) -> tuple[list[str], list[str], str]:
+                budget = max(int(limit), 1)
+                selected_changed: list[str] = []
+                selected_deleted: list[str] = []
+                if live_changed or live_deleted:
+                    source = 'live'
+                    queues = (
+                        (live_changed, selected_changed),
+                        (live_deleted, selected_deleted),
+                    )
+                elif reconcile_changed or reconcile_deleted:
+                    source = 'reconcile'
+                    queues = (
+                        (reconcile_changed, selected_changed),
+                        (reconcile_deleted, selected_deleted),
+                    )
+                else:
+                    return selected_changed, selected_deleted, 'repair'
+                for pending, output in queues:
+                    while pending and budget > 0:
+                        relative_path = next(iter(pending))
+                        pending.pop(relative_path, None)
+                        output.append(relative_path)
+                        budget -= 1
+                    if budget <= 0:
+                        break
+                return selected_changed, selected_deleted, source
+
+            def pending_counts() -> tuple[int, int, int]:
+                live_count = len(live_changed) + len(live_deleted)
+                reconcile_count = len(reconcile_changed) + len(reconcile_deleted)
+                return live_count, reconcile_count, live_count + reconcile_count
+
             current_snapshot, offline_reason = self._snapshot_safe(cancel_event=stop_event)
             if current_snapshot is None:
                 self._update_watch_state(vault_offline=True, offline_reason=offline_reason or '')
@@ -1939,50 +2142,148 @@ class OmniClipService:
                     self.store.fetch_file_manifest(),
                     current_snapshot,
                 )
+                queue_paths(changed, deleted, live=False)
                 if changed or deleted or self._watch_state_needs_repair():
-                    stats, events = self._execute_watch_reindex(
-                        changed,
-                        deleted,
-                        stop_event,
-                        reindex_runner=reindex_runner,
+                    _emit_watch_update(
+                        on_update,
+                        'watchdog',
+                        [],
+                        [],
+                        self.store.stats(),
+                        events=[
+                            {
+                                'kind': 'reconcile_queued',
+                                'changed': len(changed),
+                                'deleted': len(deleted),
+                                'total': len(changed) + len(deleted),
+                                'repair_pending': self._watch_state_needs_repair(),
+                            }
+                        ],
+                        note_only=True,
                     )
-                    if not stop_event.is_set():
-                        _emit_watch_update(
-                            on_update,
-                            'watchdog',
-                            changed,
-                            deleted,
-                            stats,
-                            events=events,
-                            note_only=not bool(changed or deleted),
-                        )
                 del current_snapshot
 
             quiet_seconds = max(float(interval or WATCH_DEBOUNCE_SECONDS), 0.5)
             check_seconds = min(max(quiet_seconds / 4.0, 0.1), 1.0)
-            while not stop_event.wait(check_seconds):
-                changed, deleted = handler.pop_due_changes(quiet_seconds)
-                if not changed and not deleted:
-                    continue
-                changed, deleted = self._classify_watchdog_paths(changed, deleted)
-                if not changed and not deleted:
-                    continue
-                stats, events = self._execute_watch_reindex(
-                    changed,
-                    deleted,
-                    stop_event,
-                    reindex_runner=reindex_runner,
-                )
-                if stop_event.is_set():
+            batch_cooldown = max(self._watch_post_batch_cooldown(), 0.0)
+            eta_tracker = _WatchBacklogEta()
+            first_iteration = True
+            while not stop_event.is_set():
+                if not first_iteration and stop_event.wait(check_seconds):
                     break
+                first_iteration = False
+                changed, deleted = handler.pop_due_changes(quiet_seconds)
+                if changed or deleted:
+                    changed, deleted = self._classify_watchdog_paths(changed, deleted)
+                    queue_paths(changed, deleted, live=True)
+
+                repair_pending = self._watch_state_needs_repair()
+                live_pending, reconcile_pending, total_pending = pending_counts()
+                if total_pending <= 0 and not repair_pending:
+                    continue
+
+                eta_tracker.observe_pending(total_pending)
+                source_pending = live_pending if live_pending > 0 else reconcile_pending
+                batch_limit = max(self._watch_batch_limit(source_pending), 1)
+                batch_changed, batch_deleted, source = take_batch(batch_limit)
+                batch_changed, batch_deleted = self._classify_watchdog_paths(batch_changed, batch_deleted)
+                live_count, reconcile_count, total_remaining_before = pending_counts()
                 _emit_watch_update(
                     on_update,
                     'watchdog',
-                    changed,
-                    deleted,
+                    [],
+                    [],
+                    self.store.stats(),
+                    events=[
+                        {
+                            'kind': 'batch_started',
+                            'source': source,
+                            'changed': len(batch_changed),
+                            'deleted': len(batch_deleted),
+                            'live_pending': live_count,
+                            'reconcile_pending': reconcile_count,
+                            'total_pending': total_remaining_before,
+                            'repair_pending': repair_pending,
+                        }
+                    ],
+                    note_only=True,
+                )
+                batch_started_at = time.monotonic()
+                try:
+                    stats, events = self._execute_watch_reindex(
+                        batch_changed,
+                        batch_deleted,
+                        stop_event,
+                        reindex_runner=reindex_runner,
+                    )
+                except BuildCancelledError:
+                    queue_paths(batch_changed, batch_deleted, live=source == 'live')
+                    raise
+                except Exception as exc:
+                    queue_paths(batch_changed, batch_deleted, live=source == 'live')
+                    _emit_watch_update(
+                        on_update,
+                        'watchdog',
+                        [],
+                        [],
+                        self.store.stats(),
+                        events=[
+                            {
+                                'kind': 'batch_retry',
+                                'changed': batch_changed[:5],
+                                'deleted': batch_deleted[:5],
+                                'error': str(exc),
+                            }
+                        ],
+                        note_only=True,
+                    )
+                    if stop_event.wait(max(batch_cooldown, 2.0)):
+                        break
+                    continue
+                if stop_event.is_set():
+                    break
+                skipped_changed = [
+                    item
+                    for item in stats.get('skipped_changed_paths', [])
+                    if isinstance(item, str)
+                ]
+                if skipped_changed:
+                    queue_paths(skipped_changed, [], live=source == 'live')
+                live_count, reconcile_count, total_remaining = pending_counts()
+                batch_item_count = len(batch_changed) + len(batch_deleted)
+                completed_count = max(batch_item_count - len(set(skipped_changed)), 0)
+                batch_seconds = max(time.monotonic() - batch_started_at, 0.0)
+                eta_payload = (
+                    eta_tracker.record_batch(
+                        completed=completed_count,
+                        remaining=total_remaining,
+                        batch_seconds=batch_seconds + (batch_cooldown if total_remaining > 0 else 0.0),
+                    )
+                    if batch_item_count > 0
+                    else {}
+                )
+                events.append({
+                    'kind': 'backlog_progress',
+                    'source': source,
+                    'live_pending': live_count,
+                    'reconcile_pending': reconcile_count,
+                    'total_pending': total_remaining,
+                    'repair_pending': self._watch_state_needs_repair(),
+                    **eta_payload,
+                })
+                _emit_watch_update(
+                    on_update,
+                    'watchdog',
+                    batch_changed,
+                    batch_deleted,
                     stats,
                     events=events,
+                    note_only=not bool(batch_changed or batch_deleted),
                 )
+                retrying_repair = any(str(event.get('kind') or '') == 'repair_retry' for event in events)
+                cooldown = max(batch_cooldown, 2.0) if retrying_repair else batch_cooldown
+                if cooldown > 0.0 and stop_event.wait(cooldown):
+                    break
         finally:
             observer.stop()
             observer.join(timeout=5)
@@ -2028,12 +2329,30 @@ class OmniClipService:
         reindex_runner: Callable[[list[str], list[str], threading.Event], dict[str, object]] | None,
     ) -> tuple[dict[str, object], list[dict[str, object]]]:
         if reindex_runner is None:
+            # Fresh filesystem events are user-visible and must land before
+            # historical repair work. The repair journal remains durable and
+            # is consumed in bounded pieces after this batch.
             stats = self.reindex_paths(
                 changed,
                 deleted,
                 cancel_event=stop_event,
             )
-            return stats, []
+            repair_events: list[dict[str, object]] = []
+            if self._watch_state_needs_repair():
+                current_snapshot, _offline_reason = self._snapshot_safe(cancel_event=stop_event)
+                if current_snapshot is not None:
+                    repair_limit = max(self._watch_batch_limit(), 1)
+                    repair_events = self._repair_watch_state(
+                        current_snapshot,
+                        cancel_event=stop_event,
+                        path_limit=repair_limit,
+                        vector_path_limit=repair_limit,
+                        vector_chunk_limit=max(
+                            repair_limit * WATCH_REPAIR_VECTOR_CHUNKS_PER_PATH,
+                            WATCH_REPAIR_VECTOR_CHUNKS_PER_PATH,
+                        ),
+                    )
+            return stats, repair_events
         payload = dict(reindex_runner(changed, deleted, stop_event) or {})
         stats = payload.get('stats')
         events = payload.get('events')
