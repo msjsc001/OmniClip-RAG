@@ -1528,6 +1528,76 @@ class QtUiTests(unittest.TestCase):
             workspace.deleteLater()
             app.processEvents()
 
+    def test_watch_progress_events_explain_offline_backlog_and_return_to_running(self) -> None:
+        app = get_app()
+        theme = build_theme('light', 100)
+        vault = TEST_ROOT / 'watch_progress_vault'
+        vault.mkdir(parents=True, exist_ok=True)
+        paths = ensure_data_paths(str(TEST_ROOT / 'watch_progress_data'), str(vault))
+        config = AppConfig(vault_path=str(vault), data_root=str(paths.global_root))
+        workspace = ConfigWorkspace(config=config, paths=paths, language_code='zh-CN', theme=theme)
+        statuses: list[str] = []
+        workspace.statusMessageChanged.connect(statuses.append)
+        normalized = str(vault.resolve())
+        try:
+            with patch.object(workspace, '_append_log') as append_log:
+                workspace._on_watch_updated_for_vault(
+                    normalized,
+                    {
+                        'stats': {},
+                        'note_only': True,
+                        'events': [
+                            {
+                                'kind': 'reconcile_queued',
+                                'changed': 8,
+                                'deleted': 2,
+                                'total': 10,
+                            },
+                            {
+                                'kind': 'batch_started',
+                                'source': 'reconcile',
+                                'changed': 3,
+                                'deleted': 1,
+                                'total_pending': 6,
+                            },
+                            {
+                                'kind': 'backlog_progress',
+                                'live_pending': 0,
+                                'reconcile_pending': 6,
+                                'repair_pending': False,
+                                'eta_tracked': True,
+                                'eta_completed': 4,
+                                'eta_total': 10,
+                                'eta_remaining': 6,
+                                'eta_seconds': 12,
+                                'eta_samples': 2,
+                            },
+                            {
+                                'kind': 'backlog_progress',
+                                'live_pending': 0,
+                                'reconcile_pending': 0,
+                                'repair_pending': False,
+                                'eta_tracked': True,
+                                'eta_completed': 10,
+                                'eta_total': 10,
+                                'eta_remaining': 0,
+                                'eta_elapsed_seconds': 25,
+                            },
+                        ],
+                    },
+                )
+
+            log_text = '\n'.join(str(call.args[0]) for call in append_log.call_args_list)
+            self.assertIn('软件关闭期间的变动', log_text)
+            self.assertIn('离线补偿', log_text)
+            self.assertIn('动态预计还需', log_text)
+            self.assertIn('处理完成', log_text)
+            self.assertIn(text('zh-CN', 'status_watch_processing'), statuses)
+            self.assertEqual(statuses[-1], text('zh-CN', 'status_watch_running'))
+        finally:
+            workspace.deleteLater()
+            app.processEvents()
+
     def test_config_workspace_index_chip_reads_markdown_index_state_from_disk(self) -> None:
         app = get_app()
         theme = build_theme('light', 100)

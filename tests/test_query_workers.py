@@ -34,10 +34,97 @@ from omniclip_rag.query_subprocess import (
     write_json_atomic,
 )
 from omniclip_rag.service import OmniClipService
-from omniclip_rag.ui_next_qt.workers import QueryWorker, WatchWorker
+from omniclip_rag.ui_next_qt.workers import (
+    QueryWorker,
+    WatchWorker,
+    _FairWatchReindexGate,
+)
 
 
 class MultiVaultQueryWorkerTests(unittest.TestCase):
+    def test_watch_reindex_gate_serves_waiting_vaults_in_fifo_order(self) -> None:
+        gate = _FairWatchReindexGate()
+        stop_event = threading.Event()
+        self.assertTrue(gate.acquire(stop_event))
+        order: list[str] = []
+
+        def wait_for_turn(name: str) -> None:
+            self.assertTrue(gate.acquire(stop_event))
+            order.append(name)
+            gate.release()
+
+        first = threading.Thread(target=wait_for_turn, args=('first',))
+        second = threading.Thread(target=wait_for_turn, args=('second',))
+        first.start()
+        deadline = time.monotonic() + 2.0
+        while len(gate._queue) < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        second.start()
+        deadline = time.monotonic() + 2.0
+        while len(gate._queue) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        gate.release()
+        first.join(timeout=2.0)
+        second.join(timeout=2.0)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(order, ['first', 'second'])
+
+    def test_watch_reindex_gate_removes_cancelled_waiter(self) -> None:
+        gate = _FairWatchReindexGate()
+        holder_stop = threading.Event()
+        waiter_stop = threading.Event()
+        self.assertTrue(gate.acquire(holder_stop))
+        acquired: list[bool] = []
+
+        waiter = threading.Thread(
+            target=lambda: acquired.append(gate.acquire(waiter_stop)),
+        )
+        waiter.start()
+        deadline = time.monotonic() + 2.0
+        while len(gate._queue) < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        waiter_stop.set()
+        waiter.join(timeout=2.0)
+        gate.release()
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(acquired, [False])
+        self.assertEqual(len(gate._queue), 0)
+
+    def test_watch_reindex_gate_balances_repeated_turns_between_two_vaults(self) -> None:
+        gate = _FairWatchReindexGate()
+        stop_event = threading.Event()
+        self.assertTrue(gate.acquire(stop_event))
+        order: list[str] = []
+
+        def run_vault(name: str) -> None:
+            for _ in range(4):
+                self.assertTrue(gate.acquire(stop_event))
+                order.append(name)
+                time.sleep(0.005)
+                gate.release()
+
+        vault_a = threading.Thread(target=run_vault, args=('a',))
+        vault_b = threading.Thread(target=run_vault, args=('b',))
+        vault_a.start()
+        vault_b.start()
+        deadline = time.monotonic() + 2.0
+        while len(gate._queue) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        gate.release()
+        vault_a.join(timeout=3.0)
+        vault_b.join(timeout=3.0)
+
+        self.assertFalse(vault_a.is_alive())
+        self.assertFalse(vault_b.is_alive())
+        self.assertEqual(len(order), 8)
+        self.assertEqual(order.count('a'), 4)
+        self.assertEqual(order.count('b'), 4)
+        self.assertTrue(all(left != right for left, right in zip(order, order[1:])))
+
     def test_watch_worker_stop_waits_for_thread_and_keeps_monitor_lightweight(self) -> None:
         entered = threading.Event()
         close_release_values: list[bool] = []
