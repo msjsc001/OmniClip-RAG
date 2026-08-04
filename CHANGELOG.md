@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## V0.5.5 - 2026-08-04
+
+### Changed
+
+- Updated the public Chinese product name to `凯露恩` across the desktop UI, repository documentation, release notes, website accessibility metadata, and Wiki copy.
+- Updated copyright, repository-owner references, and legacy MCP migration wording to the canonical `EllisMorrow` identity while preserving stable data contracts and MCP tool IDs.
+- Updated package, Windows, MCP, MCPB, Registry, setup examples, and release metadata to `0.5.5`.
+- Kept the self-updating GitHub Release badge as the single README version indicator and aligned its regression coverage across both README files.
+
+### Compatibility
+
+- Existing knowledge bases, indexes, Runtime components, model caches, configuration, and UI settings remain compatible.
+- The Python package remains `omniclip_rag`, and the MCP tool IDs remain `omniclip.status` and `omniclip.search`.
+- MCPB-aware clients upgrading from a pre-Caelune package still require the documented one-time removal of the legacy extension before installing the current package identity.
+
 ## V0.5.4 - 2026-08-03
 
 ### Added
@@ -35,7 +50,7 @@
 
 ### Changed
 
-- Renamed the public English product identity from `OmniClip RAG` to `Caelune` and the Chinese product name from `方寸引` to `星野`.
+- Renamed the public English product identity from `OmniClip RAG` to `Caelune` and the Chinese product name from `方寸引` to `凯露恩`.
 - Renamed the Windows desktop and MCP executables, release archives, package metadata, website, documentation, and current MCP Registry metadata to the Caelune identity.
 - Changed fresh installations to use `%APPDATA%\Caelune-default` and `%APPDATA%\Caelune\bootstrap.json`.
 - Added the public `CAELUNE_DATA_ROOT`, `CAELUNE_BOOTSTRAP_PATH`, and `CAELUNE_RUNTIME_ROOT` environment-variable names.
@@ -169,7 +184,7 @@
 - Changed visible app/package/release metadata to `v0.4.9` across the desktop app, MCP line, setup examples, release notes, and local packaging metadata.
 - Changed startup scheduling so Runtime detection finishes before the initial workspace snapshot, followed by staggered Markdown, extension-source, and Tika refreshes.
 - Changed full Tika format-catalog parsing to run only when the format picker is opened instead of during first-window initialization.
-- Changed public GitHub links to the canonical `EllisMorrow/OmniClip-RAG` repository while retaining the existing `io.github.msjsc001/omniclip-rag-mcp` Registry identity for version continuity.
+- Changed public GitHub links to the canonical `EllisMorrow/OmniClip-RAG` repository while retaining the then-existing Registry identity for version continuity.
 - Changed the Windows application icon to a simpler flat ring-and-spark design that remains recognizable at small sizes.
 
 ### Fixed
@@ -302,7 +317,7 @@
 - Added a unified `active_data_root` bootstrap model so the current environment root now governs config, logs, cache, models, main Runtime, Tika Runtime, and workspace state together.
 - Added a restricted GUI recovery shell for unavailable or invalid data roots, with plain-language recovery guidance, saved-root switching, and explicit retry/switch flows.
 - Added classic UI themes (`Sepia`, `Nord`, `Solarized Light`, `Solarized Dark`, `Graphite`), compact query-desk collapse, and refreshed icon assets across runtime and packaged builds.
-- Added [RELEASE_NOTES_v0.4.2](releases/RELEASE_NOTES_v0.4.2.md) and updated top-level docs to expose the public website at [msjsc001.github.io/OmniClip-RAG](https://msjsc001.github.io/OmniClip-RAG/).
+- Added [RELEASE_NOTES_v0.4.2](releases/RELEASE_NOTES_v0.4.2.md) and updated top-level docs to expose the public GitHub Pages website.
 
 ### Changed
 

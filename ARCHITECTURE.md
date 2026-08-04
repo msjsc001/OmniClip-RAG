@@ -2,7 +2,7 @@
 
 ## Product Identity And Rename Compatibility
 
-The current public product name is **Caelune**; the Chinese product name is **星野**. Public UI, executable names, release artifacts, documentation, website metadata, and MCP display metadata use the new brand.
+The current public product name is **Caelune**; the Chinese product name is **凯露恩**. Public UI, executable names, release artifacts, documentation, website metadata, and MCP display metadata use the new brand.
 
 Compatibility identifiers remain deliberately stable where changing them would disconnect existing users from their data or integrations:
 
@@ -11,7 +11,7 @@ Compatibility identifiers remain deliberately stable where changing them would d
 - `OMNICLIP_*` data/runtime overrides remain accepted as legacy aliases for `CAELUNE_*`,
 - `.omniclip-root.json`, `omniclip.sqlite3`, and existing log names remain valid on-disk contracts,
 - MCP tool IDs remain `omniclip.status` and `omniclip.search`,
-- the installed MCPB package identity remains `io.github.msjsc001/omniclip-rag-mcp` so upgrades do not become duplicate installations.
+- the current MCPB package identity is `io.github.EllisMorrow/caelune-mcp`; users upgrading from a pre-Caelune package perform a one-time remove and reinstall instead of carrying the retired package identity forward.
 
 Fresh installations use `%APPDATA%\Caelune\bootstrap.json` and `%APPDATA%\Caelune-default` by default. Startup checks the new pointer first, then the legacy pointer and legacy environment before creating a new root.
 

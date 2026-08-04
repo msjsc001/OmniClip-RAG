@@ -20,7 +20,7 @@ This version is not about adding a second new subsystem. It is about making the 
   - Graphite
 - Unified the app icon chain so the runtime assets, packaged Windows icon resources, and GUI shell point at the same icon source.
 - Published the project website on GitHub Pages:
-  - [https://msjsc001.github.io/OmniClip-RAG/](https://msjsc001.github.io/OmniClip-RAG/)
+  - [https://ellismorrow.github.io/Caelune/](https://ellismorrow.github.io/Caelune/)
 
 ## Release Assets
 
