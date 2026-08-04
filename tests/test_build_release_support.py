@@ -124,14 +124,15 @@ class BuildReleaseSupportTests(unittest.TestCase):
         )
         self.assertIn(f'/v{__version__}/', server['packages'][0]['identifier'])
         self.assertIn(f'-v{__version__}.mcpb', server['packages'][0]['identifier'])
-        self.assertIn(
-            'github/v/release/EllisMorrow/Caelune',
-            (ROOT / 'README.md').read_text(encoding='utf-8'),
-        )
         for readme_name in ('README.md', 'README.zh-CN.md'):
+            readme = (ROOT / readme_name).read_text(encoding='utf-8')
             self.assertIn(
+                'github/v/release/EllisMorrow/Caelune',
+                readme,
+            )
+            self.assertNotIn(
                 f'version-v{__version__}-',
-                (ROOT / readme_name).read_text(encoding='utf-8'),
+                readme,
             )
 
 

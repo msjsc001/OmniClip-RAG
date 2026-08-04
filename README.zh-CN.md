@@ -2,7 +2,7 @@
 
 <img src="docs/assets/social-preview.png" alt="Caelune——私人知识，本地检索" width="900" />
 
-# Caelune（星野）
+# Caelune（凯露恩）
 
 **面向 Windows 的本地优先知识检索工具与只读 MCP Server，用来搜索私有 Markdown、PDF 和 Tika 扩展资料库。**
 
@@ -21,14 +21,14 @@
 
 </div>
 
-## 星野能做什么
+## 凯露恩能做什么
 
-星野会在你的电脑上为现有知识资料建立本地索引，把精确文字检索、结构信号、语义向量检索、可选重排和来源明确的上下文组装结合起来。
+凯露恩会在你的电脑上为现有知识资料建立本地索引，把精确文字检索、结构信号、语义向量检索、可选重排和来源明确的上下文组装结合起来。
 
 桌面版负责管理数据目录、Runtime、模型、知识库建库、热监听、查询和结果查看。可选的 MCP Server 则通过两个只读工具，把同一套检索能力提供给支持 MCP 的 AI 客户端。
 
 <div align="center">
-  <img src="docs/assets/caelune-local-search-flow.png" alt="星野从本地私人文档中检索并排序带来源的结果，用户可直接查看，也可选择性提供给 AI" width="900" />
+  <img src="docs/assets/caelune-local-search-flow.png" alt="凯露恩从本地私人文档中检索并排序带来源的结果，用户可直接查看，也可选择性提供给 AI" width="900" />
   <br />
   <sub>在本地查询 Markdown、PDF 和其他文档，直接查看带来源的结果，或将选定证据提供给 AI。</sub>
 </div>
@@ -49,7 +49,7 @@
 
 <div align="center">
   <a href="docs/assets/readme-query-console-zh-CN.png">
-    <img src="docs/assets/readme-query-console-zh-CN.png" alt="星野查询台界面" width="100%" />
+    <img src="docs/assets/readme-query-console-zh-CN.png" alt="凯露恩查询台界面" width="100%" />
   </a>
   <br />
   <sub>查询台 · 点击图片可查看原始尺寸</sub>
@@ -59,7 +59,7 @@
 
 <div align="center">
   <a href="docs/assets/readme-results-details-zh-CN.png">
-    <img src="docs/assets/readme-results-details-zh-CN.png" alt="星野结果与详情界面" width="100%" />
+    <img src="docs/assets/readme-results-details-zh-CN.png" alt="凯露恩结果与详情界面" width="100%" />
   </a>
   <br />
   <sub>结果与详情 · 点击图片可查看原始尺寸</sub>
@@ -90,7 +90,7 @@
 
 ## 隐私边界
 
-星野是“本地优先”软件，但不对所有可能的使用方式作绝对离线承诺。
+凯露恩是“本地优先”软件，但不对所有可能的使用方式作绝对离线承诺。
 
 - 建库时只读取来源文件；正常建库和移除来源操作不会删除或改写原始笔记和文档。
 - 只有在用户主动下载 Runtime、模型、Java 或 Tika 等组件时才需要网络。
@@ -190,8 +190,8 @@ python launcher_mcp.py --mcp-selfcheck
 
 ## 许可证与第三方软件
 
-星野采用 [MIT License](LICENSE)。项目使用了 PySide6、SQLite、LanceDB、Apache Arrow、PyTorch、sentence-transformers、Transformers、BGE 模型、PyPDF、Apache Tika、Eclipse Temurin、watchdog、PyInstaller 和 Model Context Protocol SDK 等开源项目。
+凯露恩采用 [MIT License](LICENSE)。项目使用了 PySide6、SQLite、LanceDB、Apache Arrow、PyTorch、sentence-transformers、Transformers、BGE 模型、PyPDF、Apache Tika、Eclipse Temurin、watchdog、PyInstaller 和 Model Context Protocol SDK 等开源项目。
 
 仓库级许可和分发说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-> 星野及其检索结果不提供任何担保。请核对重要结果、保留资料备份，也不要把检索内容或下游 AI 输出作为医疗、法律、金融、安全关键或其他高风险决策的唯一依据。
+> 凯露恩及其检索结果不提供任何担保。请核对重要结果、保留资料备份，也不要把检索内容或下游 AI 输出作为医疗、法律、金融、安全关键或其他高风险决策的唯一依据。

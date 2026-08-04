@@ -1,8 +1,8 @@
-# Caelune / 星野 v0.5.0 Release Notes
+# Caelune / 凯露恩 v0.5.0 Release Notes
 
 ## Release Status
 
-`v0.5.0` is the product-identity migration release from OmniClip RAG / 方寸引 to **Caelune / 星野**.
+`v0.5.0` is the product-identity migration release from OmniClip RAG / 方寸引 to **Caelune / 凯露恩**.
 
 ## Release Focus
 
@@ -11,7 +11,7 @@ This release gives the desktop app, Windows executables, MCP package, documentat
 ## Highlights
 
 - The desktop title and public English product name are now **Caelune**.
-- The Chinese product name is now **星野**.
+- The Chinese product name is now **凯露恩**.
 - New Windows executables are named `Caelune.exe` and `Caelune-MCP.exe`.
 - Fresh installations use `%APPDATA%\Caelune-default` and a `%APPDATA%\Caelune\bootstrap.json` pointer.
 - New configuration overrides use the `CAELUNE_*` prefix.
@@ -23,7 +23,7 @@ This release gives the desktop app, Windows executables, MCP package, documentat
 - Existing bootstrap pointers, Runtime directories, and `OMNICLIP_*` environment overrides remain supported as legacy aliases.
 - The Python import package remains `omniclip_rag` to avoid breaking internal imports and integrations.
 - MCP tool IDs remain `omniclip.status` and `omniclip.search` so existing AI-client configurations do not break.
-- The MCPB package identity is now `io.github.EllisMorrow/caelune-mcp`; users of the old `io.github.msjsc001/omniclip-rag-mcp` MCPB should remove it once before installing the renamed package.
+- The MCPB package identity is now `io.github.EllisMorrow/caelune-mcp`; users of the pre-Caelune legacy MCPB should remove it once before installing the renamed package.
 - Stored SQLite, vector-index, marker, and log filenames are not rewritten or migrated destructively.
 
 ## Release Assets

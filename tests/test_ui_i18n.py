@@ -17,7 +17,7 @@ class UiI18nTests(unittest.TestCase):
 
     def test_text_catalog_returns_translated_strings(self) -> None:
         self.assertIn('Caelune', text('en', 'title'))
-        self.assertIn('星野', text('zh-CN', 'title'))
+        self.assertIn('凯露恩', text('zh-CN', 'title'))
         self.assertIn('Caelune', text('zh-CN', 'title'))
 
     def test_chinese_and_english_catalogs_have_matching_keys(self) -> None:

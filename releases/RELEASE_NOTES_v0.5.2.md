@@ -1,4 +1,4 @@
-# Caelune / 星野 v0.5.2 Release Notes
+# Caelune / 凯露恩 v0.5.2 Release Notes
 
 ## Release Status
 

@@ -34,7 +34,7 @@ This release does not add MCP tools or change query semantics.
 
 - The desktop ZIP, MCP ZIP, MCPB package, and Registry metadata share the same `v0.4.9` version.
 - Public repository and release URLs now use the canonical `EllisMorrow/OmniClip-RAG` path.
-- The Registry server name remains `io.github.msjsc001/omniclip-rag-mcp` so this version updates the existing official entry instead of creating a duplicate server identity.
+- The Registry server name remains unchanged in this release so it updates the existing official entry instead of creating a duplicate server identity.
 
 ## Validation
 

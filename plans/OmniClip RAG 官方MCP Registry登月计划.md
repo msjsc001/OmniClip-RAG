@@ -8,7 +8,7 @@
 
 ## 核心决策
 
-- Registry 名称固定为：`io.github.msjsc001/omniclip-rag-mcp`
+- Registry 名称固定为：`io.github.EllisMorrow/omniclip-rag-mcp`
 - 标题固定为：`OmniClip RAG`
 - 主描述固定为：
   - `Read-only local-first MCP server for private Markdown, PDF, and Tika-backed search on Windows.`

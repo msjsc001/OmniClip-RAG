@@ -1,6 +1,6 @@
 # Runtime Setup
 
-The official Windows build of Caelune / 星野 intentionally stays lean.
+The official Windows build of Caelune / 凯露恩 intentionally stays lean.
 It does **not** bundle heavyweight optional local-AI runtimes such as `torch`, `sentence-transformers`, `lancedb`, `pyarrow`, or `onnxruntime` into the main EXE package.
 
 Why:

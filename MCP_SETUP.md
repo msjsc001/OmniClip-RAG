@@ -148,7 +148,7 @@ The current public discovery identity is:
 
 - `io.github.EllisMorrow/caelune-mcp`
 
-The MCPB manifest uses the same `io.github.EllisMorrow/caelune-mcp` identity. If an MCPB-aware client previously installed `io.github.msjsc001/omniclip-rag-mcp`, remove that old extension once before installing the Caelune package. Existing MCP tool calls remain compatible because `omniclip.status` and `omniclip.search` are unchanged.
+The MCPB manifest uses the same `io.github.EllisMorrow/caelune-mcp` identity. If an MCPB-aware client previously installed a pre-Caelune legacy package, remove that old extension once before installing the Caelune package. Existing MCP tool calls remain compatible because `omniclip.status` and `omniclip.search` are unchanged.
 
 The standard publishable artifact is:
 
@@ -200,7 +200,7 @@ Use these values when adding a new MCP server in Jan.ai:
 Example:
 
 ```text
-D:\Apps\Caelune\dist\Caelune-MCP-v0.5.4\Caelune-MCP.exe
+D:\Apps\Caelune\dist\Caelune-MCP-v0.5.5\Caelune-MCP.exe
 ```
 
 ## OpenClaw Reference Setup
@@ -220,7 +220,7 @@ Add or merge an `mcpServers` block like this:
   "mcpServers": {
     "caelune": {
       "transport": "stdio",
-      "command": "D:\\Apps\\Caelune\\dist\\Caelune-MCP-v0.5.4\\Caelune-MCP.exe",
+      "command": "D:\\Apps\\Caelune\\dist\\Caelune-MCP-v0.5.5\\Caelune-MCP.exe",
       "args": []
     }
   }
