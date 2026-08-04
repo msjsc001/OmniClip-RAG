@@ -6,12 +6,11 @@
 
 **A local-first Windows desktop app and read-only MCP server for searching private Markdown, PDF, and Tika-backed knowledge bases.**
 
-[![Latest Release](https://img.shields.io/github/v/release/EllisMorrow/Caelune?style=flat-square&label=release)](https://github.com/EllisMorrow/Caelune/releases/latest)
-[![Version](https://img.shields.io/badge/version-v0.5.4-0b7285?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/tag/v0.5.4)
+[![Latest Release](https://img.shields.io/github/v/release/EllisMorrow/Caelune?style=flat-square&label=release&color=0b7285)](https://github.com/EllisMorrow/Caelune/releases/latest)
 [![Windows](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/latest)
 [![Local-first](https://img.shields.io/badge/local--first-yes-1d7467?style=flat-square)](#privacy-boundary)
-[![Downloads](https://img.shields.io/github/downloads/EllisMorrow/Caelune/total?label=downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/Caelune/releases)
 [![MCP Registry](https://img.shields.io/badge/MCP_Registry-listed-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.EllisMorrow/caelune-mcp)
+[![Downloads](https://img.shields.io/github/downloads/EllisMorrow/Caelune/total?label=downloads&color=5c677d&style=flat-square)](https://github.com/EllisMorrow/Caelune/releases)
 [![License](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [Download Windows app](https://github.com/EllisMorrow/Caelune/releases/latest) ·

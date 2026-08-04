@@ -6,12 +6,11 @@
 
 **面向 Windows 的本地优先知识检索工具与只读 MCP Server，用来搜索私有 Markdown、PDF 和 Tika 扩展资料库。**
 
-[![最新版本](https://img.shields.io/github/v/release/EllisMorrow/Caelune?style=flat-square&label=release)](https://github.com/EllisMorrow/Caelune/releases/latest)
-[![版本](https://img.shields.io/badge/version-v0.5.4-0b7285?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/tag/v0.5.4)
+[![最新版本](https://img.shields.io/github/v/release/EllisMorrow/Caelune?style=flat-square&label=release&color=0b7285)](https://github.com/EllisMorrow/Caelune/releases/latest)
 [![Windows](https://img.shields.io/badge/platform-Windows-15584f?style=flat-square)](https://github.com/EllisMorrow/Caelune/releases/latest)
 [![本地优先](https://img.shields.io/badge/local--first-yes-1d7467?style=flat-square)](#隐私边界)
-[![下载量](https://img.shields.io/github/downloads/EllisMorrow/Caelune/total?label=downloads&color=brightgreen&style=flat-square)](https://github.com/EllisMorrow/Caelune/releases)
 [![MCP Registry](https://img.shields.io/badge/MCP_Registry-listed-1f6feb?style=flat-square)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.EllisMorrow/caelune-mcp)
+[![下载量](https://img.shields.io/github/downloads/EllisMorrow/Caelune/total?label=downloads&color=5c677d&style=flat-square)](https://github.com/EllisMorrow/Caelune/releases)
 [![许可证](https://img.shields.io/badge/license-MIT-2f7d32?style=flat-square)](LICENSE)
 
 [下载 Windows 版](https://github.com/EllisMorrow/Caelune/releases/latest) ·
