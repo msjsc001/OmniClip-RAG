@@ -97,6 +97,50 @@ class RerankerTests(unittest.TestCase):
         self.assertEqual(outcome.resolved_device, 'cpu')
         self.assertEqual(len(reranked), 2)
 
+    def test_cross_encoder_reranker_preserves_extension_source_metadata(self) -> None:
+        paths = ensure_data_paths(str(TEST_DATA_ROOT / 'extension_metadata'))
+        model_dir = paths.cache_dir / 'models' / 'BAAI__bge-reranker-v2-m3'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / 'config.json').write_text('{}', encoding='utf-8')
+        (model_dir / 'pytorch_model.bin').write_text('x', encoding='utf-8')
+        config = AppConfig(vault_path='.', data_root=str(paths.global_root), reranker_enabled=True, vector_device='cpu')
+        reranker = CrossEncoderReranker(config, paths, loader=lambda _local_dir, _device: _SuccessfulFakeModel('cpu'))
+        hits = [
+            SearchHit(
+                score=40.0,
+                title='PDF guide',
+                anchor='Page 3',
+                source_path='guide.pdf',
+                rendered_text='PDF content',
+                chunk_id='pdf-1',
+                source_family='pdf',
+                source_kind='pdf',
+                source_label='PDF · guide.pdf · Page 3',
+                page_no=3,
+            ),
+            SearchHit(
+                score=30.0,
+                title='DOCX guide',
+                anchor='Overview',
+                source_path='guide.docx',
+                rendered_text='DOCX content',
+                chunk_id='tika-1',
+                source_family='tika',
+                source_kind='docx',
+                source_label='DOCX(Tika) · guide.docx',
+            ),
+        ]
+
+        reranked, outcome = reranker.rerank('test', hits, 2)
+
+        self.assertTrue(outcome.applied)
+        metadata_by_chunk = {
+            hit.chunk_id: (hit.source_family, hit.source_kind, hit.source_label, hit.page_no)
+            for hit in reranked
+        }
+        self.assertEqual(metadata_by_chunk['pdf-1'], ('pdf', 'pdf', 'PDF · guide.pdf · Page 3', 3))
+        self.assertEqual(metadata_by_chunk['tika-1'], ('tika', 'docx', 'DOCX(Tika) · guide.docx', 0))
+
     def test_reranker_model_load_oom_does_not_retry_cuda_for_smaller_batches(self) -> None:
         paths = ensure_data_paths(str(TEST_DATA_ROOT / 'loader_oom'))
         model_dir = paths.cache_dir / 'models' / 'BAAI__bge-reranker-v2-m3'

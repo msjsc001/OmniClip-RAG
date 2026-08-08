@@ -7,12 +7,12 @@
     "url": "https://github.com/EllisMorrow/Caelune",
     "source": "github"
   },
-  "version": "0.5.5",
+  "version": "0.5.6",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/EllisMorrow/Caelune/releases/download/v0.5.5/caelune-mcp-win-x64-v0.5.5.mcpb",
-      "fileSha256": "e7fc1ece8a5886f5dfb7212164db81537568d1f15f6b3e626141e96f5a46776d",
+      "identifier": "https://github.com/EllisMorrow/Caelune/releases/download/v0.5.6/caelune-mcp-win-x64-v0.5.6.mcpb",
+      "fileSha256": "328faafd5926d8bd2741f0ed7811659f28b30b6189c4a24f92e86798be8ab9cf",
       "transport": {
         "type": "stdio"
       }

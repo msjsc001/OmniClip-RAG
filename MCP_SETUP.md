@@ -200,7 +200,7 @@ Use these values when adding a new MCP server in Jan.ai:
 Example:
 
 ```text
-D:\Apps\Caelune\dist\Caelune-MCP-v0.5.5\Caelune-MCP.exe
+D:\Apps\Caelune\dist\Caelune-MCP-v0.5.6\Caelune-MCP.exe
 ```
 
 ## OpenClaw Reference Setup
@@ -220,7 +220,7 @@ Add or merge an `mcpServers` block like this:
   "mcpServers": {
     "caelune": {
       "transport": "stdio",
-      "command": "D:\\Apps\\Caelune\\dist\\Caelune-MCP-v0.5.5\\Caelune-MCP.exe",
+      "command": "D:\\Apps\\Caelune\\dist\\Caelune-MCP-v0.5.6\\Caelune-MCP.exe",
       "args": []
     }
   }
