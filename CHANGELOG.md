@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## V0.5.6 - 2026-08-08
+
+### Fixed
+
+- Fixed cross-encoder reranking dropping PDF and Tika source metadata while replacing relevance scores, so reranked results retain their source family, file kind, display label, and PDF page number.
+
+### Compatibility
+
+- Retrieval scoring, ranking weights, model selection, and index formats are unchanged.
+- Existing knowledge bases, indexes, Runtime components, model caches, configuration, and UI settings remain compatible.
+- No model redownload, Runtime reinstall, or index rebuild is required solely for this update.
+
 ## V0.5.5 - 2026-08-04
 
 ### Changed

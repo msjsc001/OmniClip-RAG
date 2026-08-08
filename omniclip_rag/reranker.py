@@ -6,7 +6,7 @@ import sys
 import time
 import weakref
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -423,19 +423,9 @@ class CrossEncoderReranker:
         rescored: list[SearchHit] = []
         for hit, rerank_score in zip(prefix, normalized_scores, strict=True):
             combined = hit.score * 0.35 + rerank_score * 0.65
-            rescored.append(
-                SearchHit(
-                    score=max(0.0, min(combined, 100.0)),
-                    title=hit.title,
-                    anchor=hit.anchor,
-                    source_path=hit.source_path,
-                    rendered_text=hit.rendered_text,
-                    chunk_id=hit.chunk_id,
-                    display_text=hit.display_text,
-                    preview_text=hit.preview_text,
-                    reason=hit.reason,
-                )
-            )
+            # Reranking changes relevance only. Preserve source identity so PDF
+            # and Tika hits keep their labels, kinds, and page numbers.
+            rescored.append(replace(hit, score=max(0.0, min(combined, 100.0))))
         rescored.sort(key=lambda item: item.score, reverse=True)
         outcome = RerankOutcome(
             enabled=True,
